@@ -3,7 +3,8 @@ import csv
 import datetime
 import sqlite3
 
-FD_DATE_FORMAT = "%d/%m/%y"  # dd/mm/yy format used by football-data.co.uk
+# **FIX**: Changed from %y (two-digit year) to %Y (four-digit year)
+FD_DATE_FORMAT = "%d/%m/%Y"
 
 def _parse_date(s: str) -> str:
     """Parses the date string and normalizes it to YYYY-MM-DD."""
