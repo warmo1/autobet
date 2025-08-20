@@ -1,56 +1,92 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>Suggestions</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Betting Suggestions</title>
+  <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
-    .nav { margin-bottom: 1rem; }
-    .nav a { margin-right: 1rem; text-decoration: none; color: #0366d6; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid #eee; padding: 0.5rem; text-align: left; }
-    th { background: #fafafa; }
-    .muted { color: #666; }
-    form.inline { display: inline-flex; gap: .5rem; align-items: center; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #f3f4f6;
+    }
+    .card {
+        background-color: white;
+        border-radius: 0.75rem;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+    }
   </style>
 </head>
-<body>
-  <div class="nav">
-    <a href="/">Dashboard</a>
-    <a href="/suggestions">Suggestions</a>
-    <a href="/bets">Bets</a>
+<body class="text-gray-800">
+  <div class="container mx-auto p-4 sm:p-6 lg:p-8">
+    <nav class="bg-white p-4 rounded-lg shadow-md mb-8 flex items-center justify-between">
+      <h1 class="text-2xl font-bold text-gray-900">Sports Bot</h1>
+      <div class="space-x-4">
+        <a href="/" class="text-blue-600 hover:text-blue-800 font-medium">Dashboard</a>
+        <a href="/suggestions" class="text-blue-800 font-bold border-b-2 border-blue-800 pb-1">Suggestions</a>
+        <a href="/bets" class="text-blue-600 hover:text-blue-800 font-medium">Bets</a>
+      </div>
+    </nav>
+
+    <div class="card p-6">
+      <h2 class="text-2xl font-bold mb-6 text-gray-900">AI-Powered Suggestions</h2>
+      <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-gray-200">
+          <thead class="bg-gray-50">
+            <tr>
+              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Match</th>
+              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Market</th>
+              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Selection</th>
+              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Prob</th>
+              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Odds</th>
+              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Edge</th>
+              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Stake</th>
+              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reasoning</th>
+              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+            </tr>
+          </thead>
+          <tbody class="bg-white divide-y divide-gray-200">
+            {% if suggestions %}
+              {% for s in suggestions %}
+                <tr>
+                  <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{ s.date }}</td>
+                  <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{{ s.home }} vs {{ s.away }}</td>
+                  <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{{ s.market }}</td>
+                  <td class="px-6 py-4 whitespace-nowrap">
+                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full 
+                      {% if s.side == 'back' %} bg-blue-100 text-blue-800 {% else %} bg-pink-100 text-pink-800 {% endif %}">
+                      {{ s.side | upper }} {{ s.selection }}
+                    </span>
+                  </td>
+                  <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{{ "%.2f"|format(s.model_prob) }}</td>
+                  <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{{ s.market_odds }}</td>
+                  <td class="px-6 py-4 whitespace-nowrap text-sm font-semibold {% if s.edge > 0 %} text-green-600 {% else %} text-red-600 {% endif %}">{{ "%.2f"|format(s.edge) }}</td>
+                  <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">£{{ s.stake }}</td>
+                  <td class="px-6 py-4 text-sm text-gray-600 max-w-xs truncate" title="{{ s.note }}">{{ s.note | default('N/A', true) }}</td>
+                  <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                    <form method="post" action="/paper_bet" class="flex items-center space-x-2">
+                      <input type="hidden" name="symbol" value="{{ s.home }} vs {{ s.away }} ({{ s.selection }})">
+                      <input type="hidden" name="odds" value="{{ s.market_odds or 2.0 }}">
+                      <input type="number" name="stake" step="0.1" min="0.5" value="{{ s.stake or 1.0 }}" class="w-20 p-1 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                      <input type="password" name="token" placeholder="Token" class="w-24 p-1 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                      <button type="submit" class="px-3 py-1.5 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                        Bet
+                      </button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+            {% else %}
+              <tr>
+                <td colspan="10" class="px-6 py-4 whitespace-nowrap text-sm text-center text-gray-500">No suggestions available. Try running the suggestion engine.</td>
+              </tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
   </div>
-  <h1>Suggestions</h1>
-  <table>
-    <thead><tr><th>Date</th><th>Match</th><th>Market</th><th>Sel</th><th>Side</th><th>Prob</th><th>Odds</th><th>Edge</th><th>Stake</th><th>Action</th></tr></thead>
-    <tbody>
-    {% if suggestions %}
-      {% for s in suggestions %}
-        <tr>
-          <td>{{ s.date }}</td>
-          <td>{{ s.home }} vs {{ s.away }}</td>
-          <td>{{ s.market }}</td>
-          <td>{{ s.selection }}</td>
-          <td>{{ s.side }}</td>
-          <td>{{ "%.2f"|format(s.model_prob) }}</td>
-          <td>{{ s.market_odds }}</td>
-          <td>{{ "%.2f"|format(s.edge) }}</td>
-          <td>{{ s.stake }}</td>
-          <td>
-            <form class="inline" method="post" action="/paper_bet">
-              <input type="hidden" name="symbol" value="{{ s.home }} vs {{ s.away }} ({{ s.selection }})">
-              <input type="hidden" name="odds" value="{{ s.market_odds or 2.0 }}">
-              <input type="number" name="stake" step="0.1" min="0.5" value="{{ s.stake or 1.0 }}" style="width:6rem">
-              <input type="password" name="token" placeholder="admin token" style="width:10rem">
-              <button type="submit">Paper Bet</button>
-            </form>
-          </td>
-        </tr>
-      {% endfor %}
-    {% else %}
-      <tr><td colspan="10" class="muted">No suggestions yet.</td></tr>
-    {% endif %}
-    </tbody>
-  </table>
 </body>
 </html>
