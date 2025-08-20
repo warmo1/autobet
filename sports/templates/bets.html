@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Bets</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
+    .nav { margin-bottom: 1rem; }
+    .nav a { margin-right: 1rem; text-decoration: none; color: #0366d6; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #eee; padding: 0.5rem; text-align: left; }
+    th { background: #fafafa; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <div class="nav">
+    <a href="/">Dashboard</a>
+    <a href="/suggestions">Suggestions</a>
+    <a href="/bets">Bets</a>
+  </div>
+  <h1>Recent Paper Bets</h1>
+  <table>
+    <thead><tr><th>Time (UTC)</th><th>Match</th><th>Market</th><th>Side</th><th>Sel</th><th>Odds</th><th>Stake</th><th>Result</th><th>PnL</th></tr></thead>
+    <tbody>
+      {% if recent_bets %}
+        {% for b in recent_bets %}
+        <tr>
+          <td>{{ b.ts }}</td>
+          <td>{{ b.match }}</td>
+          <td>{{ b.market }}</td>
+          <td>{{ b.side }}</td>
+          <td>{{ b.selection }}</td>
+          <td>{{ b.odds }}</td>
+          <td>{{ b.stake }}</td>
+          <td>{{ b.result or "-" }}</td>
+          <td>{{ b.pnl if b.pnl is not none else "-" }}</td>
+        </tr>
+        {% endfor %}
+      {% else %}
+        <tr><td colspan="9" class="muted">No bets yet.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</body>
+</html>
