@@ -1,4 +1,5 @@
 import os
+import time
 from .config import cfg
 
 def summarise_news(items, max_chars=800):
@@ -23,10 +24,7 @@ def summarise_news(items, max_chars=800):
 def generate_suggestion(match_details: dict, model_probs: dict):
     """
     Analyzes a football match using an LLM to provide a betting suggestion and reasoning.
-
-    Args:
-        match_details: A dictionary with 'home' and 'away' team names.
-        model_probs: A dictionary with model probabilities for 'home', 'draw', 'away'.
+    Includes retry logic and robust error handling.
     """
     prompt = f"""
     **Task:** Analyze the upcoming football match and provide a concise betting insight.
@@ -50,23 +48,50 @@ def generate_suggestion(match_details: dict, model_probs: dict):
     **Your Analysis:**
     """
     
-    try:
-        if cfg.llm_provider == "openai":
-            from openai import OpenAI
-            client = OpenAI(api_key=cfg.openai_key)
-            response = client.chat.completions.create(
-                model=cfg.llm_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=150
-            )
-            return response.choices[0].message.content.strip()
-        else:
-            import google.generativeai as genai
-            genai.configure(api_key=cfg.gemini_key)
-            model = genai.GenerativeModel(cfg.llm_model)
-            response = model.generate_content(prompt)
-            return response.text.strip()
-    except Exception as e:
-        print(f"[LLM Error] Failed to generate suggestion: {e}")
-        return "LLM analysis could not be generated."
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            if cfg.llm_provider == "openai":
+                from openai import OpenAI
+                client = OpenAI(api_key=cfg.openai_key)
+                response = client.chat.completions.create(
+                    model=cfg.llm_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                    max_tokens=150
+                )
+                return response.choices[0].message.content.strip()
+            else:
+                import google.generativeai as genai
+                genai.configure(api_key=cfg.gemini_key)
+                
+                # Configure model with less strict safety settings to avoid blocking responses
+                safety_settings = [
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
+                ]
+                
+                model = genai.GenerativeModel(cfg.llm_model, safety_settings=safety_settings)
+                response = model.generate_content(prompt)
+                
+                # **Crucial Fix**: Check for valid content before accessing .text
+                # This handles cases where safety filters block the response.
+                if response.parts:
+                    return response.text.strip()
+                else:
+                    finish_reason = response.candidates[0].finish_reason if response.candidates else 'UNKNOWN'
+                    print(f"[LLM Warning] Received empty response from API. Finish reason: {finish_reason}. This might be due to safety filters.")
+                    return "AI analysis was blocked or returned empty."
+
+        except Exception as e:
+            print(f"[LLM Error] Attempt {attempt + 1}/{max_retries} failed: {e}")
+            # Retry on 500-series errors
+            if "500" in str(e) and attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s
+                continue
+            else:
+                return "LLM analysis could not be generated due to a persistent error."
+    
+    return "LLM analysis failed after multiple retries."
