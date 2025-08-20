@@ -1,42 +1,62 @@
-import os
+import asyncio
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from sports.db import get_conn, recent_suggestions
-from sports.config import cfg
-import pandas as pd
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from .config import cfg
+from .db import get_conn, init_schema, recent_suggestions
+
+# --- Command Handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello! I'm your sports betting bot. Use /daily_suggestion to get the latest suggestion.")
+    """Sends a welcome message when the /start command is issued."""
+    welcome_text = (
+        "Hello! I'm your sports betting bot. Here are the available commands:\n\n"
+        "/start - Show this welcome message\n"
+        "/daily_suggestion - Get the latest top betting suggestion"
+    )
+    await update.message.reply_text(welcome_text)
 
 async def daily_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetches and sends the most recent betting suggestion."""
+    print("[Telegram] Received /daily_suggestion command.")
     conn = get_conn(cfg.database_url)
-    suggestions = recent_suggestions(conn, limit=1)
-    if not suggestions.empty:
-        suggestion = suggestions.iloc[0]
-        message = f"""
-        **Daily Suggestion**
-        **Match:** {suggestion['home']} vs {suggestion['away']}
-        **Market:** {suggestion['market']}
-        **Selection:** {suggestion['selection']}
-        **Side:** {suggestion['side']}
-        **Odds:** {suggestion['market_odds']}
-        **Edge:** {suggestion['edge']:.2f}
-        **Stake:** {suggestion['stake']}
-        """
+    init_schema(conn)
+    suggestions_df = recent_suggestions(conn, limit=1)
+    
+    if not suggestions_df.empty:
+        suggestion = suggestions_df.iloc[0]
+        message = (
+            f"📈 **Daily Top Suggestion** 📈\n\n"
+            f"⚽️ **Match:** {suggestion['home']} vs {suggestion['away']}\n"
+            f"🗓️ **Date:** {suggestion['date']}\n\n"
+            f"**Market:** {suggestion['market']}\n"
+            f"**Selection:** {suggestion['selection'].capitalize()}\n"
+            f"**Side:** {suggestion['side'].upper()}\n\n"
+            f"**Model Probability:** {suggestion['model_prob']:.2%}\n"
+            f"**Market Odds:** {suggestion['market_odds']}\n"
+            f"**Edge:** {suggestion['edge']:.2%}\n"
+            f"**Suggested Stake:** £{suggestion['stake']}\n\n"
+            f"**AI Reasoning:**\n_{suggestion['note']}_"
+        )
         await update.message.reply_text(message, parse_mode='Markdown')
     else:
-        await update.message.reply_text("No suggestions available at the moment.")
+        await update.message.reply_text("Sorry, no suggestions are available at the moment. Please run the suggestion engine first.")
 
-def main():
+# --- Main Bot Function ---
+
+def run_bot():
+    """Initializes and runs the Telegram bot."""
+    if not cfg.telegram_token:
+        print("[Telegram Error] TELEGRAM_TOKEN is not set in your .env file. The bot cannot start.")
+        return
+
+    print("[Telegram] Starting bot...")
     application = ApplicationBuilder().token(cfg.telegram_token).build()
 
-    start_handler = CommandHandler('start', start)
-    suggestion_handler = CommandHandler('daily_suggestion', daily_suggestion)
+    # Register command handlers
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('daily_suggestion', daily_suggestion))
 
-    application.add_handler(start_handler)
-    application.add_handler(suggestion_handler)
-
+    # Start polling for updates
+    print("[Telegram] Bot is now polling for messages.")
     application.run_polling()
 
-if __name__ == '__main__':
-    main()
