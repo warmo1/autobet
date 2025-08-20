@@ -7,3 +7,4 @@ betfairlightweight>=2.20
 google-generativeai>=0.7
 openai>=1.40
 python-telegram-bot
+python-dotenv>=1.0
