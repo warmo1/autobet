@@ -1,8 +1,13 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# --- Explicitly locate and load the .env file ---
+# This makes sure the app can find the .env file regardless of how it's run.
+# It finds the root directory (autobet) by going up from this file's location.
+env_path = Path(__file__).parent.parent / '.env'
+load_dotenv(dotenv_path=env_path)
 
 @dataclass
 class Config:
@@ -29,13 +34,9 @@ class Config:
 
     # RapidAPI
     rapidapi_key: str = os.getenv("RAPIDAPI_KEY", "")
-    rapidapi_host_football: str = os.getenv("RAPIDAPI_HOST_FOOTBALL", "")
+    # **FIX**: Updated the football host to SportAPI7
+    rapidapi_host_football: str = os.getenv("RAPIDAPI_HOST_FOOTBALL", "sportapi7.p.rapidapi.com")
     rapidapi_host_tennis: str = os.getenv("RAPIDAPI_HOST_TENNIS", "")
     rapidapi_host_horse_racing: str = os.getenv("RAPIDAPI_HOST_HORSE_RACING", "")
 
-
 cfg = Config()
-
-# Add these two lines for debugging:
-print(f"--- DEBUG: RapidAPI Key loaded: {cfg.rapidapi_key}")
-print(f"--- DEBUG: Football Host loaded: {cfg.rapidapi_host_football}")
