@@ -35,3 +35,7 @@ class Config:
 
 
 cfg = Config()
+
+# Add these two lines for debugging:
+print(f"--- DEBUG: RapidAPI Key loaded: {cfg.rapidapi_key}")
+print(f"--- DEBUG: Football Host loaded: {cfg.rapidapi_host_football}")
