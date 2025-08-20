@@ -1,4 +1,4 @@
-import argparse, time
+import argparse
 from .config import cfg
 from .db import get_conn, init_schema
 from .ingest import ingest_football_csv_dir
@@ -7,6 +7,7 @@ from .news import fetch_and_store_news
 from .llm import summarise_news
 from .db import insert_insight
 from .webapp import create_app
+from .telegram_bot import run_bot # Import the new bot runner
 
 def cmd_ingest(args):
     conn = get_conn(cfg.database_url); init_schema(conn)
@@ -55,6 +56,10 @@ def cmd_live(args):
         print("Pass --confirm BET to enable live orders (not implemented here).");
         return
 
+def cmd_telegram(args):
+    """Starts the Telegram bot."""
+    run_bot()
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="Sports Betting Bot (Starter)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -90,6 +95,10 @@ def main(argv=None):
     sp = sub.add_parser("live", help="Live (Betfair) -- not implemented") 
     sp.add_argument("--confirm", type=str, default="")
     sp.set_defaults(func=cmd_live)
+
+    # Add the new telegram command
+    sp = sub.add_parser("telegram", help="Run the Telegram bot")
+    sp.set_defaults(func=cmd_telegram)
 
     args = p.parse_args(argv)
     return args.func(args)
