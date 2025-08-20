@@ -10,9 +10,8 @@ from .db import get_conn, init_schema, recent_suggestions
 def escape_markdown(text: str) -> str:
     """
     Escapes special characters in a string for Telegram MarkdownV2 compatibility.
-    This prevents formatting errors when the text contains characters like '_'.
     """
-    # Characters to escape for MarkdownV2
+    # Characters to escape for MarkdownV2. Note the inclusion of '.' and '-'
     escape_chars = r'\_*[]()~`>#+-=|{}.!'
     # Use a regular expression to add a backslash before each special character
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
@@ -38,24 +37,44 @@ async def daily_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not suggestions_df.empty:
         suggestion = suggestions_df.iloc[0]
         
-        # **FIX**: Escape the user-generated AI note before sending
-        safe_note = escape_markdown(suggestion['note'])
+        # **FIX**: Convert all parts to strings and escape them individually
+        home = escape_markdown(str(suggestion['home']))
+        away = escape_markdown(str(suggestion['away']))
+        date = escape_markdown(str(suggestion['date']))
+        market = escape_markdown(str(suggestion['market']))
+        selection = escape_markdown(str(suggestion['selection']).capitalize())
+        side = escape_markdown(str(suggestion['side']).upper())
+        
+        # Format numbers, then convert to string and escape
+        model_prob = escape_markdown(f"{suggestion['model_prob']:.2%}")
+        market_odds = escape_markdown(str(suggestion['market_odds']))
+        edge = escape_markdown(f"{suggestion['edge']:.2%}")
+        stake = escape_markdown(f"£{suggestion['stake']:.2f}")
+        
+        safe_note = escape_markdown(str(suggestion['note']))
         
         message = (
             f"*📈 Daily Top Suggestion 📈*\n\n"
-            f"*⚽️ Match:* {escape_markdown(suggestion['home'])} vs {escape_markdown(suggestion['away'])}\n"
-            f"*🗓️ Date:* {escape_markdown(suggestion['date'])}\n\n"
-            f"*Market:* {escape_markdown(suggestion['market'])}\n"
-            f"*Selection:* {escape_markdown(suggestion['selection'].capitalize())}\n"
-            f"*Side:* {escape_markdown(suggestion['side'].upper())}\n\n"
-            f"*Model Probability:* {suggestion['model_prob']:.2%}\n"
-            f"*Market Odds:* {suggestion['market_odds']}\n"
-            f"*Edge:* {suggestion['edge']:.2%}\n"
-            f"*Suggested Stake:* £{suggestion['stake']}\n\n"
+            f"*⚽️ Match:* {home} vs {away}\n"
+            f"*🗓️ Date:* {date}\n\n"
+            f"*Market:* {market}\n"
+            f"*Selection:* {selection}\n"
+            f"*Side:* {side}\n\n"
+            f"*Model Probability:* {model_prob}\n"
+            f"*Market Odds:* {market_odds}\n"
+            f"*Edge:* {edge}\n"
+            f"*Suggested Stake:* {stake}\n\n"
             f"*AI Reasoning:*\n_{safe_note}_"
         )
-        # Use 'MarkdownV2' as the parse mode for better compatibility
-        await update.message.reply_text(message, parse_mode='MarkdownV2')
+        
+        try:
+            # Use 'MarkdownV2' as the parse mode
+            await update.message.reply_text(message, parse_mode='MarkdownV2')
+        except Exception as e:
+            print(f"[Telegram Error] Failed to send message: {e}")
+            # As a fallback, send the message without formatting
+            await update.message.reply_text(message.replace('*', '').replace('_', ''))
+
     else:
         await update.message.reply_text("Sorry, no suggestions are available at the moment. Please run the suggestion engine first.")
 
