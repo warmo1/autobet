@@ -50,3 +50,12 @@ def suggest_football(conn, days:int=7, min_edge:float=0.03, stake_kelly_mult:flo
             record_suggestion(conn, **rec)
             picks.append(rec)
     return picks
+    from .llm import generate_suggestion
+
+def suggest_llm(conn, match_details):
+    llm_suggestion = generate_suggestion(match_details)
+    # Parse the LLM's response and format it into a suggestion record
+    # ... your parsing logic here ...
+
+    # Record the suggestion in the database
+    record_suggestion(conn, **rec)
