@@ -10,7 +10,7 @@ class Config:
     paper_starting_bankroll: float = float(os.getenv("PAPER_STARTING_BANKROLL", "1000"))
     
     # Telegram
-    telegram_token: str = os.getenv("TELEGRAM_TOKEN", "") # Add this line
+    telegram_token: str = os.getenv("TELEGRAM_TOKEN", "")
 
     # Betfair
     betfair_app_key: str = os.getenv("BETFAIR_APP_KEY", "")
@@ -26,5 +26,12 @@ class Config:
     
     # Web
     admin_token: str = os.getenv("ADMIN_TOKEN", "")
+
+    # RapidAPI
+    rapidapi_key: str = os.getenv("RAPIDAPI_KEY", "")
+    rapidapi_host_football: str = os.getenv("RAPIDAPI_HOST_FOOTBALL", "")
+    rapidapi_host_tennis: str = os.getenv("RAPIDAPI_HOST_TENNIS", "")
+    rapidapi_host_horse_racing: str = os.getenv("RAPIDAPI_HOST_HORSE_RACING", "")
+
 
 cfg = Config()
