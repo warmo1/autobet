@@ -1,20 +1,10 @@
 import asyncio
-import re
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.helpers import escape_markdown # Import the official helper function
+
 from .config import cfg
 from .db import get_conn, init_schema, recent_suggestions
-
-# --- Helper Functions ---
-
-def escape_markdown(text: str) -> str:
-    """
-    Escapes special characters in a string for Telegram MarkdownV2 compatibility.
-    """
-    # Characters to escape for MarkdownV2. Note the inclusion of '.' and '-'
-    escape_chars = r'\_*[]()~`>#+-=|{}.!'
-    # Use a regular expression to add a backslash before each special character
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
 # --- Command Handlers ---
 
@@ -37,21 +27,21 @@ async def daily_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not suggestions_df.empty:
         suggestion = suggestions_df.iloc[0]
         
-        # **FIX**: Convert all parts to strings and escape them individually
-        home = escape_markdown(str(suggestion['home']))
-        away = escape_markdown(str(suggestion['away']))
-        date = escape_markdown(str(suggestion['date']))
-        market = escape_markdown(str(suggestion['market']))
-        selection = escape_markdown(str(suggestion['selection']).capitalize())
-        side = escape_markdown(str(suggestion['side']).upper())
+        # **FIX**: Use the official library's escape function with version=2
+        home = escape_markdown(str(suggestion['home']), version=2)
+        away = escape_markdown(str(suggestion['away']), version=2)
+        date = escape_markdown(str(suggestion['date']), version=2)
+        market = escape_markdown(str(suggestion['market']), version=2)
+        selection = escape_markdown(str(suggestion['selection']).capitalize(), version=2)
+        side = escape_markdown(str(suggestion['side']).upper(), version=2)
         
         # Format numbers, then convert to string and escape
-        model_prob = escape_markdown(f"{suggestion['model_prob']:.2%}")
-        market_odds = escape_markdown(str(suggestion['market_odds']))
-        edge = escape_markdown(f"{suggestion['edge']:.2%}")
-        stake = escape_markdown(f"£{suggestion['stake']:.2f}")
+        model_prob = escape_markdown(f"{suggestion['model_prob']:.2%}", version=2)
+        market_odds = escape_markdown(str(suggestion['market_odds']), version=2)
+        edge = escape_markdown(f"{suggestion['edge']:.2%}", version=2)
+        stake = escape_markdown(f"£{suggestion['stake']:.2f}", version=2)
         
-        safe_note = escape_markdown(str(suggestion['note']))
+        safe_note = escape_markdown(str(suggestion['note']), version=2)
         
         message = (
             f"*📈 Daily Top Suggestion 📈*\n\n"
@@ -68,12 +58,12 @@ async def daily_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         try:
-            # Use 'MarkdownV2' as the parse mode
             await update.message.reply_text(message, parse_mode='MarkdownV2')
         except Exception as e:
             print(f"[Telegram Error] Failed to send message: {e}")
-            # As a fallback, send the message without formatting
-            await update.message.reply_text(message.replace('*', '').replace('_', ''))
+            # As a fallback, send the message without any special formatting
+            fallback_message = re.sub(r'([*_])', '', message) # Remove markdown chars
+            await update.message.reply_text(fallback_message)
 
     else:
         await update.message.reply_text("Sorry, no suggestions are available at the moment. Please run the suggestion engine first.")
