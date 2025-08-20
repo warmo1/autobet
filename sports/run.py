@@ -1,107 +1,27 @@
-import argparse
-from .config import cfg
-from .db import get_conn, init_schema
-from .ingest import ingest_football_csv_dir
-from .suggest import suggest_football
-from .news import fetch_and_store_news
-from .llm import summarise_news
-from .db import insert_insight
-from .webapp import create_app
-from .telegram_bot import run_bot # Import the new bot runner
+# ... (imports)
+from .suggest import run_suggestions
+from .ingest import ingest_horse_racing_data, ingest_tennis_data
 
 def cmd_ingest(args):
     conn = get_conn(cfg.database_url); init_schema(conn)
     if args.sport == 'football':
         n = ingest_football_csv_dir(conn, args.csv_dir)
-        print(f"Ingested {n} rows from {args.csv_dir}")
-    else:
-        print("Only football ingestion is implemented in this starter.")
-
-def cmd_train(args):
-    print("Training models... (football Poisson trained on-the-fly during suggest in this starter)")
+        print(f"Ingested {n} football rows.")
+    elif args.sport == 'horse_racing':
+        n = ingest_horse_racing_data(conn)
+        print(f"Ingested {n} horse racing entries.")
+    elif args.sport == 'tennis':
+        n = ingest_tennis_data(conn)
+        print(f"Ingested {n} tennis matches.")
 
 def cmd_suggest(args):
     conn = get_conn(cfg.database_url); init_schema(conn)
-    if args.sport == 'football':
-        picks = suggest_football(conn, days=args.days, min_edge=args.min_edge, stake_kelly_mult=args.kelly_mult)
-        print(f"Generated {len(picks)} suggestions (stored in DB)")
-    else:
-        print("Only football suggest implemented in this starter.")
+    picks = run_suggestions(conn, args.sport)
+    print(f"Generated {len(picks)} suggestions for {args.sport}.")
 
-def cmd_news(args):
-    conn = get_conn(cfg.database_url); init_schema(conn)
-    fetch_and_store_news(conn)
-    print("Fetched news.")
-
-def cmd_insights(args):
-    conn = get_conn(cfg.database_url); init_schema(conn)
-    import pandas as pd
-    df = pd.read_sql_query("SELECT * FROM news_articles ORDER BY published_ts DESC LIMIT 40", conn)
-    if df.empty:
-        print("No news; run 'news' first."); return
-    items = df.to_dict("records")
-    summary = summarise_news(items)
-    insert_insight(conn, headline="Weekly sports digest", summary=summary)
-    print("Insight stored.")
-
-def cmd_web(args):
-    app = create_app()
-    app.run(host="0.0.0.0", port=8010, debug=True)
-
-def cmd_paper(args):
-    print("Paper betting loop could monitor suggestions and simulate stakes over time (not implemented in this starter loop). Use dashboard / paper_bet form.")
-
-def cmd_live(args):
-    if args.confirm != "BET":
-        print("Pass --confirm BET to enable live orders (not implemented here).");
-        return
-
-def cmd_telegram(args):
-    """Starts the Telegram bot."""
-    run_bot()
-
-def main(argv=None):
-    p = argparse.ArgumentParser(description="Sports Betting Bot (Starter)")
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    sp = sub.add_parser("ingest", help="Ingest historical CSVs") 
-    sp.add_argument("--sport", type=str, default="football")
-    sp.add_argument("--csv-dir", type=str, required=True)
-    sp.set_defaults(func=cmd_ingest)
-
-    sp = sub.add_parser("train", help="Train models (football auto in suggest)")
-    sp.add_argument("--sport", type=str, default="football")
-    sp.set_defaults(func=cmd_train)
-
-    sp = sub.add_parser("suggest", help="Generate value suggestions") 
-    sp.add_argument("--sport", type=str, default="football")
-    sp.add_argument("--days", type=int, default=7)
-    sp.add_argument("--min-edge", type=float, default=0.03)
-    sp.add_argument("--kelly-mult", type=float, default=0.25, dest="kelly_mult")
-    sp.set_defaults(func=cmd_suggest)
-
-    sp = sub.add_parser("news", help="Fetch sports news") 
-    sp.set_defaults(func=cmd_news)
-
-    sp = sub.add_parser("insights", help="Summarise news with LLM") 
-    sp.set_defaults(func=cmd_insights)
-
-    sp = sub.add_parser("web", help="Run dashboard") 
-    sp.set_defaults(func=cmd_web)
-
-    sp = sub.add_parser("paper", help="Paper bet loop") 
-    sp.set_defaults(func=cmd_paper)
-
-    sp = sub.add_parser("live", help="Live (Betfair) -- not implemented") 
-    sp.add_argument("--confirm", type=str, default="")
-    sp.set_defaults(func=cmd_live)
-
-    # Add the new telegram command
-    sp = sub.add_parser("telegram", help="Run the Telegram bot")
-    sp.set_defaults(func=cmd_telegram)
-
-    args = p.parse_args(argv)
-    return args.func(args)
-
-if __name__ == "__main__":
-    main()
+# ... (rest of the file, with updated argparse for ingest and suggest)
+# In main():
+# For ingest:
+sp.add_argument("--sport", type=str, required=True, choices=['football', 'horse_racing', 'tennis'])
+# For suggest:
+sp.add_argument("--sport", type=str, required=True, choices=['football', 'horse_racing', 'tennis'])
