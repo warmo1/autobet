@@ -34,7 +34,7 @@ class Config:
 
     # RapidAPI
     rapidapi_key: str = os.getenv("RAPIDAPI_KEY", "")
-    # **FIX**: Updated the football host to SportAPI7
+    # **This is the correct host for the API with the free plan**
     rapidapi_host_football: str = os.getenv("RAPIDAPI_HOST_FOOTBALL", "sportapi7.p.rapidapi.com")
     rapidapi_host_tennis: str = os.getenv("RAPIDAPI_HOST_TENNIS", "")
     rapidapi_host_horse_racing: str = os.getenv("RAPIDAPI_HOST_HORSE_RACING", "")
