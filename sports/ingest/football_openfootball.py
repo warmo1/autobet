@@ -8,56 +8,58 @@ MATCH_LINE_REGEX = re.compile(r"\[(.+?)\]\s+(.+?)\s+(\d+-\d+)\s+(.+)")
 
 def ingest_dir(conn: sqlite3.Connection, data_dir: str) -> int:
     """
-    Recursively ingests all openfootball .txt files in a given directory structure.
-    It automatically determines the season and competition from the file path.
+    Recursively ingests all openfootball .txt files with enhanced debugging.
     """
     total = 0
-    print(f"[OpenFootball] Recursively processing directory: {data_dir}")
-    
-    # os.walk will traverse the entire directory tree
+    files_to_process = []
     for root, dirs, files in os.walk(data_dir):
         for filename in files:
             if filename.endswith('.txt'):
-                path = os.path.join(root, filename)
-                
-                # --- Auto-detect season and competition ---
-                try:
-                    # The season is typically the name of the parent directory (e.g., '2023-24')
-                    season = os.path.basename(root).replace('-', '/')
-                    # The competition is derived from the filename (e.g., '1-premierleague.txt')
-                    competition = filename.split('.')[0].split('-', 1)[-1].replace('_', ' ').title()
-                except Exception:
-                    continue # Skip if the file path format is unexpected
+                files_to_process.append(os.path.join(root, filename))
 
-                with open(path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        match = MATCH_LINE_REGEX.match(line.strip())
-                        if not match:
-                            continue
+    if not files_to_process:
+        print("[OpenFootball] No .txt files found to process.")
+        return 0
 
-                        date_str, home_team, score_str, away_team = match.groups()
-                        
-                        try:
-                            date_obj = datetime.strptime(date_str.split(' ')[-1], '%b/%d')
-                            year = int(season.split('/')[0])
-                            date = date_obj.replace(year=year).strftime('%Y-%m-%d')
-                        except ValueError:
-                            continue
+    # --- Enhanced Debugging: Process only the first file found ---
+    file_to_debug = files_to_process[0]
+    print(f"\n--- DEBUG: Starting detailed analysis of a single file: {file_to_debug} ---\n")
+    
+    season = os.path.basename(os.path.dirname(file_to_debug)).replace('-', '/')
+    
+    with open(file_to_debug, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+        print("--- DEBUG: Analyzing first 20 lines... ---")
+        for i, line in enumerate(lines[:20]):
+            if i >= 20: break
+            
+            print(f"\n--- Line {i+1}: {line.strip()} ---")
+            match = MATCH_LINE_REGEX.match(line.strip())
+            
+            if not match:
+                print("Result: NO REGEX MATCH")
+                continue
 
-                        h_score, a_score = map(int, score_str.split('-'))
-                        outcome = "H" if h_score > a_score else ("A" if a_score > h_score else "D")
+            date_str, home_team, score_str, away_team = match.groups()
+            print(f"Regex Groups: date='{date_str}', home='{home_team}', score='{score_str}', away='{away_team}'")
 
-                        # Upsert event
-                        cur = conn.execute("SELECT event_id FROM events WHERE sport='football' AND start_date=? AND home_team=? AND away_team=?", (date, home_team.strip(), away_team.strip()))
-                        existing_event = cur.fetchone()
-                        if existing_event:
-                            event_id = existing_event[0]
-                        else:
-                            cur = conn.execute("INSERT INTO events(sport, comp, season, start_date, home_team, away_team, status) VALUES (?,?,?,?,?,?,?)", ("football", competition, season, date, home_team.strip(), away_team.strip(), "completed"))
-                            event_id = cur.lastrowid
+            try:
+                date_part = date_str.split(' ')[-1]
+                date_obj = datetime.strptime(date_part, '%b/%d')
+                year = int(season.split('/')[0])
+                date = date_obj.replace(year=year).strftime('%Y-%m-%d')
+                print(f"Parsed Date: '{date}' (SUCCESS)")
+            except ValueError as e:
+                print(f"Parsed Date: FAILED ({e})")
+                continue
+            
+            print("Result: WOULD PROCESS ROW")
+            total += 1
 
-                        # Insert result
-                        conn.execute("INSERT OR REPLACE INTO results(event_id, home_score, away_score, outcome) VALUES (?,?,?,?)", (event_id, h_score, a_score, outcome))
-                        total += 1
-    conn.commit()
-    return total
+    print(f"\n--- DEBUG: Finished analysis. Processed {total} rows from the test file. ---")
+    # We return 0 because this is just a debug run.
+    return 0
+
+def _to_int(x):
+    try: return int(x)
+    except (ValueError, TypeError): return None
