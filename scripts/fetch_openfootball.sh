@@ -2,10 +2,12 @@
 set -euo pipefail
 
 # --- Find the Project's Root Directory ---
+# This makes the script runnable from anywhere.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-PROJECT_ROOT="$( dirname "$( dirname "${SCRIPT_DIR}" )" )"
+# **FIX**: The project root is one level up from the scripts directory.
+PROJECT_ROOT="$( dirname "${SCRIPT_DIR}" )"
 
-# --- Define Paths ---
+# --- Define Paths Relative to the Project Root ---
 TARGET_DIR="${PROJECT_ROOT}/data/football/openfootball"
 REPO_URL="https://github.com/openfootball/england.git"
 
@@ -15,11 +17,9 @@ echo "Automating download of openfootball data..."
 # Check if the directory already exists
 if [ -d "${TARGET_DIR}" ]; then
   echo "Directory already exists. Pulling latest changes..."
-  # If it exists, pull the latest changes
   (cd "${TARGET_DIR}" && git pull)
 else
   echo "Cloning repository for the first time..."
-  # If it doesn't exist, clone the repository
   git clone "${REPO_URL}" "${TARGET_DIR}"
 fi
 
