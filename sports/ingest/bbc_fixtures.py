@@ -1,5 +1,6 @@
 import requests
 import json
+import re
 from bs4 import BeautifulSoup
 from datetime import date
 import sqlite3
@@ -13,8 +14,8 @@ SPORT_URL_PATHS = {
 
 def ingest_bbc_fixtures(conn: sqlite3.Connection, sport: str) -> int:
     """
-    Scrapes the BBC Sport website for a given sport's fixtures by parsing embedded JSON data.
-    This is more reliable than relying on HTML class names.
+    Scrapes the BBC Sport website for a given sport's fixtures by finding and parsing embedded JSON data.
+    This version is more robust to website structure changes.
     """
     if sport not in SPORT_URL_PATHS:
         print(f"[BBC Ingest Error] The sport '{sport}' is not supported.")
@@ -28,18 +29,29 @@ def ingest_bbc_fixtures(conn: sqlite3.Connection, sport: str) -> int:
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # The fixture data is stored in a JSON object within a <script> tag.
-        # This is much more stable than scraping HTML elements.
-        script_tag = soup.find('script', {'id': '__NEXT_DATA__'})
-        if not script_tag:
-            print("[BBC Ingest Error] Could not find the __NEXT_DATA__ script tag. The BBC website structure may have changed.")
-            return 0
+        # **FIX**: Instead of looking for a specific ID, search all script tags
+        # for the one containing the fixture data.
+        all_scripts = soup.find_all('script')
+        fixture_data = None
+        for script in all_scripts:
+            # The data we need is usually a large JSON blob. We look for a key part of it.
+            if script.string and '"competitions":' in script.string:
+                try:
+                    # The JSON is often assigned to a variable, e.g., window.__INITIAL_DATA__ = {...}
+                    # We need to extract just the JSON part.
+                    json_text = script.string.split('=', 1)[-1].strip()
+                    data = json.loads(json_text)
+                    fixture_data = data
+                    break
+                except (json.JSONDecodeError, IndexError):
+                    continue # Ignore scripts that aren't valid JSON
 
-        data = json.loads(script_tag.string)
+        if not fixture_data:
+            print("[BBC Ingest Error] Could not find valid fixture JSON data. The BBC website structure may have changed significantly.")
+            return 0
         
         # Navigate the complex JSON structure to find the fixture data
-        # This path is based on the current structure and might need updating in the future.
-        all_events = data.get('props', {}).get('pageProps', {}).get('payload', {}).get('body', {}).get('content', {}).get('body', [])
+        all_events = fixture_data.get('props', {}).get('pageProps', {}).get('payload', {}).get('body', {}).get('content', {}).get('body', [])
         
         count = 0
         for block in all_events:
