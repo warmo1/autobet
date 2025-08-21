@@ -17,19 +17,22 @@ def ingest_dir(conn: sqlite3.Connection, csv_dir: str) -> int:
             
             # --- Robust Parsing Logic ---
             lines = fh.readlines()
-            header_line = None
-            data_lines = []
-
-            # Find the first line that is not metadata to use as the header
-            for line in lines:
-                if not line.strip().startswith('info,'):
-                    if header_line is None:
-                        header_line = line
-                    data_lines.append(line)
+            header_line_index = -1
             
-            if not header_line or not data_lines:
+            # **FIX**: Find the index of the actual header line by looking for key column names.
+            for i, line in enumerate(lines):
+                # A real header must contain these key columns. This is much more reliable.
+                if 'date' in line.lower() and ('team1' in line.lower() or 'home_team' in line.lower()):
+                    header_line_index = i
+                    break
+            
+            # If no valid header line was found in the file, skip it.
+            if header_line_index == -1:
                 continue
 
+            # The actual data is the header line plus all subsequent lines.
+            data_lines = lines[header_line_index:]
+            
             # Use the identified header and data with the CSV reader
             reader = csv.DictReader(data_lines)
             for row in reader:
@@ -60,9 +63,8 @@ def ingest_dir(conn: sqlite3.Connection, csv_dir: str) -> int:
     conn.commit()
 
     # --- Self-Diagnosing Debug Report ---
-    if total_processed_rows == 0:
+    if total_processed_rows == 0 and files:
         print("\n--- INGESTION FAILED: Processed 0 rows. ---")
-        print("This usually means the format of the CSV files is not as expected.")
         print(f"Below is a debug report for the last file attempted: {last_file_processed}\n")
         _run_debug_on_file(os.path.join(csv_dir, last_file_processed))
 
@@ -74,21 +76,21 @@ def _run_debug_on_file(path):
     with open(path, newline="", encoding="utf-8", errors="ignore") as fh:
         lines = fh.readlines()
         print(f"Total lines in file: {len(lines)}")
-        print("\n--- First 10 Lines of Raw File ---")
-        for i, line in enumerate(lines[:10]):
+        print("\n--- First 20 Lines of Raw File ---")
+        for i, line in enumerate(lines[:20]):
             print(f"Line {i+1}: {line.strip()}")
 
-        header_line = None
-        data_lines = []
-        for line in lines:
-            if not line.strip().startswith('info,'):
-                if header_line is None:
-                    header_line = line
-                data_lines.append(line)
+        header_line_index = -1
+        for i, line in enumerate(lines):
+            if 'date' in line.lower() and ('team1' in line.lower() or 'home_team' in line.lower()):
+                header_line_index = i
+                break
         
         print("\n--- Parser Analysis ---")
-        print(f"Identified Header Line: {header_line.strip() if header_line else 'None'}")
-        print(f"Total Data Lines Found (including header): {len(data_lines)}")
+        if header_line_index != -1:
+            print(f"Identified Header Line at line {header_line_index + 1}: {lines[header_line_index].strip()}")
+        else:
+            print("Identified Header Line: None Found")
 
 def _to_int(x):
     try: return int(x)
