@@ -7,7 +7,8 @@ from ..config import cfg
 SPORT_PATHS = {
     'football': 'soccer/eng.1', # English Premier League
     'rugby': 'rugby/league',     # Generic rugby league
-    'cricket': 'cricket/icc'     # International Cricket
+    # **FIX**: Changed from 'cricket/icc' to a more general and stable endpoint
+    'cricket': 'cricket'         
 }
 
 def ingest_fixtures(conn, sport: str) -> int:
