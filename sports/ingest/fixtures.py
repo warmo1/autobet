@@ -1,6 +1,6 @@
 import requests
 from datetime import date
-from ..config import cfg
+from ..config import cfg # Use .. to go up one directory level
 
 def ingest_football_fixtures(conn) -> int:
     """
@@ -19,36 +19,21 @@ def ingest_football_fixtures(conn) -> int:
         fixtures = response.json().get('events', [])
         count = 0
         for fix in fixtures:
-            # Filter for UK competitions
-            if fix.get('tournament', {}).get('category', {}).get('name') == 'England':
-                home = fix.get('homeTeam', {}).get('name')
-                away = fix.get('awayTeam', {}).get('name')
-                fixture_date = date.fromtimestamp(fix.get('startTimestamp')).strftime('%Y-%m-%d')
-                league = fix.get('tournament', {}).get('name')
-                
-                if home and away and fixture_date:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO events(sport, comp, start_date, home_team, away_team, status) VALUES (?,?,?,?,?,?)",
-                        ("football", league, fixture_date, home, away, "scheduled")
-                    )
-                    count += 1
+            home = fix.get('homeTeam', {}).get('name')
+            away = fix.get('awayTeam', {}).get('name')
+            fixture_date = date.fromtimestamp(fix.get('startTimestamp')).strftime('%Y-%m-%d')
+            league = fix.get('tournament', {}).get('name')
+            season = fix.get('season', {}).get('name')
+            
+            if home and away and fixture_date:
+                # Insert the event with status 'scheduled'
+                conn.execute(
+                    "INSERT OR IGNORE INTO events(sport, comp, season, start_date, home_team, away_team, status) VALUES (?,?,?,?,?,?,?)",
+                    ("football", league, season, fixture_date, home, away, "scheduled")
+                )
+                count += 1
         conn.commit()
         return count
     except Exception as e:
         print(f"[Fixtures Error] Could not fetch football fixtures: {e}")
         return 0
-
-def ingest_cricket_fixtures(conn) -> int:
-    # Placeholder for a cricket fixtures API
-    print("[Fixtures] Cricket fixture ingestion not yet implemented.")
-    return 0
-
-def ingest_rugby_fixtures(conn) -> int:
-    # Placeholder for a rugby fixtures API
-    print("[Fixtures] Rugby fixture ingestion not yet implemented.")
-    return 0
-
-def ingest_horse_racing_fixtures(conn) -> int:
-    # Placeholder for a horse racing fixtures API
-    print("[Fixtures] Horse racing fixture ingestion not yet implemented.")
-    return 0
