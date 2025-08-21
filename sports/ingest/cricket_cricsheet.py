@@ -4,33 +4,19 @@ import sqlite3
 
 def ingest_dir(conn: sqlite3.Connection, csv_dir: str) -> int:
     """Ingests a directory of Cricsheet match summary CSVs."""
-    
-    # --- Start Debugging ---
-    print(f"--- DEBUG: Checking directory: {csv_dir}")
-    abs_path = os.path.abspath(csv_dir)
-    print(f"--- DEBUG: Absolute path is: {abs_path}")
-    
-    try:
-        all_files_in_dir = os.listdir(csv_dir)
-        print(f"--- DEBUG: Found {len(all_files_in_dir)} total items in directory.")
-        print(f"--- DEBUG: Full list: {all_files_in_dir[:10]}") # Print first 10 items
-    except Exception as e:
-        print(f"--- DEBUG: Error listing directory: {e}")
-        return 0
-    # --- End Debugging ---
-
-    files = [f for f in all_files_in_dir if f.lower().endswith(".csv")]
-    
-    print(f"--- DEBUG: Found {len(files)} files ending with .csv")
-
+    files = [f for f in os.listdir(csv_dir) if f.lower().endswith(".csv")]
     total = 0
     for f in files:
         path = os.path.join(csv_dir, f)
         with open(path, newline="", encoding="utf-8", errors="ignore") as fh:
             reader = csv.DictReader(fh)
             for row in reader:
-                date = (row.get("date") or row.get("start_date") or "").strip()
-                home, away = (row.get("team1") or "").strip(), (row.get("team2") or "").strip()
+                # **FIX**: Check for multiple possible column names to handle different file formats.
+                date = (row.get("date") or row.get("start_date") or row.get("event_date") or "").strip()
+                home = (row.get("team1") or row.get("home_team") or "").strip()
+                away = (row.get("team2") or row.get("away_team") or "").strip()
+                
+                # This is the line that was causing the issue. If any of these are missing, skip the row.
                 if not all([date, home, away]):
                     continue
 
