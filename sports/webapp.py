@@ -125,5 +125,39 @@ def paper_bet():
     flash(f"Paper bet of £{stake:.2f} placed successfully.", "success")
     return redirect(url_for('bets'))
 
+# **FIX**: Added the missing upload_file route
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if cfg.admin_token and request.form.get("token") != cfg.admin_token:
+        flash("Invalid admin token. Upload failed.", "error")
+        return redirect(url_for('dashboard'))
+
+    if 'file' not in request.files:
+        flash('No file part in the request.', 'error')
+        return redirect(url_for('dashboard'))
+    
+    file = request.files['file']
+    if file.filename == '':
+        flash('No file selected for uploading.', 'error')
+        return redirect(url_for('dashboard'))
+
+    if file and file.filename.endswith('.csv'):
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+        
+        conn = _get_db_conn()
+        # This is a generic uploader; you might want to have different logic
+        # based on the filename or a form dropdown.
+        rows_ingested = ingest_fd_dir(conn, os.path.dirname(filepath)) # Example: using football-data ingestor
+        
+        os.remove(filepath)
+        
+        flash(f"Successfully uploaded and processed '{filename}'. Ingested {rows_ingested} new records.", "success")
+    else:
+        flash("Invalid file type. Please upload a CSV file.", "error")
+
+    return redirect(url_for('dashboard'))
+
 def create_app():
     return app
