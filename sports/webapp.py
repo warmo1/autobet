@@ -1,17 +1,15 @@
 import os
 import time
 import pandas as pd
+import subprocess
 from flask import Flask, render_template, request, redirect, flash, url_for
 from werkzeug.utils import secure_filename
 from .config import cfg
 from .db import connect
 from .schema import init_schema
-from .ingest.football_fd import ingest_dir as ingest_fd_dir
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(24)
-app.config['UPLOAD_FOLDER'] = '/tmp/autobet_uploads'
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 def _get_db_conn():
     """Helper to get a DB connection."""
@@ -58,36 +56,41 @@ def bets():
     conn.close()
     return render_template("bets.html", bets=all_bets.to_dict("records"))
 
-@app.route("/paper_bet", methods=["POST"])
-def paper_bet():
-    """Handles the form submission for placing a new paper bet."""
-    conn = _get_db_conn()
+@app.route("/data")
+def data_management():
+    """Renders the new data management control panel."""
+    return render_template("data_management.html")
+
+@app.route("/run_task", methods=["POST"])
+def run_task():
+    """Runs a command-line task in the background."""
+    task = request.form.get("task")
     
-    event_id = int(request.form.get("event_id"))
-    price = float(request.form.get("price"))
-    stake = float(request.form.get("stake"))
-    market = request.form.get("market")
-    selection = request.form.get("selection")
-    side = request.form.get("side")
-
-    # Update bankroll
-    bank_row = conn.execute("SELECT value FROM bankroll_state WHERE key = 'bankroll'").fetchone()
-    bankroll = float(bank_row[0]) if bank_row else cfg.paper_starting_bankroll
-    new_bankroll = bankroll - stake
-    conn.execute("INSERT OR REPLACE INTO bankroll_state (key, value) VALUES ('bankroll', ?)", (str(new_bankroll),))
-
-    # Insert the new bet
-    conn.execute(
-        """INSERT INTO bets (ts, mode, event_id, market, selection, side, price, stake)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (int(time.time()), 'paper', event_id, market, selection, side, price, stake)
-    )
-    conn.commit()
-    conn.close()
+    task_map = {
+        "ingest-fixtures": ["ingest-fixtures", "--sport", "football"],
+        "generate-suggestions": ["generate-suggestions", "--sport", "football"],
+        "fetch-openfootball": ["fetch-openfootball", "--mode", "init"]
+    }
     
-    flash(f"Paper bet of £{stake:.2f} placed successfully.", "success")
-    return redirect(url_for('bets'))
+    if task not in task_map:
+        flash(f"Unknown task: {task}", "error")
+        return redirect(url_for('data_management'))
 
+    command = ["python3", "-m", "sports.run"] + task_map[task]
+    
+    try:
+        print(f"[WebApp] Running task: {' '.join(command)}")
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        print(f"[WebApp] Task output: {result.stdout}")
+        flash(f"Task '{task}' completed successfully!", "success")
+    except subprocess.CalledProcessError as e:
+        print(f"[WebApp] Task error: {e.stderr}")
+        flash(f"Task '{task}' failed: {e.stderr}", "error")
+    except Exception as e:
+        print(f"[WebApp] General error: {e}")
+        flash(f"An unexpected error occurred: {e}", "error")
+
+    return redirect(url_for('data_management'))
 
 def create_app():
     return app

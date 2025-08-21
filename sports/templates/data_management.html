@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Data Management</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #f3f4f6;
+    }
+    .card {
+        background-color: white;
+        border-radius: 0.75rem;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+    }
+    .btn {
+        @apply w-full px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500;
+    }
+  </style>
+</head>
+<body class="text-gray-800">
+  <div class="container mx-auto p-4 sm:p-6 lg:p-8">
+    <nav class="bg-white p-4 rounded-lg shadow-md mb-8 flex items-center justify-between">
+      <h1 class="text-2xl font-bold text-gray-900">Sports Bot</h1>
+      <div class="space-x-4">
+        <a href="/" class="text-blue-600 hover:text-blue-800 font-medium">Dashboard</a>
+        <a href="/suggestions" class="text-blue-600 hover:text-blue-800 font-medium">Suggestions</a>
+        <a href="/bets" class="text-blue-600 hover:text-blue-800 font-medium">Bets</a>
+        <a href="/data" class="text-blue-800 font-bold border-b-2 border-blue-800 pb-1">Data Management</a>
+      </div>
+    </nav>
+
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="mb-6 space-y-2">
+        {% for category, message in messages %}
+          <div class="p-4 rounded-lg text-sm font-medium {{ 'bg-green-100 text-green-800' if category == 'success' else 'bg-red-100 text-red-800' }}">
+            {{ message }}
+          </div>
+        {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <div class="card p-6">
+      <h2 class="text-2xl font-bold mb-6 text-gray-900">Data & Analysis Control Panel</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+
+        <!-- Fetch Live Fixtures -->
+        <div class="border p-4 rounded-lg">
+          <h3 class="font-semibold text-lg mb-2">1. Fetch Live Fixtures</h3>
+          <p class="text-sm text-gray-600 mb-4">Fetch today's upcoming fixtures from the live API.</p>
+          <form action="{{ url_for('run_task') }}" method="post">
+            <input type="hidden" name="task" value="ingest-fixtures">
+            <button type="submit" class="btn">Run Fixture Ingest</button>
+          </form>
+        </div>
+
+        <!-- Generate Suggestions -->
+        <div class="border p-4 rounded-lg">
+          <h3 class="font-semibold text-lg mb-2">2. Generate Suggestions</h3>
+          <p class="text-sm text-gray-600 mb-4">Analyze fixtures using historical data and OpenAI.</p>
+          <form action="{{ url_for('run_task') }}" method="post">
+            <input type="hidden" name="task" value="generate-suggestions">
+            <button type="submit" class="btn">Generate AI Suggestions</button>
+          </form>
+        </div>
+        
+        <!-- Download Historical Data -->
+        <div class="border p-4 rounded-lg">
+          <h3 class="font-semibold text-lg mb-2">Download Historical Data</h3>
+          <p class="text-sm text-gray-600 mb-4">Run the initial bulk download of all historical datasets.</p>
+          <form action="{{ url_for('run_task') }}" method="post">
+            <input type="hidden" name="task" value="fetch-openfootball">
+            <button type="submit" class="btn">Download OpenFootball Data</button>
+          </form>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</body>
+</html>
