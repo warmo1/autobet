@@ -1,76 +1,90 @@
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS teams (
+  team_id   INTEGER PRIMARY KEY,
+  name      TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS matches (
+  match_id    TEXT PRIMARY KEY,       -- e.g. "{date}:{home}:{away}:{comp}"
+  sport       TEXT NOT NULL,
+  comp        TEXT,
+  season      TEXT,
+  date        TEXT NOT NULL,
+  home_id     INTEGER NOT NULL,
+  away_id     INTEGER NOT NULL,
+  fthg        INTEGER,
+  ftag        INTEGER,
+  ftr         TEXT,
+  source      TEXT NOT NULL,
+  inserted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(home_id) REFERENCES teams(team_id),
+  FOREIGN KEY(away_id) REFERENCES teams(team_id)
+);
+
+CREATE TABLE IF NOT EXISTS odds (
+  match_id   TEXT NOT NULL,
+  book       TEXT NOT NULL,
+  market     TEXT NOT NULL,
+  sel        TEXT NOT NULL,           -- 'H','D','A'
+  price      REAL NOT NULL,
+  ts         TEXT NOT NULL,
+  PRIMARY KEY (match_id, book, market, sel, ts),
+  FOREIGN KEY(match_id) REFERENCES matches(match_id)
+);
+
+CREATE TABLE IF NOT EXISTS suggestions (
+  match_id   TEXT NOT NULL,
+  created_ts TEXT NOT NULL,
+  sel        TEXT NOT NULL,
+  model_prob REAL NOT NULL,
+  book       TEXT,
+  price      REAL,
+  edge       REAL,
+  kelly      REAL,
+  PRIMARY KEY (match_id, sel, created_ts),
+  FOREIGN KEY(match_id) REFERENCES matches(match_id)
+);
+
+CREATE TABLE IF NOT EXISTS subscriptions (
+  chat_id    INTEGER PRIMARY KEY,
+  created_ts TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_matches_date ON matches(date);
+CREATE INDEX IF NOT EXISTS idx_odds_match ON odds(match_id);
+"""
+
 def init_schema(conn):
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS teams(
-      team_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      sport TEXT NOT NULL,
-      country TEXT
-    );
+    conn.executescript(SCHEMA)
 
-    CREATE TABLE IF NOT EXISTS events(
-      event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      sport TEXT NOT NULL,
-      comp TEXT,
-      season TEXT,
-      start_date TEXT,            -- YYYY-MM-DD (UTC)
-      home_team TEXT NOT NULL,
-      away_team TEXT NOT NULL,
-      status TEXT DEFAULT 'completed'  -- scheduled|inplay|completed
-    );
+def upsert_team(conn, name: str) -> int:
+    conn.execute("INSERT OR IGNORE INTO teams(name) VALUES (?)", (name,))
+    row = conn.execute("SELECT team_id FROM teams WHERE name=?", (name,)).fetchone()
+    return row[0]
 
-    CREATE TABLE IF NOT EXISTS results(
-      event_id INTEGER PRIMARY KEY,
-      home_score INTEGER,
-      away_score INTEGER,
-      outcome TEXT,               -- H/D/A for football
-      FOREIGN KEY(event_id) REFERENCES events(event_id)
-    );
+def upsert_match(conn, *, sport, comp, season, date, home, away, fthg, ftag, ftr, source) -> str:
+    home_id = upsert_team(conn, home)
+    away_id = upsert_team(conn, away)
+    match_id = f"{date}:{home}:{away}:{comp or ''}"
+    conn.execute(
+        """
+        INSERT INTO matches(match_id,sport,comp,season,date,home_id,away_id,fthg,ftag,ftr,source)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(match_id) DO UPDATE SET
+          fthg=COALESCE(excluded.fthg, matches.fthg),
+          ftag=COALESCE(excluded.ftag, matches.ftag),
+          ftr =COALESCE(excluded.ftr , matches.ftr ),
+          source=excluded.source
+        """,
+        (match_id, sport, comp, season, date, home_id, away_id, fthg, ftag, ftr, source),
+    )
+    return match_id
 
-    CREATE TABLE IF NOT EXISTS odds_snapshots(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      event_id INTEGER NOT NULL,
-      market TEXT NOT NULL,       -- e.g. '1X2'
-      selection TEXT NOT NULL,    -- 'home'|'draw'|'away'
-      bookmaker TEXT,             -- e.g. 'B365'
-      price REAL,
-      ts_collected TEXT,          -- ISO8601 or date for CSV snapshots
-      UNIQUE(event_id, market, selection, bookmaker, ts_collected),
-      FOREIGN KEY(event_id) REFERENCES events(event_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS suggestions(
-      suggestion_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      created_ts INTEGER NOT NULL,
-      event_id INTEGER NOT NULL,
-      market TEXT NOT NULL,
-      selection TEXT NOT NULL,
-      side TEXT NOT NULL,         -- 'back'|'lay'
-      model_prob REAL,
-      price REAL,
-      edge REAL,
-      stake REAL,
-      note TEXT,
-      FOREIGN KEY(event_id) REFERENCES events(event_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS bets(
-      bet_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts INTEGER NOT NULL,
-      mode TEXT NOT NULL,         -- 'paper'|'live'
-      event_id INTEGER NOT NULL,
-      market TEXT NOT NULL,
-      selection TEXT NOT NULL,
-      side TEXT NOT NULL,
-      price REAL NOT NULL,
-      stake REAL NOT NULL,
-      result TEXT,                -- 'win'|'lose'|'push'|NULL
-      pnl REAL,
-      FOREIGN KEY(event_id) REFERENCES events(event_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS bankroll_state(
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-    """)
-    conn.commit()
+def insert_odds_snapshot(conn, match_id: str, *, book: str, market: str, sel: str, price: float, ts: str):
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO odds(match_id,book,market,sel,price,ts)
+        VALUES (?,?,?,?,?,?)
+        """,
+        (match_id, book, market, sel, price, ts),
+    )
