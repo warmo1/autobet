@@ -1,88 +1,171 @@
 import asyncio
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from telegram.helpers import escape_markdown # Import the official helper function
+from datetime import datetime, time as dtime, timezone, timedelta
+import sqlite3
+from typing import List, Tuple
 
-from .config import cfg
-from .db import get_conn, init_schema, recent_suggestions
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# --- Command Handlers ---
+LONDON = timezone(timedelta(hours=0))  # Keep simple; if you have pytz/zoneinfo, use Europe/London.
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a welcome message when the /start command is issued."""
-    welcome_text = (
-        "Hello! I'm your sports betting bot. Here are the available commands:\n\n"
-        "/start - Show this welcome message\n"
-        "/daily_suggestion - Get the latest top betting suggestion"
+def _get_conn(db_url: str) -> sqlite3.Connection:
+    from sports.db import connect
+    return connect(db_url)
+
+def list_subscribers(conn) -> List[int]:
+    rows = conn.execute("SELECT chat_id FROM subscriptions").fetchall()
+    return [r[0] for r in rows]
+
+def add_subscription(conn, chat_id: int):
+    conn.execute("INSERT OR IGNORE INTO subscriptions(chat_id) VALUES (?)", (chat_id,))
+
+def remove_subscription(conn, chat_id: int):
+    conn.execute("DELETE FROM subscriptions WHERE chat_id=?", (chat_id,))
+
+def get_today_fixtures(conn, sport: str) -> List[Tuple]:
+    sql = """
+    SELECT m.match_id, m.date, t1.name, t2.name, COALESCE(m.comp, '')
+    FROM matches m
+    JOIN teams t1 ON t1.team_id=m.home_id
+    JOIN teams t2 ON t2.team_id=m.away_id
+    WHERE m.sport=? AND date(m.date)=date('now','localtime')
+    ORDER BY m.comp, m.date, t1.name
+    """
+    return conn.execute(sql, (sport,)).fetchall()
+
+def get_top_suggestions(conn, sport: str, min_edge: float = 0.03, limit: int = 10):
+    sql = """
+    SELECT s.match_id, s.sel, s.model_prob, s.book, s.price, s.edge, s.kelly,
+           m.date, th.name, ta.name, COALESCE(m.comp,'')
+    FROM suggestions s
+    JOIN matches m ON m.match_id=s.match_id
+    JOIN teams th ON th.team_id=m.home_id
+    JOIN teams ta ON ta.team_id=m.away_id
+    WHERE m.sport=? AND s.edge >= ?
+    ORDER BY s.edge DESC
+    LIMIT ?
+    """
+    return conn.execute(sql, (sport, min_edge, limit)).fetchall()
+
+def _format_fixtures(rows) -> List[str]:
+    if not rows:
+        return ["No fixtures today."]
+    lines = []
+    last_comp = None
+    for match_id, date_iso, home, away, comp in rows:
+        if comp != last_comp:
+            if last_comp is not None:
+                lines.append("")  # blank line between comps
+            lines.append(f"🏆 {comp or 'Fixtures'}")
+            last_comp = comp
+        lines.append(f"• {home} vs {away}  —  {date_iso}")
+    # chunk into Telegram-safe messages
+    chunks, cur = [], []
+    size = 0
+    for ln in lines:
+        if size + len(ln) > 3800:  # leave buffer for safety
+            chunks.append("\n".join(cur)); cur = [ln]; size = len(ln)
+        else:
+            cur.append(ln); size += len(ln)
+    if cur: chunks.append("\n".join(cur))
+    return chunks
+
+def _format_pick(row) -> str:
+    (match_id, sel, p, book, price, edge, kelly,
+     date_iso, home, away, comp) = row
+    dir_map = {"H": home, "D": "Draw", "A": away}
+    return (f"📈 {comp or 'Match'}  {home} vs {away} ({date_iso})\n"
+            f"Pick: {sel} ({dir_map.get(sel, sel)})\n"
+            f"Model prob: {p:.2%}   Price: {price or 0:.2f}   Edge: {edge or 0:.2%}\n"
+            f"Kelly fraction: {kelly or 0:.2%}   Book: {book or 'n/a'}\n"
+            f"id: {match_id}")
+
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Hi 👋  Commands:\n"
+        "/today [sport] – today’s fixtures (default football)\n"
+        "/suggest [sport] – top value picks\n"
+        "/subscribe – daily 08:30 UK digest\n"
+        "/unsubscribe – stop daily digest"
     )
-    await update.message.reply_text(welcome_text)
 
-async def daily_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fetches and sends the most recent betting suggestion."""
-    print("[Telegram] Received /daily_suggestion command.")
-    conn = get_conn(cfg.database_url)
-    init_schema(conn)
-    suggestions_df = recent_suggestions(conn, limit=1)
-    
-    if not suggestions_df.empty:
-        suggestion = suggestions_df.iloc[0]
-        
-        # **FIX**: Use the official library's escape function with version=2
-        home = escape_markdown(str(suggestion['home']), version=2)
-        away = escape_markdown(str(suggestion['away']), version=2)
-        date = escape_markdown(str(suggestion['date']), version=2)
-        market = escape_markdown(str(suggestion['market']), version=2)
-        selection = escape_markdown(str(suggestion['selection']).capitalize(), version=2)
-        side = escape_markdown(str(suggestion['side']).upper(), version=2)
-        
-        # Format numbers, then convert to string and escape
-        model_prob = escape_markdown(f"{suggestion['model_prob']:.2%}", version=2)
-        market_odds = escape_markdown(str(suggestion['market_odds']), version=2)
-        edge = escape_markdown(f"{suggestion['edge']:.2%}", version=2)
-        stake = escape_markdown(f"£{suggestion['stake']:.2f}", version=2)
-        
-        safe_note = escape_markdown(str(suggestion['note']), version=2)
-        
-        message = (
-            f"*📈 Daily Top Suggestion 📈*\n\n"
-            f"*⚽️ Match:* {home} vs {away}\n"
-            f"*🗓️ Date:* {date}\n\n"
-            f"*Market:* {market}\n"
-            f"*Selection:* {selection}\n"
-            f"*Side:* {side}\n\n"
-            f"*Model Probability:* {model_prob}\n"
-            f"*Market Odds:* {market_odds}\n"
-            f"*Edge:* {edge}\n"
-            f"*Suggested Stake:* {stake}\n\n"
-            f"*AI Reasoning:*\n_{safe_note}_"
+async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    sport = (ctx.args[0] if ctx.args else "football").lower()
+    db_url = ctx.bot_data["db_url"]
+    conn = _get_conn(db_url)
+    rows = get_today_fixtures(conn, sport)
+    for chunk in _format_fixtures(rows):
+        await update.message.reply_text(chunk)
+
+async def cmd_suggest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    sport = (ctx.args[0] if ctx.args else "football").lower()
+    db_url = ctx.bot_data["db_url"]
+    conn = _get_conn(db_url)
+    picks = get_top_suggestions(conn, sport, min_edge=0.03, limit=8)
+    if not picks:
+        return await update.message.reply_text("No value edges right now.")
+    for p in picks:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Back", callback_data=f"back:{p[0]}:{p[1]}"),
+            InlineKeyboardButton("Lay",  callback_data=f"lay:{p[0]}:{p[1]}"),
+            InlineKeyboardButton("Details", callback_data=f"more:{p[0]}")
+        ]])
+        await update.message.reply_text(_format_pick(p), reply_markup=kb)
+
+async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    action, match_id, *rest = q.data.split(":")
+    await q.edit_message_reply_markup(None)
+    await q.message.reply_text(f"Recorded action: {action} on {match_id} (analytics only).")
+
+async def cmd_subscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db_url = ctx.bot_data["db_url"]; conn = _get_conn(db_url)
+    add_subscription(conn, update.effective_chat.id)
+    await update.message.reply_text("Subscribed to daily fixtures & edges at 08:30 UK.")
+
+async def cmd_unsubscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db_url = ctx.bot_data["db_url"]; conn = _get_conn(db_url)
+    remove_subscription(conn, update.effective_chat.id)
+    await update.message.reply_text("Unsubscribed.")
+
+def _build_daily_digest(conn) -> str:
+    fixtures = get_today_fixtures(conn, "football")
+    parts = ["📅 Today’s Football"]
+    parts.extend(_format_fixtures(fixtures))
+    picks = get_top_suggestions(conn, "football", min_edge=0.03, limit=5)
+    if picks:
+        parts.append("")
+        parts.append("💡 Top Edges")
+        for p in picks:
+            parts.append(_format_pick(p))
+    return "\n".join(parts[:3900])
+
+async def send_daily(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.chat_id
+    db_url = context.bot_data["db_url"]
+    conn = _get_conn(db_url)
+    txt = _build_daily_digest(conn)
+    await context.bot.send_message(chat_id=chat_id, text=txt)
+
+def run_bot(token: str, *, db_url: str, digest_hour: int = 8, digest_minute: int = 30):
+    from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
+    app = ApplicationBuilder().token(token).build()
+    app.bot_data["db_url"] = db_url
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("suggest", cmd_suggest))
+    app.add_handler(CommandHandler("subscribe", cmd_subscribe))
+    app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
+    app.add_handler(CallbackQueryHandler(on_button))
+
+    # schedule jobs for existing subscribers
+    conn = _get_conn(db_url)
+    for chat_id in list_subscribers(conn):
+        app.job_queue.run_daily(
+            send_daily,
+            time=dtime(hour=digest_hour, minute=digest_minute),
+            chat_id=chat_id
         )
-        
-        try:
-            await update.message.reply_text(message, parse_mode='MarkdownV2')
-        except Exception as e:
-            print(f"[Telegram Error] Failed to send message: {e}")
-            # As a fallback, send the message without any special formatting
-            fallback_message = re.sub(r'([*_])', '', message) # Remove markdown chars
-            await update.message.reply_text(fallback_message)
 
-    else:
-        await update.message.reply_text("Sorry, no suggestions are available at the moment. Please run the suggestion engine first.")
-
-# --- Main Bot Function ---
-
-def run_bot():
-    """Initializes and runs the Telegram bot."""
-    if not cfg.telegram_token:
-        print("[Telegram Error] TELEGRAM_TOKEN is not set in your .env file. The bot cannot start.")
-        return
-
-    print("[Telegram] Starting bot...")
-    application = ApplicationBuilder().token(cfg.telegram_token).build()
-
-    # Register command handlers
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('daily_suggestion', daily_suggestion))
-
-    # Start polling for updates
-    print("[Telegram] Bot is now polling for messages.")
-    application.run_polling()
+    app.run_polling()
