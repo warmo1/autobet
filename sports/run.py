@@ -11,7 +11,6 @@ from sports.ingest.cricket_cricsheet import ingest_dir as ingest_cric_dir
 from sports.ingest.football_kaggle import ingest_file as ingest_kaggle_file
 from sports.ingest.football_premier_league import ingest_dir as ingest_pl_dir
 from sports.ingest.football_openfootball import ingest_dir as ingest_openfootball_dir
-# **FIX**: Import the correct, stable ESPN fixture ingestor
 from sports.ingest.fixtures_api import ingest_fixtures
 
 # Import suggestion and other core functions
@@ -90,7 +89,6 @@ def main(argv=None):
     sp_fixtures.add_argument("--sport", required=True, choices=['football', 'rugby', 'cricket'])
     def _cmd_ingest_fixtures(args):
         conn = connect(db_url); init_schema(conn)
-        # **FIX**: This now calls the correct, stable ingestor
         ingest_fixtures(conn, args.sport)
         conn.close()
     sp_fixtures.set_defaults(func=_cmd_ingest_fixtures)
