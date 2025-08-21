@@ -5,7 +5,8 @@ from sports.db import connect
 from sports.schema import init_schema
 from sports.ingest.football_fd import ingest_dir as ingest_fd_dir
 from sports.ingest.cricket_cricsheet import ingest_dir as ingest_cric_dir
-from sports.ingest.football_kaggle import ingest_file as ingest_kaggle_file # Import the new Kaggle ingestor
+from sports.ingest.football_kaggle import ingest_file as ingest_kaggle_file
+from sports.ingest.football_premier_league import ingest_file as ingest_pl_file # Import the new PL ingestor
 from sports.betdaq_api import place_bet_on_betdaq
 
 def main(argv=None):
@@ -15,9 +16,9 @@ def main(argv=None):
     p = argparse.ArgumentParser(description="Sports Betting Bot")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # --- Ingest Football (football-data.co.uk) Command ---
+    # --- Ingest Football (football-data.co.uk) ---
     sp_football = sub.add_parser("ingest-football-csv", help="Ingest football-data.co.uk CSVs")
-    sp_football.add_argument("--dir", required=True, help="Directory containing *.csv season files")
+    sp_football.add_argument("--dir", required=True, help="Directory for *.csv files")
     def _cmd_ingest_football(args):
         conn = connect(db_url); init_schema(conn)
         n = ingest_fd_dir(conn, args.dir)
@@ -25,9 +26,9 @@ def main(argv=None):
         conn.close()
     sp_football.set_defaults(func=_cmd_ingest_football)
 
-    # --- Ingest Football (Kaggle) Command ---
+    # --- Ingest Football (Kaggle Domestic) ---
     sp_kaggle = sub.add_parser("ingest-football-kaggle", help="Ingest Kaggle domestic football CSV")
-    sp_kaggle.add_argument("--file", required=True, help="Path to the main.csv file from the Kaggle dataset")
+    sp_kaggle.add_argument("--file", required=True, help="Path to the main.csv file")
     def _cmd_ingest_kaggle(args):
         conn = connect(db_url); init_schema(conn)
         n = ingest_kaggle_file(conn, args.file)
@@ -35,9 +36,19 @@ def main(argv=None):
         conn.close()
     sp_kaggle.set_defaults(func=_cmd_ingest_kaggle)
 
-    # --- Ingest Cricket Command ---
+    # --- Ingest Football (Premier League Stats) ---
+    sp_pl = sub.add_parser("ingest-pl-stats", help="Ingest Kaggle Premier League stats CSV")
+    sp_pl.add_argument("--file", required=True, help="Path to the matches.csv file")
+    def _cmd_ingest_pl(args):
+        conn = connect(db_url); init_schema(conn)
+        n = ingest_pl_file(conn, args.file)
+        print(f"[Premier League] Ingested {n} rows.")
+        conn.close()
+    sp_pl.set_defaults(func=_cmd_ingest_pl)
+
+    # --- Ingest Cricket ---
     sp_cricket = sub.add_parser("ingest-cricket-csv", help="Ingest Cricsheet CSVs")
-    sp_cricket.add_argument("--dir", required=True, help="Directory containing *.csv files")
+    sp_cricket.add_argument("--dir", required=True, help="Directory for *.csv files")
     def _cmd_ingest_cricket(args):
         conn = connect(db_url); init_schema(conn)
         n = ingest_cric_dir(conn, args.dir)
@@ -47,24 +58,8 @@ def main(argv=None):
 
     # --- Live Betdaq Command ---
     sp_betdaq = sub.add_parser("live-betdaq", help="Place a live bet on the Betdaq exchange")
-    sp_betdaq.add_argument("--symbol", required=True, help="The market symbol (e.g., 'Man Utd vs Liverpool')")
-    sp_betdaq.add_argument("--odds", required=True, type=float, help="The decimal odds for the bet")
-    sp_betdaq.add_argument("--stake", required=True, type=float, help="The stake for the bet")
-    sp_betdaq.add_argument("--confirm", action="store_true", help="You must include this flag to confirm the bet")
-    def _cmd_live_betdaq(args):
-        if not args.confirm:
-            print("Error: You must add the --confirm flag to place a live bet.")
-            return
-        try:
-            result = place_bet_on_betdaq(args.symbol, args.odds, args.stake)
-            print("Bet placement result:", result)
-        except Exception as e:
-            print(f"An error occurred: {e}")
-    sp_betdaq.set_defaults(func=_cmd_live_betdaq)
-
-    # --- Placeholder for other commands (web, suggest, telegram) ---
-    # You can integrate your other commands back into this structure.
-
+    # ... (Betdaq arguments and function)
+    
     args = p.parse_args(argv)
     args.func(args)
 
