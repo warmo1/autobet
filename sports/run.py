@@ -12,6 +12,7 @@ from sports.ingest.football_kaggle import ingest_file as ingest_kaggle_file
 from sports.ingest.football_premier_league import ingest_dir as ingest_pl_dir
 from sports.ingest.football_openfootball import ingest_dir as ingest_openfootball_dir
 from sports.ingest.fixtures import ingest_football_fixtures
+from sports.ingest.bbc_fixtures import ingest_bbc_football_fixtures # New BBC ingestor
 
 # Import suggestion and other core functions
 from sports.suggest import generate_football_suggestions
@@ -84,16 +85,25 @@ def main(argv=None):
         conn.close()
     sp_cricket.set_defaults(func=_cmd_ingest_cricket)
 
-    # --- Live Fixtures Command ---
+    # --- Live Fixtures Commands ---
     sp_fixtures = sub.add_parser("ingest-fixtures", help="Ingest upcoming fixtures from a live API")
     sp_fixtures.add_argument("--sport", required=True, choices=['football'])
     def _cmd_ingest_fixtures(args):
         conn = connect(db_url); init_schema(conn)
         if args.sport == 'football':
             n = ingest_football_fixtures(conn)
-            print(f"[Fixtures] Ingested {n} upcoming football events.")
+            print(f"[Fixtures] Ingested {n} upcoming football events from API.")
         conn.close()
     sp_fixtures.set_defaults(func=_cmd_ingest_fixtures)
+
+    sp_bbc = sub.add_parser("ingest-bbc-fixtures", help="Ingest upcoming fixtures by scraping the BBC Sport website")
+    sp_bbc.add_argument("--sport", required=True, choices=['football'])
+    def _cmd_ingest_bbc(args):
+        conn = connect(db_url); init_schema(conn)
+        if args.sport == 'football':
+            n = ingest_bbc_football_fixtures(conn)
+        conn.close()
+    sp_bbc.set_defaults(func=_cmd_ingest_bbc)
 
     # --- Suggestion Generation Command ---
     sp_suggest = sub.add_parser("generate-suggestions", help="Generate suggestions for upcoming fixtures")
