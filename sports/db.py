@@ -1,33 +1,23 @@
+import os
 import sqlite3
-from urllib.parse import urlparse
-from contextlib import contextmanager
 
-def _sqlite_path_from_url(db_url: str) -> str:
-    # supports "sqlite:///file.db" and plain "file.db"
-    if db_url.startswith("sqlite:///"):
-        return db_url.replace("sqlite:///", "", 1)
-    if db_url.startswith("sqlite://"):
-        parsed = urlparse(db_url)
-        return parsed.path or "sports_bot.db"
-    return db_url  # assume plain path
+def _path_from_url(url: str) -> str:
+    """Extracts the file path from a sqlite:/// URL."""
+    if url.startswith("sqlite:///"):
+        return url.replace("sqlite:///", "", 1)
+    raise ValueError("Only sqlite:/// URLs are supported in this version.")
 
-def connect(db_url: str) -> sqlite3.Connection:
-    path = _sqlite_path_from_url(db_url)
-    conn = sqlite3.connect(path, timeout=30, isolation_level=None)  # autocommit
+def connect(database_url: str) -> sqlite3.Connection:
+    """Establishes a connection to the SQLite database."""
+    path = _path_from_url(database_url)
+    # Ensure the directory for the database file exists
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    
+    # Connect to the database
+    conn = sqlite3.connect(path, check_same_thread=False)
+    
+    # Set recommended PRAGMA settings for performance and reliability
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
+    
     return conn
-
-@contextmanager
-def txn(conn: sqlite3.Connection):
-    try:
-        conn.execute("BEGIN")
-        yield
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
- def get_conn(db_url: str):
-    """Alias for connect() to keep backwards compatibility."""
-    return connect(db_url)       
