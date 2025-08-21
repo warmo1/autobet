@@ -30,18 +30,27 @@ def ingest_bbc_fixtures(conn: sqlite3.Connection, sport: str) -> int:
         soup = BeautifulSoup(response.text, 'html.parser')
 
         # **FIX**: Instead of looking for a specific ID, search all script tags
-        # for the one containing the fixture data. This is a common pattern for modern websites.
-        script_tag = soup.find('script', id='__NEXT_DATA__')
-        
-        if not script_tag:
-            print("[BBC Ingest Error] Could not find the __NEXT_DATA__ script tag. The BBC website structure may have changed significantly.")
-            return 0
+        # for the one containing the fixture data. This is a more resilient approach.
+        all_scripts = soup.find_all('script')
+        fixture_data = None
+        for script in all_scripts:
+            # The data we need is a large JSON blob. We look for a key part of it.
+            if script.string and '"event-list@football-scores-fixtures"' in script.string:
+                try:
+                    data = json.loads(script.string)
+                    # This is a heuristic: check if the parsed JSON has the expected structure.
+                    if 'props' in data and 'pageProps' in data['props']:
+                        fixture_data = data
+                        break
+                except json.JSONDecodeError:
+                    continue # Ignore scripts that aren't valid JSON
 
-        data = json.loads(script_tag.string)
+        if not fixture_data:
+            print("[BBC Ingest Error] Could not find valid fixture JSON data. The BBC website structure may have changed significantly.")
+            return 0
         
         # Navigate the complex JSON structure to find the fixture data
-        # This path is based on the current structure and might need updating in the future.
-        all_events = data.get('props', {}).get('pageProps', {}).get('payload', [{}])[0].get('body', {}).get('content', {}).get('body', [])
+        all_events = fixture_data.get('props', {}).get('pageProps', {}).get('pageData', {}).get('data', {}).get('find', {}).get('body', {}).get('content', [{}])[0].get('body', [])
         
         count = 0
         for block in all_events:
