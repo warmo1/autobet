@@ -17,11 +17,9 @@ class Config:
     # Telegram
     telegram_token: str = os.getenv("TELEGRAM_TOKEN", "")
 
-    # Betfair
-    betfair_app_key: str = os.getenv("BETFAIR_APP_KEY", "")
-    betfair_username: str = os.getenv("BETFAIR_USERNAME", "")
-    betfair_password: str = os.getenv("BETFAIR_PASSWORD", "")
-    betfair_cert_dir: str = os.getenv("BETFAIR_CERT_DIR", "")
+    # Betdaq API Credentials
+    betdaq_username: str = os.getenv("BETDAQ_USERNAME", "")
+    betdaq_password: str = os.getenv("BETDAQ_PASSWORD", "")
     
     # LLM
     llm_provider: str = os.getenv("LLM_PROVIDER", "gemini").lower()
@@ -34,7 +32,6 @@ class Config:
 
     # RapidAPI
     rapidapi_key: str = os.getenv("RAPIDAPI_KEY", "")
-    # **This is the correct host for the API with the free plan**
     rapidapi_host_football: str = os.getenv("RAPIDAPI_HOST_FOOTBALL", "sportapi7.p.rapidapi.com")
     rapidapi_host_tennis: str = os.getenv("RAPIDAPI_HOST_TENNIS", "")
     rapidapi_host_horse_racing: str = os.getenv("RAPIDAPI_HOST_HORSE_RACING", "")
