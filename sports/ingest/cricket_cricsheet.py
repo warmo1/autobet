@@ -3,60 +3,58 @@ import csv
 import sqlite3
 
 def ingest_dir(conn: sqlite3.Connection, csv_dir: str) -> int:
-    """Ingests a directory of Cricsheet match summary CSVs with enhanced debugging."""
+    """
+    Ingests a directory of Cricsheet CSVs, correctly handling metadata headers.
+    """
+    files = [f for f in os.listdir(csv_dir) if f.lower().endswith(".csv")]
+    total_processed_rows = 0
     
-    try:
-        files = [f for f in os.listdir(csv_dir) if f.lower().endswith(".csv")]
-        if not files:
-            print("--- DEBUG: No CSV files found in the directory.")
-            return 0
-    except Exception as e:
-        print(f"--- DEBUG: Error listing files in directory: {e}")
-        return 0
-
-    total = 0
-    
-    # --- Enhanced Debugging: Process only the first file found ---
-    file_to_debug = files[0]
-    path = os.path.join(csv_dir, file_to_debug)
-    print(f"\n--- DEBUG: Starting detailed analysis of a single file: {file_to_debug} ---\n")
-
-    with open(path, newline="", encoding="utf-8", errors="ignore") as fh:
-        reader = csv.DictReader(fh)
-        
-        # Print headers
-        headers = reader.fieldnames
-        print(f"--- DEBUG: Headers found in file: {headers}\n")
-        
-        # Print first 5 rows and the data we extract
-        print("--- DEBUG: Analyzing first 5 rows... ---")
-        for i, row in enumerate(reader):
-            if i >= 5:
-                break # Stop after 5 rows for this test
-
-            print(f"\n--- Row {i+1} ---")
-            print(f"Original Row Data: {row}")
-
-            # This is the logic we are testing
-            date = (row.get("date") or row.get("start_date") or row.get("event_date") or "").strip()
-            home = (row.get("team1") or row.get("home_team") or "").strip()
-            away = (row.get("team2") or row.get("away_team") or "").strip()
+    for f in files:
+        path = os.path.join(csv_dir, f)
+        with open(path, newline="", encoding="utf-8", errors="ignore") as fh:
             
-            print(f"Extracted Date: '{date}'")
-            print(f"Extracted Home: '{home}'")
-            print(f"Extracted Away: '{away}'")
-
-            if not all([date, home, away]):
-                print("Result: SKIPPING ROW (missing essential data)")
+            # --- FIX: Skip metadata lines at the start of the file ---
+            data_lines = []
+            for line in fh:
+                # Cricsheet metadata starts with 'info,'. The actual data does not.
+                if not line.strip().startswith('info,'):
+                    data_lines.append(line)
+            
+            # If no data lines were found after skipping metadata, move to the next file.
+            if not data_lines:
                 continue
-            else:
-                print("Result: PROCESSING ROW")
-                # In a real run, this is where the DB insert would happen
-                total += 1
-    
-    print(f"\n--- DEBUG: Finished analysis. Processed {total} rows from the test file. ---")
-    # We return 0 because this is just a debug run, not a full ingest.
-    return 0
+
+            # Now, use the cleaned data_lines with the CSV reader
+            reader = csv.DictReader(data_lines)
+            for row in reader:
+                # Use flexible column name checking
+                date = (row.get("date") or row.get("start_date") or "").strip()
+                home = (row.get("team1") or "").strip()
+                away = (row.get("team2") or "").strip()
+
+                if not all([date, home, away]):
+                    continue
+
+                # Upsert event
+                cur = conn.execute("SELECT event_id FROM events WHERE sport='cricket' AND start_date=? AND home_team=? AND away_team=?", (date, home, away))
+                existing_event = cur.fetchone()
+                if existing_event:
+                    event_id = existing_event[0]
+                else:
+                    cur = conn.execute("INSERT INTO events(sport, comp, season, start_date, home_team, away_team, status) VALUES (?,?,?,?,?,?,?)", ("cricket", row.get("match_type"), row.get("season"), date, home, away, "completed" if row.get("winner") else "scheduled"))
+                    event_id = cur.lastrowid
+
+                # Insert result if present
+                if row.get("team1_runs") and row.get("team2_runs"):
+                    h_score, a_score = _to_int(row.get("team1_runs")), _to_int(row.get("team2_runs"))
+                    outcome = "H" if h_score > a_score else ("A" if a_score > h_score else "D")
+                    conn.execute("INSERT OR REPLACE INTO results(event_id, home_score, away_score, outcome) VALUES (?,?,?,?)", (event_id, h_score, a_score, outcome))
+                
+                total_processed_rows += 1
+                
+    # Commit all changes at the end for better performance
+    conn.commit()
+    return total_processed_rows
 
 def _to_int(x):
     try: return int(x)
