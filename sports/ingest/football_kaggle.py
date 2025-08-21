@@ -1,45 +1,36 @@
-import os
 import csv
-import sqlite3
+from datetime import datetime
+from sports.schema import upsert_match
 
-def ingest_file(conn: sqlite3.Connection, csv_path: str) -> int:
-    """
-    Ingests a single CSV file from the Kaggle domestic football dataset.
-    """
-    total = 0
-    print(f"[Kaggle Ingest] Processing file: {csv_path}")
-    with open(csv_path, newline="", encoding="utf-8", errors="ignore") as fh:
-        reader = csv.DictReader(fh)
+def ingest_file(conn, csv_path: str) -> int:
+    count = 0
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
         for row in reader:
-            # Use the correct column names identified from the debug output
-            date, home, away = row.get("date"), row.get("home"), row.get("away")
-            if not all([date, home, away]):
+            try:
+                date = (row.get("date") or row.get("Date") or "").split(" ")[0]
+                # attempt ISO first, else fallback common formats
+                try:
+                    iso = datetime.fromisoformat(date).date().isoformat()
+                except Exception:
+                    iso = datetime.strptime(date, "%d/%m/%Y").date().isoformat()
+                home = row.get("home_team") or row.get("HomeTeam")
+                away = row.get("away_team") or row.get("AwayTeam")
+                comp = row.get("competition") or row.get("Div")
+                fthg = int(row["home_goals"]) if row.get("home_goals") else None
+                ftag = int(row["away_goals"]) if row.get("away_goals") else None
+                ftr  = row.get("result") or row.get("FTR")
+                upsert_match(
+                    conn,
+                    sport="football",
+                    comp=comp,
+                    season=row.get("season"),
+                    date=iso,
+                    home=home, away=away,
+                    fthg=fthg, ftag=ftag, ftr=ftr,
+                    source="kaggle",
+                )
+                count += 1
+            except Exception:
                 continue
-
-            # **FIX**: Use the correct column names 'gh' and 'ga' for goals
-            h_score, a_score = _to_int(row.get("gh")), _to_int(row.get("ga"))
-            
-            if h_score is None or a_score is None:
-                continue
-            
-            outcome = "H" if h_score > a_score else ("A" if a_score > h_score else "D")
-
-            # Upsert event
-            cur = conn.execute("SELECT event_id FROM events WHERE sport='football' AND start_date=? AND home_team=? AND away_team=?", (date, home, away))
-            existing_event = cur.fetchone()
-            if existing_event:
-                event_id = existing_event[0]
-            else:
-                # Use 'competition' for the comp field, as it's more descriptive
-                cur = conn.execute("INSERT INTO events(sport, comp, season, start_date, home_team, away_team, status) VALUES (?,?,?,?,?,?,?)", ("football", row.get("competition"), row.get("season"), date, home, away, "completed"))
-                event_id = cur.lastrowid
-
-            # Insert result
-            conn.execute("INSERT OR REPLACE INTO results(event_id, home_score, away_score, outcome) VALUES (?,?,?,?)", (event_id, h_score, a_score, outcome))
-            total += 1
-    conn.commit()
-    return total
-
-def _to_int(x):
-    try: return int(x)
-    except (ValueError, TypeError): return None
+    return count
