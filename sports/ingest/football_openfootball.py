@@ -1,52 +1,45 @@
-import os
-import re
-import sqlite3
-from datetime import datetime
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Regex to find match lines, e.g., "[Fri Aug/9] Arsenal 4-1 Leicester City"
-MATCH_LINE_REGEX = re.compile(r"\[(.+?)\]\s+(.+?)\s+(\d+-\d+)\s+(.+)")
+# --- Configuration ---
+# Add any new repository names from the openfootball GitHub org to this list
+REPOS_TO_DOWNLOAD=("england" "de-deutschland" "es-spain" "it-italy")
 
-def ingest_dir(conn: sqlite3.Connection, data_dir: str, competition: str, season: str) -> int:
-    """
-    Ingests a directory of openfootball .txt files for a given season.
-    """
-    total = 0
-    print(f"[OpenFootball] Processing directory: {data_dir}")
-    for filename in os.listdir(data_dir):
-        if filename.endswith('.txt'):
-            path = os.path.join(data_dir, filename)
-            with open(path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    match = MATCH_LINE_REGEX.match(line.strip())
-                    if not match:
-                        continue
+# --- Argument Check ---
+if [ -z "$1" ] || ( [ "$1" != "init" ] && [ "$1" != "update" ] ); then
+  echo "Error: Please provide a mode: 'init' for initial bulk download, or 'update' for daily updates."
+  exit 1
+fi
+MODE=$1
 
-                    date_str, home_team, score_str, away_team = match.groups()
-                    
-                    try:
-                        # Attempt to parse date, format can vary (e.g., "Fri Aug/9", "Aug/9")
-                        # This is a simplified parser; a more robust one might be needed for all files
-                        date_obj = datetime.strptime(date_str.split(' ')[-1], '%b/%d')
-                        # Assume the season year is correct for the date
-                        year = int(season.split('/')[0])
-                        date = date_obj.replace(year=year).strftime('%Y-%m-%d')
-                    except ValueError:
-                        continue # Skip if date format is not recognized
+# --- Find the Project's Root Directory ---
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+PROJECT_ROOT="$( dirname "${SCRIPT_DIR}" )"
+BASE_TARGET_DIR="${PROJECT_ROOT}/data/football/openfootball"
 
-                    h_score, a_score = map(int, score_str.split('-'))
-                    outcome = "H" if h_score > a_score else ("A" if a_score > h_score else "D")
+# --- Script Logic ---
+if [ "$MODE" == "init" ]; then
+  echo "--- Running in INITIAL LOAD mode ---"
+  for repo in "${REPOS_TO_DOWNLOAD[@]}"; do
+    TARGET_DIR="${BASE_TARGET_DIR}/${repo}"
+    REPO_URL="https://github.com/openfootball/${repo}.git"
+    if [ -d "${TARGET_DIR}" ]; then
+      echo "Repository '${repo}' already exists. Skipping clone."
+    else
+      echo "Cloning new repository '${repo}'..."
+      mkdir -p "${TARGET_DIR}"
+      git clone "${REPO_URL}" "${TARGET_DIR}"
+    fi
+  done
+  echo "Initial load complete."
 
-                    # Upsert event
-                    cur = conn.execute("SELECT event_id FROM events WHERE sport='football' AND start_date=? AND home_team=? AND away_team=?", (date, home_team.strip(), away_team.strip()))
-                    existing_event = cur.fetchone()
-                    if existing_event:
-                        event_id = existing_event[0]
-                    else:
-                        cur = conn.execute("INSERT INTO events(sport, comp, season, start_date, home_team, away_team, status) VALUES (?,?,?,?,?,?,?)", ("football", competition, season, date, home_team.strip(), away_team.strip(), "completed"))
-                        event_id = cur.lastrowid
-
-                    # Insert result
-                    conn.execute("INSERT OR REPLACE INTO results(event_id, home_score, away_score, outcome) VALUES (?,?,?,?)", (event_id, h_score, a_score, outcome))
-                    total += 1
-    conn.commit()
-    return total
+elif [ "$MODE" == "update" ]; then
+  echo "--- Running in UPDATE mode ---"
+  if [ ! -d "${BASE_TARGET_DIR}" ]; then
+    echo "No data found to update. Run 'init' mode first."
+    exit 1
+  fi
+  # Find all git repositories inside the openfootball data folder and pull changes
+  find "${BASE_TARGET_DIR}" -mindepth 1 -maxdepth 1 -type d -exec echo "Updating repository:" {} \; -exec git -C {} pull \;
+  echo "Update complete."
+fi
