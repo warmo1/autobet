@@ -16,8 +16,14 @@ def ingest_file(conn: sqlite3.Connection, csv_path: str) -> int:
             if not all([date, home, away]):
                 continue
 
-            # Determine the outcome based on goals
             h_score, a_score = _to_int(row.get("goalshome")), _to_int(row.get("goalsaway"))
+            
+            # **FIX**: Check if scores are valid integers before comparing them.
+            # If a row has no score data, skip it.
+            if h_score is None or a_score is None:
+                continue
+            
+            # Determine the outcome based on goals
             outcome = "H" if h_score > a_score else ("A" if a_score > h_score else "D")
 
             # Upsert event
