@@ -21,7 +21,16 @@ def dashboard():
     """Renders the main dashboard page."""
     conn = _get_db_conn()
     init_schema(conn)
-    suggestions = pd.read_sql_query("SELECT * FROM suggestions ORDER BY created_ts DESC LIMIT 10", conn)
+    
+    # **FIX**: Join suggestions with events to get match details for the dashboard
+    suggestions_query = """
+    SELECT s.*, e.home_team, e.away_team, e.start_date
+    FROM suggestions s
+    JOIN events e ON s.event_id = e.event_id
+    ORDER BY s.created_ts DESC LIMIT 10
+    """
+    suggestions = pd.read_sql_query(suggestions_query, conn)
+    
     bets = pd.read_sql_query("SELECT * FROM bets ORDER BY ts DESC LIMIT 10", conn)
     bank_row = conn.execute("SELECT value FROM bankroll_state WHERE key = 'bankroll'").fetchone()
     bankroll = float(bank_row[0]) if bank_row else cfg.paper_starting_bankroll
@@ -38,7 +47,7 @@ def dashboard():
 def suggestions():
     """Renders the suggestions page."""
     conn = _get_db_conn()
-    # Join suggestions with events to get match details
+    # This query correctly joins the tables
     query = """
     SELECT s.*, e.home_team, e.away_team, e.start_date
     FROM suggestions s
