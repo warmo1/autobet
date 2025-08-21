@@ -57,6 +57,12 @@ def bets():
     query = "SELECT b.*, e.home_team, e.away_team FROM bets b JOIN events e ON b.event_id = e.event_id ORDER BY b.ts DESC"
     all_bets = pd.read_sql_query(query, conn)
     conn.close()
+
+    # **FIX**: Pre-format the timestamp before sending it to the template.
+    # The 'ts' column is in milliseconds, so we divide by 1000.
+    if not all_bets.empty:
+        all_bets['formatted_ts'] = pd.to_datetime(all_bets['ts'], unit='ms').dt.strftime('%Y-%m-%d %H:%M')
+
     return render_template("bets.html", bets=all_bets.to_dict("records"))
 
 @app.route("/data")
@@ -117,7 +123,7 @@ def paper_bet():
     conn.execute(
         """INSERT INTO bets (ts, mode, event_id, market, selection, side, price, stake)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (int(time.time()), 'paper', event_id, market, selection, side, price, stake)
+        (int(time.time() * 1000), 'paper', event_id, market, selection, side, price, stake)
     )
     conn.commit()
     conn.close()
@@ -125,7 +131,6 @@ def paper_bet():
     flash(f"Paper bet of £{stake:.2f} placed successfully.", "success")
     return redirect(url_for('bets'))
 
-# **FIX**: Added the missing upload_file route
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if cfg.admin_token and request.form.get("token") != cfg.admin_token:
@@ -147,9 +152,7 @@ def upload_file():
         file.save(filepath)
         
         conn = _get_db_conn()
-        # This is a generic uploader; you might want to have different logic
-        # based on the filename or a form dropdown.
-        rows_ingested = ingest_fd_dir(conn, os.path.dirname(filepath)) # Example: using football-data ingestor
+        rows_ingested = ingest_fd_dir(conn, os.path.dirname(filepath))
         
         os.remove(filepath)
         
