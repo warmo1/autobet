@@ -9,6 +9,7 @@ from sports.schema import init_schema
 from sports.ingest.football_fd import ingest_dir as ingest_fd_dir
 from sports.ingest.cricket_cricsheet import ingest_dir as ingest_cric_dir
 from sports.ingest.football_kaggle import ingest_file as ingest_kaggle_file
+# **FIX**: Changed the import from ingest_file to ingest_dir
 from sports.ingest.football_premier_league import ingest_dir as ingest_pl_dir
 from sports.ingest.football_openfootball import ingest_dir as ingest_openfootball_dir
 from sports.ingest.fixtures import ingest_football_fixtures
@@ -61,6 +62,7 @@ def main(argv=None):
     sp_pl.add_argument("--dir", required=True)
     def _cmd_ingest_pl(args):
         conn = connect(db_url); init_schema(conn)
+        # **FIX**: Changed the function call from ingest_pl_file to ingest_pl_dir
         n = ingest_pl_dir(conn, args.dir)
         print(f"[Premier League] Ingested {n} rows.")
         conn.close()
