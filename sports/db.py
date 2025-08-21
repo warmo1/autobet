@@ -28,3 +28,6 @@ def txn(conn: sqlite3.Connection):
     except Exception:
         conn.execute("ROLLBACK")
         raise
+ def get_conn(db_url: str):
+    """Alias for connect() to keep backwards compatibility."""
+    return connect(db_url)       
