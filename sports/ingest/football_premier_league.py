@@ -1,44 +1,61 @@
+import os
 import csv
+import sqlite3
 from datetime import datetime
-from sports.schema import upsert_match
 
-def ingest_file(conn, csv_path: str) -> int:
+def ingest_dir(conn: sqlite3.Connection, csv_dir: str) -> int:
     """
-    Expecting columns like: date, home_team, away_team, fthg, ftag, ftr, season, competition (optional)
+    Ingests the Premier League dataset from a directory.
+    It processes the fixtures.csv file for match results.
     """
-    count = 0
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
+    total = 0
+    # The main data file in this dataset is fixtures.csv
+    matches_file = os.path.join(csv_dir, 'fixtures.csv')
+
+    if not os.path.exists(matches_file):
+        print(f"[PL Ingest Error] fixtures.csv not found in directory: {csv_dir}")
+        return 0
+
+    print(f"[PL Ingest] Processing file: {matches_file}")
+    with open(matches_file, newline="", encoding="utf-8", errors="ignore") as fh:
+        reader = csv.DictReader(fh)
         for row in reader:
-            try:
-                date_raw = row.get("date") or row.get("Date")
-                date_iso = datetime.fromisoformat(date_raw).date().isoformat()
-            except Exception:
-                try:
-                    date_iso = datetime.strptime(date_raw, "%d/%m/%Y").date().isoformat()
-                except Exception:
-                    continue
-
-            home = row.get("home_team") or row.get("HomeTeam")
-            away = row.get("away_team") or row.get("AwayTeam")
-            if not home or not away:
+            # The column names in fixtures.csv are different
+            date_str = row.get("Date")
+            home = row.get("Home")
+            away = row.get("Away")
+            
+            # Scores are in the 'Score' column, e.g., '3-1'
+            score = row.get("Score")
+            if not all([date_str, home, away, score]):
                 continue
 
-            def _to_int(v):
-                return int(v) if v not in (None, "", "NA") else None
+            try:
+                h_score, a_score = map(int, score.split('-'))
+                # The date format is dd/mm/yyyy in this file
+                date = datetime.strptime(date_str, '%d/%m/%Y').strftime('%Y-%m-%d')
+            except (ValueError, TypeError):
+                # Skip row if score or date format is invalid
+                continue
 
-            upsert_match(
-                conn,
-                sport="football",
-                comp=row.get("competition") or "Premier League",
-                season=row.get("season"),
-                date=date_iso,
-                home=home,
-                away=away,
-                fthg=_to_int(row.get("fthg") or row.get("FTHG")),
-                ftag=_to_int(row.get("ftag") or row.get("FTAG")),
-                ftr=row.get("ftr") or row.get("FTR"),
-                source="kaggle_pl",
-            )
-            count += 1
-    return count
+            outcome = "H" if h_score > a_score else ("A" if a_score > h_score else "D")
+
+            # Upsert event
+            cur = conn.execute("SELECT event_id FROM events WHERE sport='football' AND start_date=? AND home_team=? AND away_team=?", (date, home, away))
+            existing_event = cur.fetchone()
+            if existing_event:
+                event_id = existing_event[0]
+            else:
+                # The season is not in the file, so we can hardcode it or leave it null
+                cur = conn.execute("INSERT INTO events(sport, comp, season, start_date, home_team, away_team, status) VALUES (?,?,?,?,?,?,?)", ("football", "Premier League", "2024/2025", date, home, away, "completed"))
+                event_id = cur.lastrowid
+
+            # Insert result
+            conn.execute("INSERT OR REPLACE INTO results(event_id, home_score, away_score, outcome) VALUES (?,?,?,?)", (event_id, h_score, a_score, outcome))
+            total += 1
+    conn.commit()
+    return total
+
+def _to_int(x):
+    try: return int(x)
+    except (ValueError, TypeError): return None
