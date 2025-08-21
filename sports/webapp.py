@@ -6,6 +6,7 @@ from .config import cfg
 from .db import connect
 from .schema import init_schema
 from .ingest.football_fd import ingest_dir as ingest_fd_dir
+from .ingest.football_premier_league import ingest_dir as ingest_pl_dir # Corrected import
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(24)
@@ -22,7 +23,6 @@ def dashboard():
     conn = _get_db_conn()
     init_schema(conn)
     
-    # **FIX**: Join suggestions with events to get match details for the dashboard
     suggestions_query = """
     SELECT s.*, e.home_team, e.away_team, e.start_date
     FROM suggestions s
@@ -47,7 +47,6 @@ def dashboard():
 def suggestions():
     """Renders the suggestions page."""
     conn = _get_db_conn()
-    # This query correctly joins the tables
     query = """
     SELECT s.*, e.home_team, e.away_team, e.start_date
     FROM suggestions s
@@ -58,7 +57,40 @@ def suggestions():
     conn.close()
     return render_template("suggestions.html", suggestions=all_suggestions.to_dict("records"))
 
-# ... (other routes like /bets, /paper_bet, /upload can be added back here)
+# **FIX**: Added the missing upload_file route
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if cfg.admin_token and request.form.get("token") != cfg.admin_token:
+        flash("Invalid admin token. Upload failed.", "error")
+        return redirect(url_for('dashboard'))
+
+    if 'file' not in request.files:
+        flash('No file part in the request.', 'error')
+        return redirect(url_for('dashboard'))
+    
+    file = request.files['file']
+    if file.filename == '':
+        flash('No file selected for uploading.', 'error')
+        return redirect(url_for('dashboard'))
+
+    if file and file.filename.endswith('.csv'):
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+        
+        conn = _get_db_conn()
+        # This is a generic uploader; you might want to have different logic
+        # based on the filename or a form dropdown.
+        rows_ingested = ingest_fd_dir(conn, os.path.dirname(filepath)) # Example: using football-data ingestor
+        
+        os.remove(filepath)
+        
+        flash(f"Successfully uploaded and processed '{filename}'. Ingested {rows_ingested} new records.", "success")
+    else:
+        flash("Invalid file type. Please upload a CSV file.", "error")
+
+    return redirect(url_for('dashboard'))
+
 
 def create_app():
     return app
