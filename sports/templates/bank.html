@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="card shadow-sm">
+    <div class="card-header"><strong>Bank Balance</strong></div>
+    <div class="card-body">
+      <form method="post" class="row g-3">
+        <div class="col-sm-4">
+          <label class="form-label">Balance</label>
+          <input type="number" step="0.01" name="balance" class="form-control" value="{{ '%.2f'|format(balance) }}">
+        </div>
+        <div class="col-sm-4 d-flex align-items-end">
+          <button class="btn btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}

@@ -1,68 +1,50 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Betting Suggestions</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    body {
-      font-family: 'Inter', sans-serif;
-      background-color: #f3f4f6;
-    }
-    .card {
-        background-color: white;
-        border-radius: 0.75rem;
-        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
-    }
-  </style>
-</head>
-<body class="text-gray-800">
-  <div class="container mx-auto p-4 sm:p-6 lg:p-8">
-    <nav class="bg-white p-4 rounded-lg shadow-md mb-8 flex items-center justify-between">
-      <h1 class="text-2xl font-bold text-gray-900">Sports Bot</h1>
-      <div class="space-x-4">
-        <a href="/" class="text-blue-600 hover:text-blue-800 font-medium">Dashboard</a>
-        <a href="/suggestions" class="text-blue-800 font-bold border-b-2 border-blue-800 pb-1">Suggestions</a>
-        <a href="/bets" class="text-blue-600 hover:text-blue-800 font-medium">Bets</a>
-      </div>
-    </nav>
-
-    <div class="card p-6">
-      <h2 class="text-2xl font-bold mb-6 text-gray-900">All Suggestions</h2>
-      <div class="overflow-x-auto">
-        <table class="min-w-full divide-y divide-gray-200">
-          <thead class="bg-gray-50">
-            <tr>
-              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
-              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Match</th>
-              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">AI Reasoning</th>
-              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
-            </tr>
-          </thead>
-          <tbody class="bg-white divide-y divide-gray-200">
-            {% if suggestions %}
-              {% for s in suggestions %}
-                <tr>
-                  <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{{ s.start_date }}</td>
-                  <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{ s.home_team }} vs {{ s.away_team }}</td>
-                  <td class="px-6 py-4 text-sm text-gray-600 max-w-md">{{ s.note | default('N/A', true) }}</td>
-                  <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                    <!-- Paper bet form can be added back here if needed -->
-                    <span class="text-gray-400">Paper Bet (TBD)</span>
-                  </td>
-                </tr>
-              {% endfor %}
-            {% else %}
+{% extends "base.html" %}
+{% block content %}
+  <div class="card shadow-sm">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <strong>Top Suggestions</strong>
+      <form class="d-flex" method="get">
+        <input type="number" step="0.01" class="form-control form-control-sm me-2" name="min_edge" value="{{ min_edge }}">
+        <button class="btn btn-sm btn-primary">Apply</button>
+      </form>
+    </div>
+    <div class="card-body">
+      {% if suggestions %}
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
               <tr>
-                <td colspan="4" class="px-6 py-4 whitespace-nowrap text-sm text-center text-gray-500">No suggestions available.</td>
+                <th>Competition</th><th>Date</th><th>Match</th><th>Pick</th><th>Model</th><th>Price</th><th>Edge</th><th>Kelly</th><th>Action</th>
               </tr>
-            {% endif %}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+            {% for s in suggestions %}
+              <tr>
+                <td>{{ s['comp'] }}</td>
+                <td>{{ s['date'] }}</td>
+                <td><strong>{{ s['9'] }}</strong> vs <strong>{{ s['10'] }}</strong></td>
+                <td>{{ s['sel'] }}</td>
+                <td>{{ (s['model_prob'] or 0)|float * 100 | round(1) }}%</td>
+                <td>{{ s['price'] or '-' }}</td>
+                <td>{{ (s['edge'] or 0)|float * 100 | round(1) }}%</td>
+                <td>{{ (s['kelly'] or 0)|float * 100 | round(1) }}%</td>
+                <td>
+                  <form method="post" action="{{ url_for('bets_page') }}" class="d-flex gap-2">
+                    <input type="hidden" name="match_id" value="{{ s['match_id'] }}">
+                    <input type="hidden" name="sel" value="{{ s['sel'] }}">
+                    <input type="number" step="0.01" name="stake" placeholder="Stake" class="form-control form-control-sm">
+                    <input type="number" step="0.01" name="price" value="{{ s['price'] or '' }}" class="form-control form-control-sm" placeholder="Price">
+                    <button class="btn btn-sm btn-outline-success">Paper bet</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <em>No suggestions at current threshold.</em>
+      {% endif %}
     </div>
   </div>
-</body>
-</html>
+{% endblock %}
