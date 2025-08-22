@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="card shadow-sm">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <strong>Fixtures • {{ date_iso }}</strong>
+      <form class="d-flex" method="get">
+        <input type="date" class="form-control form-control-sm me-2" name="date" value="{{ date_iso }}">
+        <button class="btn btn-sm btn-primary">Go</button>
+      </form>
+    </div>
+    <div class="card-body">
+      <div class="mb-3">
+        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('fixtures_page', date=prev_date) }}">← {{ prev_date }}</a>
+        <a class="btn btn-sm btn-outline-secondary ms-2" href="{{ url_for('fixtures_page', date=next_date) }}">{{ next_date }} →</a>
+      </div>
+      {% if fixtures %}
+        <div class="table-responsive">
+          <table class="table table-sm">
+            <thead><tr><th>Competition</th><th>Home</th><th>Away</th><th>Match ID</th></tr></thead>
+            <tbody>
+            {% for m in fixtures %}
+              <tr>
+                <td>{{ m['comp'] }}</td>
+                <td>{{ m['home'] }}</td>
+                <td>{{ m['away'] }}</td>
+                <td><code>{{ m['match_id'] }}</code></td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <em>No fixtures for {{ date_iso }}.</em>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}
