@@ -1,22 +1,32 @@
+import os
 import requests
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Dict, Any, Optional
 
 from sports.schema import upsert_match  # use the unified matches/teams schema
 
-UA = {"User-Agent": "autobet/fixtures (github.com/warmo1/autobet)"}
+# Debug toggle: set via CLI flag in run.py (exports FIXTURE_DEBUG=1)
+DEBUG = os.getenv("FIXTURE_DEBUG") == "1"
+
+# Headers – some ESPN edges throttle bare requests
+HEADERS = {
+    "User-Agent": "autobet/fixtures (+https://github.com/warmo1/autobet)",
+    "Accept-Language": "en-GB,en;q=0.9",
+}
 
 # --- ESPN API Configuration ---
 # Map internal sport keys to ESPN paths. Start with soccer (EPL, Championship).
 # Rugby/Cricket endpoints on ESPN are inconsistent/unofficial; keep stubs for now.
 SPORT_PATHS = {
-    "football": "soccer/eng.1",          # English Premier League
+    "football": "soccer/eng.1",               # English Premier League
     "football_championship": "soccer/eng.2",  # EFL Championship
-    # "rugby": "rugby/267979",           # Premiership Rugby (numeric league ID) – optional
-    # "cricket": "cricket/england",      # Placeholder; verify exact path before enabling
+    # "rugby": "rugby/267979",               # Premiership Rugby (numeric league ID) – verify first
+    # "cricket": "cricket/england",          # Placeholder; verify exact path before enabling
 }
 
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
+# Some slates only appear on the web subdomain API
+BASE_URL_FALLBACK = "https://site.web.api.espn.com/apis/v2/sports/{path}/scoreboard"
 
 
 def _dates_param(d: Optional[str]) -> str:
@@ -33,9 +43,19 @@ def _dates_param(d: Optional[str]) -> str:
 
 
 def _espn_get(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    r = requests.get(url, headers=UA, params=params or {}, timeout=30)
+    r = requests.get(url, headers=HEADERS, params=params or {}, timeout=30)
     r.raise_for_status()
     return r.json()
+
+
+def _safe_team_name(side: Dict[str, Any]) -> Optional[str]:
+    t = side.get("team") or {}
+    return (
+        t.get("name")
+        or t.get("displayName")
+        or t.get("shortDisplayName")
+        or t.get("abbreviation")
+    )
 
 
 def _parse_event(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -53,8 +73,8 @@ def _parse_event(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not home_team or not away_team:
             return None
 
-        home_name = (home_team.get("team") or {}).get("name") or (home_team.get("team") or {}).get("displayName")
-        away_name = (away_team.get("team") or {}).get("name") or (away_team.get("team") or {}).get("displayName")
+        home_name = _safe_team_name(home_team)
+        away_name = _safe_team_name(away_team)
         if not home_name or not away_name:
             return None
 
@@ -72,15 +92,11 @@ def _parse_event(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         league_name = (
             (ev.get("league") or {}).get("name")
             or (comp0.get("league") or {}).get("name")
+            or (ev.get("shortName"))
             or "Football"
         )
 
-        # Status gate: keep scheduled + in-progress (so today’s live games are included)
-        status_name = ((ev.get("status") or {}).get("type") or {}).get("name", "")
-        if status_name not in {"STATUS_SCHEDULED", "STATUS_IN_PROGRESS", "STATUS_HALFTIME"}:
-            # skip finals to avoid re-writing scores over settled data if you only want upcoming/live
-            pass  # we still ingest; comment this line to enforce filtering
-
+        # We accept scheduled and in-progress; finals are fine to upsert too
         return {
             "date": match_date,
             "home": home_name,
@@ -91,27 +107,61 @@ def _parse_event(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _fetch_events_for_date(path: str, date_str: str) -> list:
+    url = BASE_URL.format(path=path)
+    params = {"dates": date_str}
+    data = _espn_get(url, params=params)
+    events = data.get("events", []) or []
+    if DEBUG:
+        print(f"[ESPN DEBUG] URL: {url} params: {params} events: {len(events)}")
+    if not events:
+        fb_url = BASE_URL_FALLBACK.format(path=path)
+        try:
+            data = _espn_get(fb_url, params=params)
+            events = data.get("events", []) or []
+            if DEBUG:
+                print(f"[ESPN DEBUG] Fallback URL: {fb_url} events: {len(events)}")
+        except Exception as e:
+            if DEBUG:
+                print(f"[ESPN DEBUG] Fallback error: {e}")
+    return events
+
+
 def ingest_fixtures(conn, sport: str, *, date_iso: Optional[str] = None) -> int:
     """
     Fetch & upsert fixtures for a given sport key via ESPN scoreboard.
     - Uses unified matches/teams schema via upsert_match().
     - Filters by the provided ISO date (defaults to today) using ESPN's ?dates=YYYYMMDD param.
+    - If empty, tries fallback host and a 5-day range (date-2 to date+2).
     """
     if sport not in SPORT_PATHS:
         print(f"[Ingest Error] Sport '{sport}' not supported by the ESPN ingestor.")
         return 0
 
     path = SPORT_PATHS[sport]
-    url = BASE_URL.format(path=path)
-    params = {"dates": _dates_param(date_iso)}
+    day_param = _dates_param(date_iso)
 
-    print(f"[Fixtures] ESPN → {sport} ({path}) for {params['dates']} …")
+    print(f"[Fixtures] ESPN → {sport} ({path}) for {day_param} …")
 
     try:
-        data = _espn_get(url, params=params)
-        events = data.get("events", []) or []
+        # 1) Try the exact date
+        events = _fetch_events_for_date(path, day_param)
+
+        # 2) If none, try a small range around the date (helps across US/EU tz and weekend slates)
         if not events:
-            print(f"[Fixtures] No {sport} events returned for date {params['dates']}.")
+            try:
+                base_dt = datetime.strptime(day_param, "%Y%m%d").date()
+            except Exception:
+                base_dt = date.today()
+            start = base_dt - timedelta(days=2)
+            end = base_dt + timedelta(days=2)
+            range_param = f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
+            if DEBUG:
+                print(f"[ESPN DEBUG] Trying range: {range_param}")
+            events = _fetch_events_for_date(path, range_param)
+
+        if not events:
+            print(f"[Fixtures] No {sport} events returned for date {day_param} (and nearby range).")
             return 0
 
         count = 0
@@ -134,11 +184,14 @@ def ingest_fixtures(conn, sport: str, *, date_iso: Optional[str] = None) -> int:
                     source=f"espn:{path}",
                 )
                 count += 1
-            except Exception:
-                # keep robust; optionally log row
+            except Exception as e:
+                if DEBUG:
+                    print(f"[ESPN DEBUG] upsert error: {e}")
                 continue
 
         print(f"[Fixtures] Ingested {count} fixture(s) from ESPN for {sport}.")
+        if DEBUG:
+            print(f"[ESPN DEBUG] upserted: {count}")
         return count
 
     except requests.exceptions.HTTPError as e:
