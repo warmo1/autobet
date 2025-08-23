@@ -4,6 +4,7 @@ from datetime import datetime, date, timedelta
 from typing import Dict, Any, Optional
 
 from sports.schema import upsert_match  # use the unified matches/teams schema
+import sqlite3
 
 # Debug toggle: set via CLI flag in run.py (exports FIXTURE_DEBUG=1)
 DEBUG = os.getenv("FIXTURE_DEBUG") == "1"
@@ -27,6 +28,48 @@ SPORT_PATHS = {
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
 # Some slates only appear on the web subdomain API
 BASE_URL_FALLBACK = "https://site.web.api.espn.com/apis/v2/sports/{path}/scoreboard"
+
+# --- Minimal, robust DB helpers (avoid brittle upsert_match assumptions) ---
+
+def _ensure_team(conn: sqlite3.Connection, name: str) -> str:
+    cur = conn.execute("SELECT team_id FROM teams WHERE name=?", (name,))
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    # deterministic team_id based on name
+    team_id = name.strip()
+    conn.execute("INSERT OR IGNORE INTO teams(team_id, name) VALUES (?, ?)", (team_id, name))
+    return team_id
+
+
+def _upsert_match_raw(
+    conn: sqlite3.Connection,
+    *,
+    sport: str,
+    comp: str,
+    date: str,
+    home: str,
+    away: str,
+    source: str,
+):
+    home_id = _ensure_team(conn, home)
+    away_id = _ensure_team(conn, away)
+    match_id = f"{sport}:{date}:{home}:{away}"
+    # insert if missing
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO matches(match_id, sport, comp, season, date, home_id, away_id, fthg, ftag, ftr, source)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            match_id, sport, comp or "", "", date, home_id, away_id, None, None, None, source,
+        ),
+    )
+    # small update to keep comp/source fresh
+    conn.execute(
+        "UPDATE matches SET comp=COALESCE(?, comp), source=COALESCE(?, source) WHERE match_id=?",
+        (comp or "", source or "", match_id),
+    )
 
 
 def _dates_param(d: Optional[str]) -> str:
@@ -194,23 +237,19 @@ def ingest_fixtures(conn, sport: str, *, date_iso: Optional[str] = None) -> int:
                 except Exception:
                     pass
             try:
-                upsert_match(
+                _upsert_match_raw(
                     conn,
                     sport="football" if sport.startswith("football") else sport,
                     comp=norm["comp"],
-                    season="",  # avoid None so downstream code can't subscript it
                     date=norm["date"],
                     home=norm["home"],
                     away=norm["away"],
-                    fthg=None,
-                    ftag=None,
-                    ftr=None,
                     source=f"espn:{path}",
                 )
                 count += 1
             except Exception as e:
                 if DEBUG:
-                    print(f"[ESPN DEBUG] upsert error: {e}")
+                    print(f"[ESPN DEBUG] upsert error: {e} for {norm['home']} vs {norm['away']} on {norm['date']}")
                 continue
 
         print(f"[Fixtures] Ingested {count} fixture(s) from ESPN for {sport}.")
