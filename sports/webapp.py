@@ -12,7 +12,7 @@ def _try_import(mod_name, alias=None):
     except ImportError:
         return None
 
-_mod_web = _try_import('sports.webapp', alias='webapp')
+_mod_web = _try_import('sports.webapp', alias='web')
 
 def main():
     ap = argparse.ArgumentParser(description="Autobet CLI")
