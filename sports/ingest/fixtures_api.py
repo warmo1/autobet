@@ -1,70 +1,153 @@
 import requests
-from datetime import datetime
-from ..config import cfg
+from datetime import datetime, date
+from typing import Dict, Any, Optional
+
+from sports.schema import upsert_match  # use the unified matches/teams schema
+
+UA = {"User-Agent": "autobet/fixtures (github.com/warmo1/autobet)"}
 
 # --- ESPN API Configuration ---
-# This maps our internal sport names to the specific paths used by the ESPN API.
+# Map internal sport keys to ESPN paths. Start with soccer (EPL, Championship).
+# Rugby/Cricket endpoints on ESPN are inconsistent/unofficial; keep stubs for now.
 SPORT_PATHS = {
-    'football': 'soccer/eng.1', # English Premier League
-    'rugby': 'rugby/league',     # Generic rugby league
-    'cricket': 'cricket/ipl'     # Indian Premier League (as a stable example)
+    "football": "soccer/eng.1",          # English Premier League
+    "football_championship": "soccer/eng.2",  # EFL Championship
+    # "rugby": "rugby/267979",           # Premiership Rugby (numeric league ID) – optional
+    # "cricket": "cricket/england",      # Placeholder; verify exact path before enabling
 }
 
-def ingest_fixtures(conn, sport: str) -> int:
+BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
+
+
+def _dates_param(d: Optional[str]) -> str:
+    """Return ESPN dates param as YYYYMMDD for the provided ISO date or today."""
+    if not d:
+        d = date.today().isoformat()
+    try:
+        return datetime.fromisoformat(d).strftime("%Y%m%d")
+    except ValueError:
+        # allow already formatted 8-digit strings
+        if len(d) == 8 and d.isdigit():
+            return d
+        raise
+
+
+def _espn_get(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    r = requests.get(url, headers=UA, params=params or {}, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def _parse_event(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Normalise an ESPN scoreboard event into a dict for upsert_match."""
+    try:
+        comps = ev.get("competitions", [])
+        comp0 = comps[0] if comps else {}
+        competitors = comp0.get("competitors", [])
+        if len(competitors) < 2:
+            return None
+
+        # Identify home/away by flag, not order
+        home_team = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        away_team = next((c for c in competitors if c.get("homeAway") == "away"), None)
+        if not home_team or not away_team:
+            return None
+
+        home_name = (home_team.get("team") or {}).get("name") or (home_team.get("team") or {}).get("displayName")
+        away_name = (away_team.get("team") or {}).get("name") or (away_team.get("team") or {}).get("displayName")
+        if not home_name or not away_name:
+            return None
+
+        iso_dt = ev.get("date")  # e.g. 2025-08-23T14:00Z
+        match_date = None
+        if iso_dt:
+            try:
+                match_date = datetime.fromisoformat(iso_dt.replace("Z", "+00:00")).date().isoformat()
+            except Exception:
+                pass
+        if not match_date:
+            return None
+
+        # League/competition name – try event then competition then top-level fallback
+        league_name = (
+            (ev.get("league") or {}).get("name")
+            or (comp0.get("league") or {}).get("name")
+            or "Football"
+        )
+
+        # Status gate: keep scheduled + in-progress (so today’s live games are included)
+        status_name = ((ev.get("status") or {}).get("type") or {}).get("name", "")
+        if status_name not in {"STATUS_SCHEDULED", "STATUS_IN_PROGRESS", "STATUS_HALFTIME"}:
+            # skip finals to avoid re-writing scores over settled data if you only want upcoming/live
+            pass  # we still ingest; comment this line to enforce filtering
+
+        return {
+            "date": match_date,
+            "home": home_name,
+            "away": away_name,
+            "comp": league_name,
+        }
+    except Exception:
+        return None
+
+
+def ingest_fixtures(conn, sport: str, *, date_iso: Optional[str] = None) -> int:
     """
-    Fetches and ingests fixtures for a given sport directly from the stable ESPN API.
+    Fetch & upsert fixtures for a given sport key via ESPN scoreboard.
+    - Uses unified matches/teams schema via upsert_match().
+    - Filters by the provided ISO date (defaults to today) using ESPN's ?dates=YYYYMMDD param.
     """
     if sport not in SPORT_PATHS:
         print(f"[Ingest Error] Sport '{sport}' not supported by the ESPN ingestor.")
         return 0
 
-    url = f"http://site.api.espn.com/apis/site/v2/sports/{SPORT_PATHS[sport]}/scoreboard"
-    print(f"[Fixtures] Fetching {sport.title()} fixtures from ESPN API...")
+    path = SPORT_PATHS[sport]
+    url = BASE_URL.format(path=path)
+    params = {"dates": _dates_param(date_iso)}
+
+    print(f"[Fixtures] ESPN → {sport} ({path}) for {params['dates']} …")
 
     try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        
-        fixtures = data.get('events', [])
-        if not fixtures:
-            print(f"[Fixtures] No {sport.title()} fixtures found for today on ESPN.")
+        data = _espn_get(url, params=params)
+        events = data.get("events", []) or []
+        if not events:
+            print(f"[Fixtures] No {sport} events returned for date {params['dates']}.")
             return 0
-            
+
         count = 0
-        for event in fixtures:
-            # We only want to ingest matches that are scheduled for the future
-            if event.get('status', {}).get('type', {}).get('name') != 'STATUS_SCHEDULED':
+        for ev in events:
+            norm = _parse_event(ev)
+            if not norm:
                 continue
-
-            competitors = event.get('competitions', [{}])[0].get('competitors', [])
-            if len(competitors) < 2:
-                continue
-
-            home = competitors[0].get('team', {}).get('displayName')
-            away = competitors[1].get('team', {}).get('displayName')
-            
-            # ESPN provides dates in ISO 8601 format (e.g., '2025-08-21T19:00Z')
-            date_str = event.get('date', '').split('T')[0]
-            league = data.get('leagues', [{}])[0].get('name', 'Unknown League')
-            
-            if home and away and date_str:
-                conn.execute(
-                    "INSERT OR IGNORE INTO events(sport, comp, start_date, home_team, away_team, status) VALUES (?,?,?,?,?,?)",
-                    (sport, league, date_str, home, away, "scheduled")
+            try:
+                upsert_match(
+                    conn,
+                    sport="football" if sport.startswith("football") else sport,
+                    comp=norm["comp"],
+                    season=None,
+                    date=norm["date"],
+                    home=norm["home"],
+                    away=norm["away"],
+                    fthg=None,
+                    ftag=None,
+                    ftr=None,
+                    source=f"espn:{path}",
                 )
                 count += 1
-                
-        conn.commit()
-        print(f"[Fixtures] Ingested {count} {sport.title()} fixtures from ESPN.")
+            except Exception:
+                # keep robust; optionally log row
+                continue
+
+        print(f"[Fixtures] Ingested {count} fixture(s) from ESPN for {sport}.")
         return count
-        
+
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 404:
-             print(f"[Fixtures] The ESPN API endpoint returned a 404 Not Found error. This may be due to the league being out of season.")
-             return 0
-        print(f"[API Error] Could not fetch data from ESPN: {e}")
+        code = getattr(e.response, "status_code", None)
+        if code == 404:
+            print("[Fixtures] ESPN returned 404 (possibly out of season / bad league path).")
+            return 0
+        print(f"[API Error] ESPN HTTP error: {e}")
         return 0
     except Exception as e:
-        print(f"[API Error] An unexpected error occurred: {e}")
+        print(f"[API Error] Unexpected error: {e}")
         return 0
