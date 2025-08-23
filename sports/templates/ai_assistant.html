@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Data Assistant</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; background-color: #f3f4f6; }
+    .card { background-color: white; border-radius: 0.75rem; box-shadow: 0 1px 3px 0 rgba(0,0,0,0.1); }
+  </style>
+</head>
+<body class="text-gray-800">
+  <div class="container mx-auto p-6">
+    {% include 'nav.html' %}
+    <div class="card p-6">
+      <h2 class="text-2xl font-bold mb-4">AI Data Assistant</h2>
+      <p class="text-gray-600 mb-6">Ask a question about the data in your database in plain English. The AI will attempt to translate it into a SQL query and show you the results.</p>
+      
+      <form action="{{ url_for('ask_ai') }}" method="post">
+        <div class="mb-4">
+          <label for="question" class="block text-sm font-medium text-gray-700">Your Question:</label>
+          <input type="text" name="question" id="question" class="mt-1 block w-full p-2 border border-gray-300 rounded-md" placeholder="e.g., Show all of Liverpool's results in the 2022/23 season" required>
+        </div>
+        <button type="submit" class="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700">Ask AI</button>
+      </form>
+
+      {% if query and results %}
+        <div class="mt-8">
+          <h3 class="font-semibold text-lg">Generated SQL Query:</h3>
+          <pre class="bg-gray-100 p-3 rounded-md text-sm my-2"><code>{{ query }}</code></pre>
+          
+          <h3 class="font-semibold text-lg mt-4">Results:</h3>
+          <div class="table-responsive mt-2">
+            <table class="table-auto w-full text-sm">
+              <thead>
+                <tr class="bg-gray-100">
+                  {% for col in results[0].keys() %}
+                    <th class="px-4 py-2 text-left">{{ col }}</th>
+                  {% endfor %}
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in results %}
+                  <tr class="border-b">
+                    {% for value in row.values() %}
+                      <td class="px-4 py-2">{{ value }}</td>
+                    {% endfor %}
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      {% elif query %}
+         <p class="mt-4 text-gray-600">The query executed but returned no results.</p>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>
