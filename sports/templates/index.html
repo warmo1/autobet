@@ -11,14 +11,13 @@
           {% if fixtures %}
             <div class="table-responsive">
               <table class="table table-sm">
-                <thead><tr><th>Competition</th><th>Home</th><th>Away</th><th>Match ID</th></tr></thead>
+                <thead><tr><th>Competition</th><th>Home</th><th>Away</th></tr></thead>
                 <tbody>
                 {% for m in fixtures %}
                   <tr>
-                    <td>{{ m['comp'] }}</td>
-                    <td>{{ m['home'] }}</td>
-                    <td>{{ m['away'] }}</td>
-                    <td><code>{{ m['match_id'] }}</code></td>
+                    <td>{{ m.comp }}</td>
+                    <td>{{ m.home_team }}</td>
+                    <td>{{ m.away_team }}</td>
                   </tr>
                 {% endfor %}
                 </tbody>
@@ -47,7 +46,7 @@
 
       <div class="card shadow-sm">
         <div class="card-header d-flex justify-content-between align-items-center">
-          <strong>Top Suggestions (edge ≥ 3%)</strong>
+          <strong>Top Suggestions</strong>
           <a class="btn btn-sm btn-outline-primary" href="{{ url_for('suggestions_page') }}">View all</a>
         </div>
         <div class="card-body">
@@ -55,34 +54,14 @@
             <ul class="list-group list-group-flush">
               {% for s in suggestions %}
                 <li class="list-group-item">
-                  <div class="small text-muted">{{ s['comp'] }} • {{ s['date'] }}</div>
-                  <div><strong>{{ s['9'] }} vs {{ s['10'] }}</strong></div>
-                  <div class="small">Pick: {{ s['sel'] }} • Model: {{ (s['model_prob'] or 0)|float * 100 | round(1) }}%
-                    • Price: {{ s['price'] or '-' }} • Edge: {{ (s['edge'] or 0)|float * 100 | round(1) }}%</div>
-                  <form method="post" action="{{ url_for('bets_page') }}" class="row g-1 mt-2">
-                    <input type="hidden" name="match_id" value="{{ s['match_id'] }}">
-                    <div class="col-4">
-                      <select name="sel" class="form-select form-select-sm">
-                        <option value="H" {% if s['sel']=='H' %}selected{% endif %}>Home</option>
-                        <option value="D" {% if s['sel']=='D' %}selected{% endif %}>Draw</option>
-                        <option value="A" {% if s['sel']=='A' %}selected{% endif %}>Away</option>
-                      </select>
-                    </div>
-                    <div class="col-4">
-                      <input name="stake" type="number" step="0.01" class="form-control form-control-sm" placeholder="Stake">
-                    </div>
-                    <div class="col-4 d-grid">
-                      <input name="price" type="number" step="0.01" class="form-control form-control-sm" value="{{ s['price'] or '' }}" placeholder="Price">
-                    </div>
-                    <div class="col-12 mt-1 d-grid">
-                      <button class="btn btn-sm btn-outline-success">Paper bet</button>
-                    </div>
-                  </form>
+                  <div class="small text-muted">{{ s.comp }} • {{ s.start_date }}</div>
+                  <div><strong>{{ s.home_team }} vs {{ s.away_team }}</strong></div>
+                  <div class="small">AI Note: {{ s.note }}</div>
                 </li>
               {% endfor %}
             </ul>
           {% else %}
-            <em>No suggestions currently meeting threshold.</em>
+            <em>No suggestions available.</em>
           {% endif %}
         </div>
       </div>
