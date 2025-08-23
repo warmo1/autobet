@@ -23,12 +23,12 @@ def main():
 
     # --- Web server ---
     if _mod_web and hasattr(_mod_web, 'create_app'):
-        sp_web = sub.add_parser("web", help="Run the Flask web app")
-        sp_web.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
-        sp_web.add_argument("--port", type=int, default=8010, help="Port (default: 8010)")
-        sp_web.add_argument("--debug", action="store_true", help="Run Flask in debug mode")
+        sp_web = sub.add_parser('web', help='Run the Flask web app')
+        sp_web.add_argument('--host', default='0.0.0.0', help='Bind address (default: 0.0.0.0)')
+        sp_web.add_argument('--port', type=int, default=8010, help='Port (default: 8010)')
+        sp_web.add_argument('--debug', action='store_true', help='Run Flask in debug mode')
         def _cmd_web(args):
-            db_url = args.db if hasattr(args, 'db') and args.db else os.getenv("DATABASE_URL", "sqlite:///sports_bot.db")
+            db_url = args.db if hasattr(args, 'db') and args.db else os.getenv('DATABASE_URL', 'sqlite:///sports_bot.db')
             app = _mod_web.create_app(db_url)
             print(f"[WEB] Starting Flask on http://{args.host}:{args.port} (debug={args.debug}) DB={db_url}")
             app.run(host=args.host, port=args.port, debug=args.debug)
@@ -42,5 +42,5 @@ def main():
 
     args.func(args)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
