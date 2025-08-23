@@ -1,31 +1,38 @@
-{% extends "base.html" %}
+{% extends 'base.html' %}
 {% block content %}
-  <div class="card shadow-sm">
-    <div class="card-header"><strong>Recent Paper Bets</strong></div>
-    <div class="card-body">
-      {% if bets %}
-        <div class="table-responsive">
-          <table class="table table-sm">
-            <thead>
-              <tr><th>When</th><th>Match</th><th>Pick</th><th>Stake</th><th>Price</th><th>Match ID</th></tr>
-            </thead>
-            <tbody>
-            {% for b in bets %}
-              <tr>
-                <td class="text-nowrap">{{ b['created_ts'] }}</td>
-                <td>{{ b['comp'] }} — <strong>{{ b['home'] }}</strong> vs <strong>{{ b['away'] }}</strong> ({{ b['date'] }})</td>
-                <td>{{ b['sel'] }}</td>
-                <td>{{ '%.2f'|format(b['stake']) }}</td>
-                <td>{{ '%.2f'|format(b['price']) }}</td>
-                <td><code>{{ b['match_id'] }}</code></td>
-              </tr>
-            {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      {% else %}
-        <em>No paper bets yet.</em>
-      {% endif %}
-    </div>
-  </div>
+<div class="card">
+  <h2 style="margin:0 0 10px 0;">Paper Bets</h2>
+  <form class="inline" method="post" action="/bets">
+    <input type="text" name="match_id" placeholder="match_id" style="width:280px" />
+    <select name="sel">
+      <option value="H">H</option>
+      <option value="D">D</option>
+      <option value="A">A</option>
+    </select>
+    <input type="number" step="0.01" name="stake" placeholder="Stake" style="width:120px" />
+    <input type="number" step="0.01" name="price" placeholder="Price" style="width:120px" />
+    <button class="btn" type="submit">Add bet</button>
+  </form>
+  <div style="height:8px"></div>
+  {% if bets %}
+  <table class="table">
+    <thead><tr><th>When</th><th>Comp</th><th>Fixture</th><th>Sel</th><th>Stake</th><th>Price</th><th>Match ID</th></tr></thead>
+    <tbody>
+      {% for b in bets %}
+      <tr>
+        <td class="muted">{{ b['created_ts'] }}</td>
+        <td>{{ b['comp'] }}</td>
+        <td>{{ b['home'] }} vs {{ b['away'] }}</td>
+        <td>{{ b['sel'] }}</td>
+        <td>{{ '%.2f' % b['stake'] }}</td>
+        <td>{{ '%.2f' % b['price'] }}</td>
+        <td class="muted">{{ b['match_id'] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <div class="muted">No bets yet.</div>
+  {% endif %}
+</div>
 {% endblock %}

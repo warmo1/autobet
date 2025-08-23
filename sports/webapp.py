@@ -1,139 +1,190 @@
-import os
-import time
-import pandas as pd
-from datetime import date, timedelta, datetime
-from flask import Flask, render_template, request, redirect, flash, url_for
-from .config import cfg
-from .db import connect
-from .schema import init_schema
 
-# This check allows the app to work with both the old and new db.py files
+import os
+from datetime import datetime, date, timedelta
+from flask import Flask, render_template, request, redirect, flash, url_for
+
+# Prefer connect(); fall back to legacy get_conn if needed
 try:
     from .db import connect as get_conn
-except ImportError:
-    from .db import get_conn
+except Exception:  # pragma: no cover
+    from .db import get_conn  # type: ignore
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET", "dev-secret")
+from .schema import init_schema
 
-def _get_db_conn():
-    """Helper to get a DB connection."""
-    return get_conn(cfg.database_url)
+# --- Extra lightweight tables the UI needs (created if missing) ---
+EXTRA_SCHEMA = """
+CREATE TABLE IF NOT EXISTS bank (
+  id INTEGER PRIMARY KEY CHECK (id=1),
+  balance REAL NOT NULL
+);
+INSERT OR IGNORE INTO bank(id, balance) VALUES (1, 1000.0);
+
+CREATE TABLE IF NOT EXISTS paper_bets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  match_id TEXT NOT NULL,
+  sel TEXT NOT NULL,            -- 'H','D','A'
+  stake REAL NOT NULL,
+  price REAL NOT NULL,
+  created_ts TEXT DEFAULT CURRENT_TIMESTAMP,
+  result TEXT,
+  settled_ts TEXT
+);
+"""
+
+
+def _ensure_extra_schema(conn):
+    conn.executescript(EXTRA_SCHEMA)
+
 
 def _today_iso() -> str:
-    """Returns today's date in YYYY-MM-DD format."""
     return date.today().isoformat()
 
-@app.route("/")
-def index():
-    """Renders the main dashboard page."""
-    conn = _get_db_conn()
-    init_schema(conn)
-    
-    d = request.args.get("date") or _today_iso()
+
+def bank_get(conn) -> float:
+    row = conn.execute("SELECT balance FROM bank WHERE id=1").fetchone()
+    return float(row[0]) if row else 0.0
+
+
+def bank_set(conn, value: float) -> None:
+    conn.execute("UPDATE bank SET balance=? WHERE id=1", (float(value),))
+
+
+def recent_paper_bets(conn, limit: int = 50):
+    sql = """
+    SELECT b.id, b.match_id, b.sel, b.stake, b.price, b.created_ts,
+           m.date, th.name AS home, ta.name AS away, COALESCE(m.comp,'') as comp
+    FROM paper_bets b
+    LEFT JOIN matches m ON m.match_id=b.match_id
+    LEFT JOIN teams th ON th.team_id=m.home_id
+    LEFT JOIN teams ta ON ta.team_id=m.away_id
+    ORDER BY b.created_ts DESC
+    LIMIT ?
+    """
+    return conn.execute(sql, (limit,)).fetchall()
+
+
+def fixtures_for_date(conn, date_iso: str, sport: str = "football"):
+    sql = """
+    SELECT m.match_id, m.date, th.name AS home, ta.name AS away, COALESCE(m.comp,'') as comp
+    FROM matches m
+    JOIN teams th ON th.team_id=m.home_id
+    JOIN teams ta ON ta.team_id=m.away_id
+    WHERE m.sport=? AND date(m.date)=date(?)
+    ORDER BY comp, m.date, home
+    """
+    return conn.execute(sql, (sport, date_iso)).fetchall()
+
+
+def top_suggestions(conn, sport: str = "football", min_edge: float = 0.0, limit: int = 100):
+    # If suggestions table isn’t present, just return empty list
     try:
-        datetime.fromisoformat(d)
+        sql = """
+        SELECT s.match_id, s.sel, s.model_prob, s.book, s.price, s.edge, s.kelly,
+               m.date, th.name AS home, ta.name AS away, COALESCE(m.comp,'') as comp
+        FROM suggestions s
+        JOIN matches m ON m.match_id=s.match_id
+        JOIN teams th ON th.team_id=m.home_id
+        JOIN teams ta ON ta.team_id=m.away_id
+        WHERE m.sport=? AND s.edge >= ?
+        ORDER BY s.edge DESC
+        LIMIT ?
+        """
+        return conn.execute(sql, (sport, float(min_edge), int(limit))).fetchall()
     except Exception:
-        d = _today_iso()
+        return []
 
-    fixtures_query = "SELECT e.* FROM events e WHERE e.start_date = ? ORDER BY e.comp, e.home_team"
-    fixtures = pd.read_sql_query(fixtures_query, conn, params=(d,))
 
-    suggestions_query = "SELECT s.*, e.home_team, e.away_team, e.start_date, e.comp FROM suggestions s JOIN events e ON s.event_id = e.event_id ORDER BY s.created_ts DESC LIMIT 10"
-    suggestions = pd.read_sql_query(suggestions_query, conn)
-    
-    bank_row = conn.execute("SELECT value FROM bankroll_state WHERE key = 'bankroll'").fetchone()
-    bankroll = float(bank_row[0]) if bank_row else cfg.paper_starting_bankroll
-    conn.close()
-    
-    return render_template(
-        "index.html",
-        date_iso=d,
-        fixtures=fixtures.to_dict("records"),
-        suggestions=suggestions.to_dict("records"),
-        balance=round(bankroll, 2)
-    )
+def create_app(db_url: str | None = None) -> Flask:
+    app = Flask(__name__)
+    app.secret_key = os.getenv("FLASK_SECRET", "dev-secret")
+    app.config["DB_URL"] = db_url or os.getenv("DATABASE_URL", "sqlite:///sports_bot.db")
 
-@app.route("/fixtures")
-def fixtures_page():
-    """Renders the fixtures page for a given date."""
-    d = request.args.get("date", _today_iso())
-    try:
+    # Ensure schema on boot
+    with get_conn(app.config["DB_URL"]) as conn:
+        init_schema(conn)
+        _ensure_extra_schema(conn)
+
+    @app.route("/health")
+    def health():
+        return {"status": "ok"}
+
+    @app.route("/")
+    def index():
+        d = request.args.get("date") or _today_iso()
+        try:
+            datetime.fromisoformat(d)
+        except Exception:
+            d = _today_iso()
+        with get_conn(app.config["DB_URL"]) as conn:
+            fx = fixtures_for_date(conn, d)
+            sug = top_suggestions(conn, min_edge=0.03, limit=15)
+            bal = bank_get(conn)
+        return render_template("index.html", date_iso=d, fixtures=fx, suggestions=sug, balance=bal, config=app.config)
+
+    @app.route("/fixtures")
+    def fixtures_page():
+        d = request.args.get("date") or _today_iso()
+        try:
+            datetime.fromisoformat(d)
+        except Exception:
+            d = _today_iso()
+        with get_conn(app.config["DB_URL"]) as conn:
+            fx = fixtures_for_date(conn, d)
         dt = datetime.fromisoformat(d).date()
-    except ValueError:
-        dt = date.today()
-        d = dt.isoformat()
+        prev_d = (dt - timedelta(days=1)).isoformat()
+        next_d = (dt + timedelta(days=1)).isoformat()
+        return render_template("fixtures.html", date_iso=d, fixtures=fx, prev_date=prev_d, next_date=next_d, config=app.config)
 
-    conn = _get_db_conn()
-    query = "SELECT * FROM events WHERE start_date = ? AND sport = 'football' ORDER BY comp, home_team"
-    fixtures = pd.read_sql_query(query, conn, params=(d,))
-    conn.close()
+    @app.route("/suggestions")
+    def suggestions_page():
+        min_edge = float(request.args.get("min_edge", "0.03"))
+        with get_conn(app.config["DB_URL"]) as conn:
+            sug = top_suggestions(conn, min_edge=min_edge, limit=100)
+        return render_template("suggestions.html", min_edge=min_edge, suggestions=sug, config=app.config)
 
-    prev_d = (dt - timedelta(days=1)).isoformat()
-    next_d = (dt + timedelta(days=1)).isoformat()
-    
-    return render_template("fixtures.html", date_iso=d, fixtures=fixtures.to_dict("records"), prev_date=prev_d, next_date=next_d)
+    @app.route("/bets", methods=["GET", "POST"])
+    def bets_page():
+        if request.method == "POST":
+            match_id = (request.form.get("match_id") or "").strip()
+            sel = (request.form.get("sel") or "").strip().upper()
+            stake = request.form.get("stake")
+            price = request.form.get("price")
+            try:
+                if not match_id or sel not in ("H", "D", "A"):
+                    raise ValueError("Provide match_id and sel in {H,D,A}.")
+                stake_f = float(stake)
+                price_f = float(price)
+                with get_conn(app.config["DB_URL"]) as conn:
+                    conn.execute(
+                        "INSERT INTO paper_bets(match_id, sel, stake, price) VALUES (?,?,?,?)",
+                        (match_id, sel, stake_f, price_f),
+                    )
+                flash("Paper bet recorded.", "success")
+            except Exception as e:
+                flash(f"Error: {e}", "danger")
+            return redirect(url_for("bets_page"))
 
-@app.route("/suggestions")
-def suggestions_page():
-    """Renders the suggestions page."""
-    conn = _get_db_conn()
-    query = "SELECT s.*, e.home_team, e.away_team, e.start_date, e.comp FROM suggestions s JOIN events e ON s.event_id = e.event_id ORDER BY s.created_ts DESC"
-    all_suggestions = pd.read_sql_query(query, conn)
-    conn.close()
-    return render_template("suggestions.html", suggestions=all_suggestions.to_dict("records"))
+        with get_conn(app.config["DB_URL"]) as conn:
+            rows = recent_paper_bets(conn, limit=50)
+        return render_template("bets.html", bets=rows, config=app.config)
 
-@app.route("/bets", methods=["GET", "POST"])
-def bets_page():
-    """Handles displaying and placing paper bets."""
-    conn = _get_db_conn()
-    if request.method == "POST":
-        try:
-            event_id = int(request.form.get("event_id"))
-            price = float(request.form.get("price"))
-            stake = float(request.form.get("stake"))
-            selection = request.form.get("sel")
-            
-            conn.execute(
-                "INSERT INTO bets (ts, mode, event_id, market, selection, side, price, stake) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (int(time.time() * 1000), 'paper', event_id, '1X2', selection, 'back', price, stake)
-            )
-            conn.commit()
-            flash("Paper bet recorded successfully.", "success")
-        except Exception as e:
-            flash(f"Error placing bet: {e}", "error")
-        finally:
-            conn.close()
-        return redirect(url_for("bets_page"))
+    @app.route("/bank", methods=["GET", "POST"])
+    def bank_page():
+        if request.method == "POST":
+            try:
+                new_bal = float(request.form.get("balance", "0"))
+                with get_conn(app.config["DB_URL"]) as conn:
+                    bank_set(conn, new_bal)
+                flash("Balance updated.", "success")
+            except Exception as e:
+                flash(f"Error: {e}", "danger")
+            return redirect(url_for("bank_page"))
+        with get_conn(app.config["DB_URL"]) as conn:
+            bal = bank_get(conn)
+        return render_template("bank.html", balance=bal, config=app.config)
 
-    query = "SELECT b.*, e.home_team, e.away_team, e.start_date, e.comp FROM bets b JOIN events e ON b.event_id = e.event_id ORDER BY b.ts DESC"
-    all_bets = pd.read_sql_query(query, conn)
-    conn.close()
-
-    if not all_bets.empty:
-        all_bets['formatted_ts'] = pd.to_datetime(all_bets['ts'], unit='ms').dt.strftime('%Y-%m-%d %H:%M')
-    return render_template("bets.html", bets=all_bets.to_dict("records"))
-
-@app.route("/bank", methods=["GET", "POST"])
-def bank_page():
-    """Handles updating the bankroll."""
-    conn = _get_db_conn()
-    if request.method == "POST":
-        try:
-            new_bal = float(request.form.get("balance", "0"))
-            conn.execute("INSERT OR REPLACE INTO bankroll_state (key, value) VALUES ('bankroll', ?)", (str(new_bal),))
-            conn.commit()
-            flash("Bankroll updated successfully.", "success")
-        except Exception as e:
-            flash(f"Error updating bankroll: {e}", "error")
-        finally:
-            conn.close()
-        return redirect(url_for("bank_page"))
-
-    bank_row = conn.execute("SELECT value FROM bankroll_state WHERE key = 'bankroll'").fetchone()
-    bankroll = float(bank_row[0]) if bank_row else cfg.paper_starting_bankroll
-    conn.close()
-    return render_template("bank.html", balance=bankroll)
-
-def create_app():
     return app
+
+
+# Allow `python -m flask --app sports.webapp run`
+app = create_app()

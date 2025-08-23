@@ -1,50 +1,33 @@
-{% extends "base.html" %}
+{% extends 'base.html' %}
 {% block content %}
-  <div class="card shadow-sm">
-    <div class="card-header d-flex justify-content-between align-items-center">
-      <strong>Top Suggestions</strong>
-      <form class="d-flex" method="get">
-        <input type="number" step="0.01" class="form-control form-control-sm me-2" name="min_edge" value="{{ min_edge }}">
-        <button class="btn btn-sm btn-primary">Apply</button>
-      </form>
-    </div>
-    <div class="card-body">
-      {% if suggestions %}
-        <div class="table-responsive">
-          <table class="table table-sm align-middle">
-            <thead>
-              <tr>
-                <th>Competition</th><th>Date</th><th>Match</th><th>Pick</th><th>Model</th><th>Price</th><th>Edge</th><th>Kelly</th><th>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-            {% for s in suggestions %}
-              <tr>
-                <td>{{ s['comp'] }}</td>
-                <td>{{ s['date'] }}</td>
-                <td><strong>{{ s['9'] }}</strong> vs <strong>{{ s['10'] }}</strong></td>
-                <td>{{ s['sel'] }}</td>
-                <td>{{ (s['model_prob'] or 0)|float * 100 | round(1) }}%</td>
-                <td>{{ s['price'] or '-' }}</td>
-                <td>{{ (s['edge'] or 0)|float * 100 | round(1) }}%</td>
-                <td>{{ (s['kelly'] or 0)|float * 100 | round(1) }}%</td>
-                <td>
-                  <form method="post" action="{{ url_for('bets_page') }}" class="d-flex gap-2">
-                    <input type="hidden" name="match_id" value="{{ s['match_id'] }}">
-                    <input type="hidden" name="sel" value="{{ s['sel'] }}">
-                    <input type="number" step="0.01" name="stake" placeholder="Stake" class="form-control form-control-sm">
-                    <input type="number" step="0.01" name="price" value="{{ s['price'] or '' }}" class="form-control form-control-sm" placeholder="Price">
-                    <button class="btn btn-sm btn-outline-success">Paper bet</button>
-                  </form>
-                </td>
-              </tr>
-            {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      {% else %}
-        <em>No suggestions at current threshold.</em>
-      {% endif %}
-    </div>
-  </div>
+<div class="card">
+  <h2 style="margin:0 0 10px 0;">Suggestions</h2>
+  <form class="inline" method="get" action="/suggestions">
+    <label for="min_edge">Min edge</label>
+    <input type="number" step="0.01" id="min_edge" name="min_edge" value="{{ '%.2f' % min_edge }}" />
+    <button class="btn" type="submit">Filter</button>
+  </form>
+  {% if suggestions %}
+  <table class="table" style="margin-top:12px;">
+    <thead><tr><th>Competition</th><th>Fixture</th><th>Pick</th><th>Prob</th><th>Book</th><th>Price</th><th>Edge</th><th>Kelly</th><th>Match ID</th></tr></thead>
+    <tbody>
+      {% for s in suggestions %}
+      <tr>
+        <td>{{ s['comp'] }}</td>
+        <td>{{ s['home'] }} vs {{ s['away'] }}</td>
+        <td>{{ s['sel'] }}</td>
+        <td>{{ '%.1f%%' % (100*s['model_prob']) }}</td>
+        <td>{{ s['book'] }}</td>
+        <td>{{ '%.2f' % s['price'] }}</td>
+        <td>{{ '%.2f%%' % (100*s['edge']) }}</td>
+        <td>{{ '%.2f' % s['kelly'] }}</td>
+        <td class="muted">{{ s['match_id'] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <div class="muted">No suggestions available.</div>
+  {% endif %}
+</div>
 {% endblock %}
