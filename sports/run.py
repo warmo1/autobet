@@ -116,7 +116,10 @@ def main(argv=None):
         sp_bbc = sub.add_parser("ingest-bbc-fixtures", help="Scrape BBC football fixtures for a date or range")
         sp_bbc.add_argument("--date", help="Start date ISO (YYYY-MM-DD); default=today")
         sp_bbc.add_argument("--days", type=int, default=1, help="Number of days to fetch (default 1)")
+        sp_bbc.add_argument("--debug", action="store_true", help="Verbose diagnostics (parsing counts, selectors)")
         def _cmd_bbc(args):
+            if args.debug:
+                os.environ["FIXTURE_DEBUG"] = "1"
             db_url = args.db or default_db
             start = args.date or datetime.now().date().isoformat()
             conn = connect(db_url); init_schema(conn)
@@ -139,7 +142,10 @@ def main(argv=None):
     if _mod_fpl and hasattr(_mod_fpl, 'ingest'):
         sp_fpl = sub.add_parser("fetch-fpl-fixtures", help="Fetch EPL fixtures from the FPL API")
         sp_fpl.add_argument("--all", action="store_true", help="Include past fixtures as well (default: future only)")
+        sp_fpl.add_argument("--debug", action="store_true", help="Verbose diagnostics (totals and sample items)")
         def _cmd_fpl(args):
+            if args.debug:
+                os.environ["FIXTURE_DEBUG"] = "1"
             db_url = args.db or default_db
             conn = connect(db_url); init_schema(conn)
             n = _mod_fpl.ingest(conn, future_only=(not args.all))
@@ -152,7 +158,10 @@ def main(argv=None):
         sp_espn = sub.add_parser("fetch-espn", help="Fetch ESPN fixtures (EPL/Championship)")
         sp_espn.add_argument("--league", choices=["football", "football_championship"], default="football")
         sp_espn.add_argument("--date", help="YYYY-MM-DD (default: today)")
+        sp_espn.add_argument("--debug", action="store_true", help="Verbose diagnostics (URL tried, events count)")
         def _cmd_espn(args):
+            if args.debug:
+                os.environ["FIXTURE_DEBUG"] = "1"
             db_url = args.db or default_db
             conn = connect(db_url); init_schema(conn)
             n = _mod_espn.ingest_fixtures(conn, args.league, date_iso=args.date)
@@ -239,3 +248,82 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+import os
+
+DEBUG = os.getenv("FIXTURE_DEBUG") == "1"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+    "Accept-Language": "en-GB,en;q=0.9",
+    "Referer": "https://www.bbc.co.uk/sport/football/scores-fixtures",
+}
+
+def ingest_bbc_fixtures(conn, sport, date_iso=None):
+    # existing code to fetch html
+    html = ...  # placeholder for actual fetch code
+    if DEBUG:
+        print(f"[BBC DEBUG] HTML bytes: {len(html.encode('utf-8')) if html else 0}")
+    # rest of ingest processing
+
+def _parse_football_day(soup):
+    found = 0
+    sections = soup.find_all(...)  # placeholder for actual code
+    sections_count = len(sections)
+    for section in sections:
+        comp_name = ...  # extract competition name
+        cards = section.find_all(...)  # placeholder
+        cards_count = len(cards)
+        if DEBUG:
+            print(f"[BBC DEBUG] Section '{comp_name}' -> {cards_count} cards")
+        for card in cards:
+            # parse fixture info
+            found += 1
+            yield ...  # yield fixture dict or object
+    if DEBUG:
+        print(f"[BBC DEBUG] Parsed fixtures: {found} (sections: {sections_count})")
+import os
+
+DEBUG = os.getenv("FIXTURE_DEBUG") == "1"
+
+def ingest(conn, future_only=True):
+    # existing code to fetch fixtures
+    fixtures = ...  # fetched fixtures list
+    if DEBUG:
+        print(f"[FPL DEBUG] fixtures returned: {len(fixtures)}")
+    count = 0
+    for fixture in fixtures:
+        # upsert fixture
+        count += 1
+    if DEBUG:
+        print(f"[FPL DEBUG] upserted: {count}")
+    return count
+import os
+
+DEBUG = os.getenv("FIXTURE_DEBUG") == "1"
+BASE_URL = "https://site.web.api.espn.com/apis/v2/sports/{path}/scoreboard"
+BASE_URL_FALLBACK = "https://site.web.api.espn.com/apis/v2/sports/{path}/scoreboard"
+
+def ingest_fixtures(conn, league, date_iso=None):
+    path = "soccer/eng.1" if league == "football" else "soccer/eng.2"
+    url = BASE_URL.format(path=path)
+    params = {}
+    if date_iso:
+        params["dates"] = date_iso
+    data = _espn_get(url, params=params)
+    events = data.get("events", []) or []
+    if DEBUG:
+        print(f"[ESPN DEBUG] URL: {url} params: {params} events: {len(events)}")
+    if not events:
+        fb_url = BASE_URL_FALLBACK.format(path=path)
+        try:
+            data = _espn_get(fb_url, params=params)
+            events = data.get("events", []) or []
+            if DEBUG:
+                print(f"[ESPN DEBUG] Fallback URL: {fb_url} events: {len(events)}")
+        except Exception as _:
+            pass
+    # process events and upsert
+    n = 0
+    # ... upsert logic, increment n
+    if DEBUG:
+        print(f"[ESPN DEBUG] Upserted {n} fixtures")
+    return n
