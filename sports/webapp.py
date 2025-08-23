@@ -1,6 +1,7 @@
+
 import os
 from datetime import datetime, date, timedelta
-from flask import Flask, render_template, request, redirect, flash, url_for, jsonify
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 
 # Prefer connect(); fall back to legacy get_conn if needed
 try:
@@ -95,14 +96,6 @@ def top_suggestions(conn, sport: str = "football", min_edge: float = 0.0, limit:
 
 def create_app(db_url: str | None = None) -> Flask:
     app = Flask(__name__)
-
-    @app.before_request
-    def _log_req():  # simple request log
-        try:
-            print(f"[WEB] {request.method} {request.path}")
-        except Exception:
-            pass
-
     app.secret_key = os.getenv("FLASK_SECRET", "dev-secret")
     app.config["DB_URL"] = db_url or os.getenv("DATABASE_URL", "sqlite:///sports_bot.db")
 
@@ -110,6 +103,14 @@ def create_app(db_url: str | None = None) -> Flask:
     with get_conn(app.config["DB_URL"]) as conn:
         init_schema(conn)
         _ensure_extra_schema(conn)
+
+    # --- lightweight request log & pings ---
+    @app.before_request
+    def _log_req():  # simple request log
+        try:
+            print(f"[WEB] {request.method} {request.path}")
+        except Exception:
+            pass
 
     @app.route("/ping")
     def ping():
@@ -119,6 +120,7 @@ def create_app(db_url: str | None = None) -> Flask:
     def health():
         return {"status": "ok"}
 
+    # --- pages ---
     @app.route("/")
     def index():
         d = request.args.get("date") or _today_iso()
@@ -196,6 +198,10 @@ def create_app(db_url: str | None = None) -> Flask:
 
     @app.errorhandler(404)
     def _not_found(e):
-        return render_template("base.html", title="Not Found"), 404
+        return render_template("base.html", title="Not Found", config=app.config), 404
 
     return app
+
+
+# Allow `python -m flask --app sports.webapp run`
+app = create_app()
