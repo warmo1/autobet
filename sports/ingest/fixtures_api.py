@@ -188,12 +188,17 @@ def ingest_fixtures(conn, sport: str, *, date_iso: Optional[str] = None) -> int:
             norm = _parse_event(ev)
             if not norm:
                 continue
+            if DEBUG:
+                try:
+                    print(f"[ESPN DEBUG] norm: {norm['comp']} | {norm['home']} vs {norm['away']} on {norm['date']}")
+                except Exception:
+                    pass
             try:
                 upsert_match(
                     conn,
                     sport="football" if sport.startswith("football") else sport,
                     comp=norm["comp"],
-                    season=None,
+                    season="",  # avoid None so downstream code can't subscript it
                     date=norm["date"],
                     home=norm["home"],
                     away=norm["away"],
