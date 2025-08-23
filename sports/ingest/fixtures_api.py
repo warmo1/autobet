@@ -65,45 +65,59 @@ def _parse_event(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         comp0 = comps[0] if comps else {}
         competitors = comp0.get("competitors", [])
         if len(competitors) < 2:
+            if DEBUG:
+                print("[ESPN DEBUG] skip: <2 competitors")
             return None
 
-        # Identify home/away by flag, not order
+        # Prefer the explicit homeAway flag; fall back to order/isHome
         home_team = next((c for c in competitors if c.get("homeAway") == "home"), None)
         away_team = next((c for c in competitors if c.get("homeAway") == "away"), None)
         if not home_team or not away_team:
-            return None
+            # try boolean flags
+            home_team = next((c for c in competitors if c.get("isHome") is True), home_team)
+            away_team = next((c for c in competitors if c.get("isHome") is False), away_team)
+        if not home_team or not away_team:
+            # final fallback: assume first is home, second is away
+            if len(competitors) >= 2:
+                home_team = home_team or competitors[0]
+                away_team = away_team or competitors[1]
 
-        home_name = _safe_team_name(home_team)
-        away_name = _safe_team_name(away_team)
+        home_name = _safe_team_name(home_team) if home_team else None
+        away_name = _safe_team_name(away_team) if away_team else None
         if not home_name or not away_name:
+            if DEBUG:
+                print(f"[ESPN DEBUG] skip: missing team names h={bool(home_name)} a={bool(away_name)}")
             return None
 
-        iso_dt = ev.get("date")  # e.g. 2025-08-23T14:00Z
+        # Kickoff date – event.date, else competition.date/startDate
+        iso_dt = ev.get("date") or comp0.get("date") or comp0.get("startDate")
         match_date = None
         if iso_dt:
             try:
-                match_date = datetime.fromisoformat(iso_dt.replace("Z", "+00:00")).date().isoformat()
+                match_date = datetime.fromisoformat(str(iso_dt).replace("Z", "+00:00")).date().isoformat()
             except Exception:
-                pass
+                match_date = None
         if not match_date:
+            if DEBUG:
+                print("[ESPN DEBUG] skip: no parsable date")
             return None
 
-        # League/competition name – try event then competition then top-level fallback
         league_name = (
             (ev.get("league") or {}).get("name")
             or (comp0.get("league") or {}).get("name")
-            or (ev.get("shortName"))
+            or ev.get("shortName")
             or "Football"
         )
 
-        # We accept scheduled and in-progress; finals are fine to upsert too
         return {
             "date": match_date,
             "home": home_name,
             "away": away_name,
             "comp": league_name,
         }
-    except Exception:
+    except Exception as e:
+        if DEBUG:
+            print(f"[ESPN DEBUG] parse error: {e}")
         return None
 
 
@@ -124,6 +138,11 @@ def _fetch_events_for_date(path: str, date_str: str) -> list:
         except Exception as e:
             if DEBUG:
                 print(f"[ESPN DEBUG] Fallback error: {e}")
+    if DEBUG and events:
+        e0 = events[0]
+        comp0 = (e0.get("competitions") or [{}])[0]
+        teams = comp0.get("competitors", [])
+        print(f"[ESPN DEBUG] sample: keys={list(e0.keys())[:8]} teams={len(teams)} date={e0.get('date') or comp0.get('date')}")
     return events
 
 
@@ -192,6 +211,8 @@ def ingest_fixtures(conn, sport: str, *, date_iso: Optional[str] = None) -> int:
         print(f"[Fixtures] Ingested {count} fixture(s) from ESPN for {sport}.")
         if DEBUG:
             print(f"[ESPN DEBUG] upserted: {count}")
+        if DEBUG and events and count == 0:
+            print("[ESPN DEBUG] events present but none normalised – structure may differ; printed a sample above.")
         return count
 
     except requests.exceptions.HTTPError as e:
