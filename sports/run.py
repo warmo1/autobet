@@ -1,203 +1,138 @@
 import os
-from datetime import datetime, date, timedelta
-from flask import Flask, render_template, request, redirect, url_for, flash
+import argparse
+import subprocess
+from dotenv import load_dotenv
+from sports.db import connect
+from sports.schema import init_schema
 
-# Prefer connect(); fall back to legacy get_conn if needed
-try:
-    from .db import connect as get_conn
-except Exception:  # pragma: no cover
-    from .db import get_conn  # type: ignore
+# Import all ingestor functions
+from sports.ingest.football_fd import ingest_dir as ingest_fd_dir
+from sports.ingest.cricket_cricsheet import ingest_dir as ingest_cric_dir
+from sports.ingest.football_kaggle import ingest_file as ingest_kaggle_file
+from sports.ingest.football_premier_league import ingest_dir as ingest_pl_dir
+from sports.ingest.football_openfootball import ingest_dir as ingest_openfootball_dir
+from sports.ingest.fixtures_api import ingest_fixtures
 
-from .schema import init_schema
+# Import suggestion and other core functions
+from sports.suggest import generate_football_suggestions
+from sports.betdaq_api import place_bet_on_betdaq
+from sports.webapp import create_app
+from sports.telegram_bot import run_bot
 
-# --- Extra lightweight tables the UI needs (created if missing) ---
-EXTRA_SCHEMA = """
-CREATE TABLE IF NOT EXISTS bank (
-  id INTEGER PRIMARY KEY CHECK (id=1),
-  balance REAL NOT NULL
-);
-INSERT OR IGNORE INTO bank(id, balance) VALUES (1, 1000.0);
+def main(argv=None):
+    load_dotenv()
+    db_url = os.getenv("DATABASE_URL")
+    
+    if not db_url:
+        print("Error: DATABASE_URL not found in .env file.")
+        return
 
-CREATE TABLE IF NOT EXISTS paper_bets (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  match_id TEXT NOT NULL,
-  sel TEXT NOT NULL,            -- 'H','D','A'
-  stake REAL NOT NULL,
-  price REAL NOT NULL,
-  created_ts TEXT DEFAULT CURRENT_TIMESTAMP,
-  result TEXT,
-  settled_ts TEXT
-);
-"""
+    p = argparse.ArgumentParser(description="Sports Betting Bot")
+    sub = p.add_subparsers(dest="cmd", required=True)
 
+    # --- Data Fetching Command ---
+    sp_fetch = sub.add_parser("fetch-openfootball", help="Download/update openfootball datasets")
+    sp_fetch.add_argument("--mode", required=True, choices=['init', 'update'])
+    def _cmd_fetch_openfootball(args):
+        script_path = os.path.join(os.path.dirname(__file__), '..', 'scripts', 'fetch_openfootball.sh')
+        subprocess.run(['bash', script_path, args.mode], check=True)
+    sp_fetch.set_defaults(func=_cmd_fetch_openfootball)
 
-def _ensure_extra_schema(conn):
-    conn.executescript(EXTRA_SCHEMA)
+    # --- Historical Data Ingest Commands ---
+    sp_fd = sub.add_parser("ingest-football-csv", help="Ingest football-data.co.uk CSVs")
+    sp_fd.add_argument("--dir", required=True)
+    def _cmd_ingest_fd(args):
+        conn = connect(db_url); init_schema(conn)
+        n = ingest_fd_dir(conn, args.dir)
+        print(f"[Football-Data] Ingested {n} rows.")
+        conn.close()
+    sp_fd.set_defaults(func=_cmd_ingest_fd)
 
+    sp_kaggle = sub.add_parser("ingest-football-kaggle", help="Ingest Kaggle domestic football CSV")
+    sp_kaggle.add_argument("--file", required=True)
+    def _cmd_ingest_kaggle(args):
+        conn = connect(db_url); init_schema(conn)
+        n = ingest_kaggle_file(conn, args.file)
+        print(f"[Kaggle Football] Ingested {n} rows.")
+        conn.close()
+    sp_kaggle.set_defaults(func=_cmd_ingest_kaggle)
 
-def _today_iso() -> str:
-    return date.today().isoformat()
+    sp_pl = sub.add_parser("ingest-pl-stats", help="Ingest Kaggle Premier League stats CSVs")
+    sp_pl.add_argument("--dir", required=True)
+    def _cmd_ingest_pl(args):
+        conn = connect(db_url); init_schema(conn)
+        n = ingest_pl_dir(conn, args.dir)
+        print(f"[Premier League] Ingested {n} rows.")
+        conn.close()
+    sp_pl.set_defaults(func=_cmd_ingest_pl)
 
+    sp_openfootball = sub.add_parser("ingest-openfootball", help="Recursively ingest all openfootball .txt files")
+    sp_openfootball.add_argument("--dir", required=True)
+    def _cmd_ingest_openfootball(args):
+        conn = connect(db_url); init_schema(conn)
+        n = ingest_openfootball_dir(conn, args.dir)
+        print(f"[OpenFootball] Ingested a total of {n} rows.")
+        conn.close()
+    sp_openfootball.set_defaults(func=_cmd_ingest_openfootball)
 
-def bank_get(conn) -> float:
-    row = conn.execute("SELECT balance FROM bank WHERE id=1").fetchone()
-    return float(row[0]) if row else 0.0
+    sp_cricket = sub.add_parser("ingest-cricket-csv", help="Ingest Cricsheet CSVs")
+    sp_cricket.add_argument("--dir", required=True)
+    def _cmd_ingest_cricket(args):
+        conn = connect(db_url); init_schema(conn)
+        n = ingest_cric_dir(conn, args.dir)
+        print(f"[Cricket] Ingested {n} rows.")
+        conn.close()
+    sp_cricket.set_defaults(func=_cmd_ingest_cricket)
 
+    # --- Live Fixtures Command ---
+    sp_fixtures = sub.add_parser("ingest-fixtures", help="Ingest upcoming fixtures from the ESPN API")
+    sp_fixtures.add_argument("--sport", required=True, choices=['football', 'rugby', 'cricket'])
+    def _cmd_ingest_fixtures(args):
+        conn = connect(db_url); init_schema(conn)
+        ingest_fixtures(conn, args.sport)
+        conn.close()
+    sp_fixtures.set_defaults(func=_cmd_ingest_fixtures)
 
-def bank_set(conn, value: float) -> None:
-    conn.execute("UPDATE bank SET balance=? WHERE id=1", (float(value),))
+    # --- Suggestion Generation Command ---
+    sp_suggest = sub.add_parser("generate-suggestions", help="Generate suggestions for upcoming fixtures")
+    sp_suggest.add_argument("--sport", required=True, choices=['football'])
+    def _cmd_generate_suggestions(args):
+        conn = connect(db_url); init_schema(conn)
+        if args.sport == 'football':
+            generate_football_suggestions(conn)
+        conn.close()
+    sp_suggest.set_defaults(func=_cmd_generate_suggestions)
 
+    # --- Application Commands ---
+    sp_web = sub.add_parser("web", help="Run the web dashboard")
+    def _cmd_web(args):
+        app = create_app()
+        app.run(host="0.0.0.0", port=8010)
+    sp_web.set_defaults(func=_cmd_web)
 
-def recent_paper_bets(conn, limit: int = 50):
-    sql = """
-    SELECT b.id, b.match_id, b.sel, b.stake, b.price, b.created_ts,
-           m.date, th.name AS home, ta.name AS away, COALESCE(m.comp,'') as comp
-    FROM paper_bets b
-    LEFT JOIN matches m ON m.match_id=b.match_id
-    LEFT JOIN teams th ON th.team_id=m.home_id
-    LEFT JOIN teams ta ON ta.team_id=m.away_id
-    ORDER BY b.created_ts DESC
-    LIMIT ?
-    """
-    return conn.execute(sql, (limit,)).fetchall()
-
-
-def fixtures_for_date(conn, date_iso: str, sport: str = "football"):
-    sql = """
-    SELECT m.match_id, m.date, th.name AS home, ta.name AS away, COALESCE(m.comp,'') as comp
-    FROM matches m
-    JOIN teams th ON th.team_id=m.home_id
-    JOIN teams ta ON ta.team_id=m.away_id
-    WHERE m.sport=? AND date(m.date)=date(?)
-    ORDER BY comp, m.date, home
-    """
-    return conn.execute(sql, (sport, date_iso)).fetchall()
-
-
-def top_suggestions(conn, sport: str = "football", min_edge: float = 0.0, limit: int = 100):
-    try:
-        sql = """
-        SELECT s.match_id, s.sel, s.model_prob, s.book, s.price, s.edge, s.kelly,
-               m.date, th.name AS home, ta.name AS away, COALESCE(m.comp,'') as comp
-        FROM suggestions s
-        JOIN matches m ON m.match_id=s.match_id
-        JOIN teams th ON th.team_id=m.home_id
-        JOIN teams ta ON ta.team_id=m.away_id
-        WHERE m.sport=? AND s.edge >= ?
-        ORDER BY s.edge DESC
-        LIMIT ?
-        """
-        return conn.execute(sql, (sport, float(min_edge), int(limit))).fetchall()
-    except Exception:
-        return []
-
-
-def create_app(db_url: str | None = None) -> Flask:
-    app = Flask(__name__)
-    app.secret_key = os.getenv("FLASK_SECRET", "dev-secret")
-    app.config["DB_URL"] = db_url or os.getenv("DATABASE_URL", "sqlite:///sports_bot.db")
-
-    # Ensure schema on boot
-    with get_conn(app.config["DB_URL"]) as conn:
-        init_schema(conn)
-        _ensure_extra_schema(conn)
-
-    @app.before_request
-    def _log_req():
+    sp_telegram = sub.add_parser("telegram", help="Run the Telegram bot")
+    def _cmd_telegram(args):
+        run_bot()
+    sp_telegram.set_defaults(func=_cmd_telegram)
+    
+    sp_betdaq = sub.add_parser("live-betdaq", help="Place a live bet on the Betdaq exchange")
+    sp_betdaq.add_argument("--symbol", required=True)
+    sp_betdaq.add_argument("--odds", required=True, type=float)
+    sp_betdaq.add_argument("--stake", required=True, type=float)
+    sp_betdaq.add_argument("--confirm", action="store_true")
+    def _cmd_live_betdaq(args):
+        if not args.confirm:
+            print("Error: You must add the --confirm flag to place a live bet.")
+            return
         try:
-            print(f"[WEB] {request.method} {request.path}")
-        except Exception:
-            pass
+            result = place_bet_on_betdaq(args.symbol, args.odds, args.stake)
+            print("Bet placement result:", result)
+        except Exception as e:
+            print(f"An error occurred: {e}")
+    sp_betdaq.set_defaults(func=_cmd_live_betdaq)
 
-    @app.route("/ping")
-    def ping():
-        return "pong", 200
+    args = p.parse_args(argv)
+    args.func(args)
 
-    @app.route("/health")
-    def health():
-        return {"status": "ok"}
-
-    @app.route("/")
-    def index():
-        d = request.args.get("date") or _today_iso()
-        try:
-            datetime.fromisoformat(d)
-        except Exception:
-            d = _today_iso()
-        with get_conn(app.config["DB_URL"]) as conn:
-            fx = fixtures_for_date(conn, d)
-            sug = top_suggestions(conn, min_edge=0.03, limit=15)
-            bal = bank_get(conn)
-        return render_template("index.html", date_iso=d, fixtures=fx, suggestions=sug, balance=bal, config=app.config)
-
-    @app.route("/fixtures")
-    def fixtures_page():
-        d = request.args.get("date") or _today_iso()
-        try:
-            datetime.fromisoformat(d)
-        except Exception:
-            d = _today_iso()
-        with get_conn(app.config["DB_URL"]) as conn:
-            fx = fixtures_for_date(conn, d)
-        dt = datetime.fromisoformat(d).date()
-        prev_d = (dt - timedelta(days=1)).isoformat()
-        next_d = (dt + timedelta(days=1)).isoformat()
-        return render_template("fixtures.html", date_iso=d, fixtures=fx, prev_date=prev_d, next_date=next_d, config=app.config)
-
-    @app.route("/suggestions")
-    def suggestions_page():
-        min_edge = float(request.args.get("min_edge", "0.03"))
-        with get_conn(app.config["DB_URL"]) as conn:
-            sug = top_suggestions(conn, min_edge=min_edge, limit=100)
-        return render_template("suggestions.html", min_edge=min_edge, suggestions=sug, config=app.config)
-
-    @app.route("/bets", methods=["GET", "POST"])
-    def bets_page():
-        if request.method == "POST":
-            match_id = (request.form.get("match_id") or "").strip()
-            sel = (request.form.get("sel") or "").strip().upper()
-            stake = request.form.get("stake")
-            price = request.form.get("price")
-            try:
-                if not match_id or sel not in ("H", "D", "A"):
-                    raise ValueError("Provide match_id and sel in {H,D,A}.")
-                stake_f = float(stake)
-                price_f = float(price)
-                with get_conn(app.config["DB_URL"]) as conn:
-                    conn.execute(
-                        "INSERT INTO paper_bets(match_id, sel, stake, price) VALUES (?,?,?,?)",
-                        (match_id, sel, stake_f, price_f),
-                    )
-                flash("Paper bet recorded.", "success")
-            except Exception as e:
-                flash(f"Error: {e}", "danger")
-            return redirect(url_for("bets_page"))
-
-        with get_conn(app.config["DB_URL"]) as conn:
-            rows = recent_paper_bets(conn, limit=50)
-        return render_template("bets.html", bets=rows, config=app.config)
-
-    @app.route("/bank", methods=["GET", "POST"])
-    def bank_page():
-        if request.method == "POST":
-            try:
-                new_bal = float(request.form.get("balance", "0"))
-                with get_conn(app.config["DB_URL"]) as conn:
-                    bank_set(conn, new_bal)
-                flash("Balance updated.", "success")
-            except Exception as e:
-                flash(f"Error: {e}", "danger")
-            return redirect(url_for("bank_page"))
-        with get_conn(app.config["DB_URL"]) as conn:
-            bal = bank_get(conn)
-        return render_template("bank.html", balance=bal, config=app.config)
-
-    @app.errorhandler(404)
-    def _not_found(e):
-        return render_template("base.html", title="Not Found", config=app.config), 404
-
-    return app
-
-
-# Also expose a module-level `app` so older runners can import it directly
-app = create_app()
+if __name__ == "__main__":
+    main()
