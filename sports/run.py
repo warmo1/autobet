@@ -184,18 +184,25 @@ def main(argv=None):
             _mod_tg.run_bot(token, db_url=db_url, digest_hour=args.hour, digest_minute=args.minute)
         sp_bot.set_defaults(func=_cmd_bot)
 
-    # ---- Web app (if module present) ----
-    if _mod_web and hasattr(_mod_web, 'create_app'):
-        sp_web = sub.add_parser("web", help="Run the Flask web app")
-        sp_web.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
-        sp_web.add_argument("--port", type=int, default=8010, help="Port (default: 8010)")
-        sp_web.add_argument("--debug", action="store_true", help="Run Flask in debug mode")
-        def _cmd_web(args):
-            db_url = args.db or default_db
-            app = _mod_web.create_app(db_url)
-            print(f"[WEB] Starting Flask on http://{args.host}:{args.port} (debug={args.debug}) DB={db_url}")
-            app.run(host=args.host, port=args.port, debug=args.debug)
-        sp_web.set_defaults(func=_cmd_web)
+    # ---- Web app (always expose; diagnose import errors at runtime) ----
+    sp_web = sub.add_parser("web", help="Run the Flask web app")
+    sp_web.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
+    sp_web.add_argument("--port", type=int, default=8010, help="Port (default: 8010)")
+    sp_web.add_argument("--debug", action="store_true", help="Run Flask in debug mode")
+    def _cmd_web(args):
+        db_url = args.db or default_db
+        mod = _mod_web
+        if mod is None or not hasattr(mod, "create_app"):
+            # Attempt late import so we can surface a clear error on systems where eager import failed
+            try:
+                mod = __import__('sports.webapp', fromlist=['*'])
+            except Exception as e:
+                why = _opt_import_errors.get('webapp') or str(e)
+                raise SystemExit(f"[WEB] Failed to import sports.webapp: {why}")
+        app = mod.create_app(db_url)
+        print(f"[WEB] Starting Flask on http://{args.host}:{args.port} (debug={args.debug}) DB={db_url}")
+        app.run(host=args.host, port=args.port, debug=args.debug)
+    sp_web.set_defaults(func=_cmd_web)
 
     # ---- Legacy passthroughs (only if those modules exist) ----
     # ingest-fixtures
