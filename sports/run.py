@@ -1,266 +1,203 @@
 import os
-import argparse
-from datetime import datetime
-from dotenv import load_dotenv
+from datetime import datetime, date, timedelta
+from flask import Flask, render_template, request, redirect, url_for, flash
 
-# Core DB & schema
+# Prefer connect(); fall back to legacy get_conn if needed
 try:
-    from sports.db import connect
-    from sports.schema import init_schema
-except Exception as e:
-    raise SystemExit(f"Failed to import core DB/schema: {e}")
+    from .db import connect as get_conn
+except Exception:  # pragma: no cover
+    from .db import get_conn  # type: ignore
 
-# Optional/new ingestors (loaded eagerly; if missing, commands are hidden)
-_opt_import_errors = {}
+from .schema import init_schema
 
-def _try_import(name, alias=None):
+# --- Extra lightweight tables the UI needs (created if missing) ---
+EXTRA_SCHEMA = """
+CREATE TABLE IF NOT EXISTS bank (
+  id INTEGER PRIMARY KEY CHECK (id=1),
+  balance REAL NOT NULL
+);
+INSERT OR IGNORE INTO bank(id, balance) VALUES (1, 1000.0);
+
+CREATE TABLE IF NOT EXISTS paper_bets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  match_id TEXT NOT NULL,
+  sel TEXT NOT NULL,            -- 'H','D','A'
+  stake REAL NOT NULL,
+  price REAL NOT NULL,
+  created_ts TEXT DEFAULT CURRENT_TIMESTAMP,
+  result TEXT,
+  settled_ts TEXT
+);
+"""
+
+
+def _ensure_extra_schema(conn):
+    conn.executescript(EXTRA_SCHEMA)
+
+
+def _today_iso() -> str:
+    return date.today().isoformat()
+
+
+def bank_get(conn) -> float:
+    row = conn.execute("SELECT balance FROM bank WHERE id=1").fetchone()
+    return float(row[0]) if row else 0.0
+
+
+def bank_set(conn, value: float) -> None:
+    conn.execute("UPDATE bank SET balance=? WHERE id=1", (float(value),))
+
+
+def recent_paper_bets(conn, limit: int = 50):
+    sql = """
+    SELECT b.id, b.match_id, b.sel, b.stake, b.price, b.created_ts,
+           m.date, th.name AS home, ta.name AS away, COALESCE(m.comp,'') as comp
+    FROM paper_bets b
+    LEFT JOIN matches m ON m.match_id=b.match_id
+    LEFT JOIN teams th ON th.team_id=m.home_id
+    LEFT JOIN teams ta ON ta.team_id=m.away_id
+    ORDER BY b.created_ts DESC
+    LIMIT ?
+    """
+    return conn.execute(sql, (limit,)).fetchall()
+
+
+def fixtures_for_date(conn, date_iso: str, sport: str = "football"):
+    sql = """
+    SELECT m.match_id, m.date, th.name AS home, ta.name AS away, COALESCE(m.comp,'') as comp
+    FROM matches m
+    JOIN teams th ON th.team_id=m.home_id
+    JOIN teams ta ON ta.team_id=m.away_id
+    WHERE m.sport=? AND date(m.date)=date(?)
+    ORDER BY comp, m.date, home
+    """
+    return conn.execute(sql, (sport, date_iso)).fetchall()
+
+
+def top_suggestions(conn, sport: str = "football", min_edge: float = 0.0, limit: int = 100):
     try:
-        module = __import__(name, fromlist=['*'])
-        return module
-    except Exception as e:
-        _opt_import_errors[alias or name] = str(e)
-        return None
-
-# Newer fixture sources
-_mod_bbc_fx = _try_import('sports.ingest.bbc_fixtures', alias='bbc_fixtures')
-_mod_bbc_html = _try_import('sports.ingest.bbc_html', alias='bbc_html')
-_mod_fpl = _try_import('sports.ingest.fpl_fixtures', alias='fpl_fixtures')
-_mod_espn = _try_import('sports.ingest.fixtures_api', alias='fixtures_api')
-
-# Existing CSV ingestors (best effort)
-_mod_fd = _try_import('sports.ingest.football_fd', alias='football_fd')
-_mod_cric = _try_import('sports.ingest.cricket_cricsheet', alias='cricket_cricsheet')
-_mod_kaggle = _try_import('sports.ingest.football_kaggle', alias='football_kaggle')
-_mod_pl = _try_import('sports.ingest.football_premier_league', alias='football_premier_league')
-
-# Optional runtime pieces
-_mod_tg = _try_import('sports.telegram_bot', alias='telegram_bot')
-_mod_web = _try_import('sports.webapp', alias='webapp')
-
-# Legacy/older commands (preserve if present)
-_mod_legacy_ingest_fx = _try_import('sports.ingest.fixtures', alias='legacy_fixtures')
-_mod_legacy_openfootball = _try_import('sports.ingest.openfootball', alias='openfootball')
-_mod_legacy_suggestions = _try_import('sports.suggest', alias='suggest')
-_mod_legacy_live_betdaq = _try_import('sports.betdaq_live', alias='betdaq_live')
+        sql = """
+        SELECT s.match_id, s.sel, s.model_prob, s.book, s.price, s.edge, s.kelly,
+               m.date, th.name AS home, ta.name AS away, COALESCE(m.comp,'') as comp
+        FROM suggestions s
+        JOIN matches m ON m.match_id=s.match_id
+        JOIN teams th ON th.team_id=m.home_id
+        JOIN teams ta ON ta.team_id=m.away_id
+        WHERE m.sport=? AND s.edge >= ?
+        ORDER BY s.edge DESC
+        LIMIT ?
+        """
+        return conn.execute(sql, (sport, float(min_edge), int(limit))).fetchall()
+    except Exception:
+        return []
 
 
-def main(argv=None):
-    load_dotenv()
+def create_app(db_url: str | None = None) -> Flask:
+    app = Flask(__name__)
+    app.secret_key = os.getenv("FLASK_SECRET", "dev-secret")
+    app.config["DB_URL"] = db_url or os.getenv("DATABASE_URL", "sqlite:///sports_bot.db")
 
-    parser = argparse.ArgumentParser(description="Sports CLI / Ingestion & Runtime")
-    default_db = os.getenv("DATABASE_URL", "sqlite:///sports_bot.db")
-    parser.add_argument("--db", dest="db", default=None, help=f"Database URL (default: {default_db})")
-    sub = parser.add_subparsers(dest="cmd", required=True)
-
-    # ---- Core: initdb ----
-    sp_init = sub.add_parser("initdb", help="Create/upgrade database schema")
-    def _cmd_initdb(args):
-        db_url = args.db or default_db
-        conn = connect(db_url)
+    # Ensure schema on boot
+    with get_conn(app.config["DB_URL"]) as conn:
         init_schema(conn)
-        conn.close()
-        print("[DB] Schema initialised.")
-    sp_init.set_defaults(func=_cmd_initdb)
+        _ensure_extra_schema(conn)
 
-    # ---- CSV/Data ingestors (if present) ----
-    if _mod_fd and hasattr(_mod_fd, 'ingest_dir'):
-        sp_fd = sub.add_parser("ingest-football-csv", help="Ingest football-data.co.uk CSVs")
-        sp_fd.add_argument("--dir", required=True, help="Directory for *.csv files")
-        def _cmd_fd(args):
-            db_url = args.db or default_db
-            conn = connect(db_url); init_schema(conn)
-            n = _mod_fd.ingest_dir(conn, args.dir)
-            print(f"[Football FD] Ingested {n} rows.")
-            conn.close()
-        sp_fd.set_defaults(func=_cmd_fd)
+    @app.before_request
+    def _log_req():
+        try:
+            print(f"[WEB] {request.method} {request.path}")
+        except Exception:
+            pass
 
-    if _mod_kaggle and hasattr(_mod_kaggle, 'ingest_file'):
-        sp_kg = sub.add_parser("ingest-football-kaggle", help="Ingest Kaggle domestic football CSV")
-        sp_kg.add_argument("--file", required=True, help="Path to main.csv")
-        def _cmd_kg(args):
-            db_url = args.db or default_db
-            conn = connect(db_url); init_schema(conn)
-            n = _mod_kaggle.ingest_file(conn, args.file)
-            print(f"[Kaggle Football] Ingested {n} rows.")
-            conn.close()
-        sp_kg.set_defaults(func=_cmd_kg)
+    @app.route("/ping")
+    def ping():
+        return "pong", 200
 
-    if _mod_pl and hasattr(_mod_pl, 'ingest_file'):
-        sp_pl = sub.add_parser("ingest-pl-stats", help="Ingest Kaggle Premier League matches.csv")
-        sp_pl.add_argument("--file", required=True, help="Path to matches.csv")
-        def _cmd_pl(args):
-            db_url = args.db or default_db
-            conn = connect(db_url); init_schema(conn)
-            n = _mod_pl.ingest_file(conn, args.file)
-            print(f"[Premier League] Ingested {n} rows.")
-            conn.close()
-        sp_pl.set_defaults(func=_cmd_pl)
+    @app.route("/health")
+    def health():
+        return {"status": "ok"}
 
-    if _mod_cric and hasattr(_mod_cric, 'ingest_dir'):
-        sp_cric = sub.add_parser("ingest-cricket-csv", help="Ingest Cricsheet CSVs")
-        sp_cric.add_argument("--dir", required=True, help="Directory for *.csv files")
-        def _cmd_cric(args):
-            db_url = args.db or default_db
-            conn = connect(db_url); init_schema(conn)
-            n = _mod_cric.ingest_dir(conn, args.dir)
-            print(f"[Cricket] Ingested {n} rows.")
-            conn.close()
-        sp_cric.set_defaults(func=_cmd_cric)
+    @app.route("/")
+    def index():
+        d = request.args.get("date") or _today_iso()
+        try:
+            datetime.fromisoformat(d)
+        except Exception:
+            d = _today_iso()
+        with get_conn(app.config["DB_URL"]) as conn:
+            fx = fixtures_for_date(conn, d)
+            sug = top_suggestions(conn, min_edge=0.03, limit=15)
+            bal = bank_get(conn)
+        return render_template("index.html", date_iso=d, fixtures=fx, suggestions=sug, balance=bal, config=app.config)
 
-    # ---- New: BBC fixtures (HTML) ----
-    # Support either `bbc_fixtures.ingest_bbc_fixtures` or `bbc_html.ingest_bbc_range`
-    if (
-        (_mod_bbc_fx and hasattr(_mod_bbc_fx, 'ingest_bbc_fixtures')) or
-        (_mod_bbc_html and hasattr(_mod_bbc_html, 'ingest_bbc_range'))
-    ):
-        sp_bbc = sub.add_parser("ingest-bbc-fixtures", help="Scrape BBC football fixtures for a date or range")
-        sp_bbc.add_argument("--date", help="Start date ISO (YYYY-MM-DD); default=today")
-        sp_bbc.add_argument("--days", type=int, default=1, help="Number of days to fetch (default 1)")
-        sp_bbc.add_argument("--debug", action="store_true", help="Verbose diagnostics (parsing counts, selectors)")
-        def _cmd_bbc(args):
-            if args.debug:
-                os.environ["FIXTURE_DEBUG"] = "1"
-            db_url = args.db or default_db
-            start = args.date or datetime.now().date().isoformat()
-            conn = connect(db_url); init_schema(conn)
-            if _mod_bbc_fx and hasattr(_mod_bbc_fx, 'ingest_bbc_fixtures'):
-                print("[BBC Ingest] Using module: sports.ingest.bbc_fixtures")
-                total = 0
-                from datetime import timedelta, datetime as _dt
-                d0 = _dt.fromisoformat(start).date()
-                for i in range(args.days):
-                    ds = (d0 + timedelta(days=i)).isoformat()
-                    total += _mod_bbc_fx.ingest_bbc_fixtures(conn, 'football', date_iso=ds)
-                n = total
-            else:
-                print("[BBC Ingest] Using module: sports.ingest.bbc_html")
-                n = _mod_bbc_html.ingest_bbc_range(conn, start_date_iso=start, days=args.days)
-            print(f"[BBC Ingest] Upserted {n} fixtures from {start} (+{args.days-1}d).")
-            conn.close()
-        sp_bbc.set_defaults(func=_cmd_bbc)
+    @app.route("/fixtures")
+    def fixtures_page():
+        d = request.args.get("date") or _today_iso()
+        try:
+            datetime.fromisoformat(d)
+        except Exception:
+            d = _today_iso()
+        with get_conn(app.config["DB_URL"]) as conn:
+            fx = fixtures_for_date(conn, d)
+        dt = datetime.fromisoformat(d).date()
+        prev_d = (dt - timedelta(days=1)).isoformat()
+        next_d = (dt + timedelta(days=1)).isoformat()
+        return render_template("fixtures.html", date_iso=d, fixtures=fx, prev_date=prev_d, next_date=next_d, config=app.config)
 
-    # ---- New: FPL fixtures (EPL) ----
-    if _mod_fpl and hasattr(_mod_fpl, 'ingest'):
-        sp_fpl = sub.add_parser("fetch-fpl-fixtures", help="Fetch EPL fixtures from the FPL API")
-        sp_fpl.add_argument("--all", action="store_true", help="Include past fixtures as well (default: future only)")
-        sp_fpl.add_argument("--debug", action="store_true", help="Verbose diagnostics (totals and sample items)")
-        def _cmd_fpl(args):
-            if args.debug:
-                os.environ["FIXTURE_DEBUG"] = "1"
-            db_url = args.db or default_db
-            conn = connect(db_url); init_schema(conn)
-            n = _mod_fpl.ingest(conn, future_only=(not args.all))
-            print(f"[FPL] Upserted {n} fixtures.")
-            conn.close()
-        sp_fpl.set_defaults(func=_cmd_fpl)
+    @app.route("/suggestions")
+    def suggestions_page():
+        min_edge = float(request.args.get("min_edge", "0.03"))
+        with get_conn(app.config["DB_URL"]) as conn:
+            sug = top_suggestions(conn, min_edge=min_edge, limit=100)
+        return render_template("suggestions.html", min_edge=min_edge, suggestions=sug, config=app.config)
 
-    # ---- New: ESPN fixtures (EPL/Championship) ----
-    if _mod_espn and hasattr(_mod_espn, 'ingest_fixtures'):
-        sp_espn = sub.add_parser("fetch-espn", help="Fetch ESPN fixtures (EPL/Championship)")
-        sp_espn.add_argument("--league", choices=["football", "football_championship"], default="football")
-        sp_espn.add_argument("--date", help="YYYY-MM-DD (default: today)")
-        sp_espn.add_argument("--debug", action="store_true", help="Verbose diagnostics (URL tried, events count)")
-        def _cmd_espn(args):
-            if args.debug:
-                os.environ["FIXTURE_DEBUG"] = "1"
-            db_url = args.db or default_db
-            conn = connect(db_url); init_schema(conn)
-            n = _mod_espn.ingest_fixtures(conn, args.league, date_iso=args.date)
-            print(f"[ESPN] Upserted {n} fixtures for {args.league}.")
-            conn.close()
-        sp_espn.set_defaults(func=_cmd_espn)
-
-    # ---- Telegram bot (if module present) ----
-    if _mod_tg and hasattr(_mod_tg, 'run_bot'):
-        sp_bot = sub.add_parser("telegram-bot", help="Run the Telegram bot")
-        sp_bot.add_argument("--token", required=False, help="Telegram Bot Token (or set TELEGRAM_TOKEN)")
-        sp_bot.add_argument("--hour", type=int, default=8, help="Daily digest hour (Europe/London)")
-        sp_bot.add_argument("--minute", type=int, default=30, help="Daily digest minute (Europe/London)")
-        def _cmd_bot(args):
-            token = args.token or os.getenv("TELEGRAM_TOKEN")
-            if not token:
-                raise SystemExit("TELEGRAM_TOKEN not set and --token not provided")
-            db_url = args.db or default_db
-            _mod_tg.run_bot(token, db_url=db_url, digest_hour=args.hour, digest_minute=args.minute)
-        sp_bot.set_defaults(func=_cmd_bot)
-
-    # ---- Web app (always expose; diagnose import errors at runtime) ----
-    sp_web = sub.add_parser("web", help="Run the Flask web app")
-    sp_web.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
-    sp_web.add_argument("--port", type=int, default=8010, help="Port (default: 8010)")
-    sp_web.add_argument("--debug", action="store_true", help="Run Flask in debug mode")
-    def _cmd_web(args):
-        db_url = args.db or default_db
-        mod = _mod_web
-        if mod is None or not hasattr(mod, "create_app"):
-            # Attempt late import so we can surface a clear error on systems where eager import failed
+    @app.route("/bets", methods=["GET", "POST"])
+    def bets_page():
+        if request.method == "POST":
+            match_id = (request.form.get("match_id") or "").strip()
+            sel = (request.form.get("sel") or "").strip().upper()
+            stake = request.form.get("stake")
+            price = request.form.get("price")
             try:
-                mod = __import__('sports.webapp', fromlist=['*'])
+                if not match_id or sel not in ("H", "D", "A"):
+                    raise ValueError("Provide match_id and sel in {H,D,A}.")
+                stake_f = float(stake)
+                price_f = float(price)
+                with get_conn(app.config["DB_URL"]) as conn:
+                    conn.execute(
+                        "INSERT INTO paper_bets(match_id, sel, stake, price) VALUES (?,?,?,?)",
+                        (match_id, sel, stake_f, price_f),
+                    )
+                flash("Paper bet recorded.", "success")
             except Exception as e:
-                why = _opt_import_errors.get('webapp') or str(e)
-                raise SystemExit(f"[WEB] Failed to import sports.webapp: {why}")
-        if hasattr(mod, 'create_app'):
-            app = mod.create_app(db_url)
-        elif hasattr(mod, 'app'):
-            # accept a module-level Flask app instance
-            app = getattr(mod, 'app')
-        else:
-            raise SystemExit('[WEB] sports.webapp has neither create_app(db_url) nor app')
-        print(f"[WEB] Starting Flask on http://{args.host}:{args.port} (debug={args.debug}) DB={db_url}")
-        app.run(host=args.host, port=args.port, debug=args.debug)
-    sp_web.set_defaults(func=_cmd_web)
+                flash(f"Error: {e}", "danger")
+            return redirect(url_for("bets_page"))
 
-    # ---- Legacy passthroughs (only if those modules exist) ----
-    # ingest-fixtures
-    if _mod_legacy_ingest_fx and hasattr(_mod_legacy_ingest_fx, 'main'):
-        sp_legacy_fx = sub.add_parser("ingest-fixtures", help="(legacy) Ingest fixtures via legacy script")
-        def _cmd_legacy_fx(args):
-            _mod_legacy_ingest_fx.main()
-        sp_legacy_fx.set_defaults(func=_cmd_legacy_fx)
+        with get_conn(app.config["DB_URL"]) as conn:
+            rows = recent_paper_bets(conn, limit=50)
+        return render_template("bets.html", bets=rows, config=app.config)
 
-    # fetch-openfootball / ingest-openfootball
-    if _mod_legacy_openfootball:
-        if hasattr(_mod_legacy_openfootball, 'fetch_openfootball'):
-            sp_fetch_of = sub.add_parser("fetch-openfootball", help="(legacy) Fetch OpenFootball datasets")
-            sp_fetch_of.add_argument("--mode", choices=["init", "update"], default="update")
-            def _cmd_fetch_of(args):
-                _mod_legacy_openfootball.fetch_openfootball(mode=args.mode)
-            sp_fetch_of.set_defaults(func=_cmd_fetch_of)
-        if hasattr(_mod_legacy_openfootball, 'ingest_openfootball'):
-            sp_ing_of = sub.add_parser("ingest-openfootball", help="(legacy) Ingest OpenFootball datasets")
-            def _cmd_ing_of(args):
-                _mod_legacy_openfootball.ingest_openfootball()
-            sp_ing_of.set_defaults(func=_cmd_ing_of)
+    @app.route("/bank", methods=["GET", "POST"])
+    def bank_page():
+        if request.method == "POST":
+            try:
+                new_bal = float(request.form.get("balance", "0"))
+                with get_conn(app.config["DB_URL"]) as conn:
+                    bank_set(conn, new_bal)
+                flash("Balance updated.", "success")
+            except Exception as e:
+                flash(f"Error: {e}", "danger")
+            return redirect(url_for("bank_page"))
+        with get_conn(app.config["DB_URL"]) as conn:
+            bal = bank_get(conn)
+        return render_template("bank.html", balance=bal, config=app.config)
 
-    # generate-suggestions (legacy)
-    if _mod_legacy_suggestions and hasattr(_mod_legacy_suggestions, 'main'):
-        sp_sug = sub.add_parser("generate-suggestions", help="(legacy) Generate betting suggestions")
-        def _cmd_sug(args):
-            _mod_legacy_suggestions.main()
-        sp_sug.set_defaults(func=_cmd_sug)
+    @app.errorhandler(404)
+    def _not_found(e):
+        return render_template("base.html", title="Not Found", config=app.config), 404
 
-    # telegram (legacy alt entrypoint)
-    if _mod_tg and hasattr(_mod_tg, 'run_bot'):
-        sp_tg_legacy = sub.add_parser("telegram", help="(legacy) Run Telegram bot")
-        sp_tg_legacy.add_argument("--token", required=False)
-        def _cmd_tg_legacy(args):
-            token = args.token or os.getenv("TELEGRAM_TOKEN")
-            if not token:
-                raise SystemExit("TELEGRAM_TOKEN not set and --token not provided")
-            db_url = args.db or default_db
-            _mod_tg.run_bot(token, db_url=db_url)
-        sp_tg_legacy.set_defaults(func=_cmd_tg_legacy)
-
-    # live-betdaq (legacy)
-    if _mod_legacy_live_betdaq and hasattr(_mod_legacy_live_betdaq, 'main'):
-        sp_betdaq = sub.add_parser("live-betdaq", help="(legacy) Live Betdaq stream")
-        def _cmd_betdaq(args):
-            _mod_legacy_live_betdaq.main()
-        sp_betdaq.set_defaults(func=_cmd_betdaq)
-
-    args = parser.parse_args(argv)
-    args.func(args)
+    return app
 
 
-if __name__ == "__main__":
-    main()
+# Also expose a module-level `app` so older runners can import it directly
+app = create_app()
