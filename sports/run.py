@@ -23,6 +23,7 @@ def _try_import(name, alias=None):
 
 # Newer fixture sources
 _mod_bbc_html = _try_import('sports.ingest.bbc_html', alias='bbc_html')
+_mod_bbc_fx = _try_import('sports.ingest.bbc_fixtures', alias='bbc_fixtures')
 _mod_fpl = _try_import('sports.ingest.fpl_fixtures', alias='fpl_fixtures')
 _mod_espn = _try_import('sports.ingest.fixtures_api', alias='fixtures_api')
 
@@ -107,7 +108,11 @@ def main(argv=None):
         sp_cric.set_defaults(func=_cmd_cric)
 
     # ---- New: BBC fixtures (HTML) ----
-    if _mod_bbc_html and hasattr(_mod_bbc_html, 'ingest_bbc_range'):
+    # Support either `bbc_html.ingest_bbc_range` or `bbc_fixtures.ingest_bbc_fixtures`
+    if (
+        (_mod_bbc_html and hasattr(_mod_bbc_html, 'ingest_bbc_range')) or
+        (_mod_bbc_fx and hasattr(_mod_bbc_fx, 'ingest_bbc_fixtures'))
+    ):
         sp_bbc = sub.add_parser("ingest-bbc-fixtures", help="Scrape BBC football fixtures for a date or range")
         sp_bbc.add_argument("--date", help="Start date ISO (YYYY-MM-DD); default=today")
         sp_bbc.add_argument("--days", type=int, default=1, help="Number of days to fetch (default 1)")
@@ -115,7 +120,17 @@ def main(argv=None):
             db_url = args.db or default_db
             start = args.date or datetime.now().date().isoformat()
             conn = connect(db_url); init_schema(conn)
-            n = _mod_bbc_html.ingest_bbc_range(conn, start_date_iso=start, days=args.days)
+            if _mod_bbc_html and hasattr(_mod_bbc_html, 'ingest_bbc_range'):
+                n = _mod_bbc_html.ingest_bbc_range(conn, start_date_iso=start, days=args.days)
+            else:
+                # Fallback: call single-date ingestor repeatedly for range
+                total = 0
+                from datetime import timedelta, datetime as _dt
+                d0 = _dt.fromisoformat(start).date()
+                for i in range(args.days):
+                    ds = (d0 + timedelta(days=i)).isoformat()
+                    total += _mod_bbc_fx.ingest_bbc_fixtures(conn, 'football', date_iso=ds)
+                n = total
             print(f"[BBC Ingest] Upserted {n} fixtures from {start} (+{args.days-1}d).")
             conn.close()
         sp_bbc.set_defaults(func=_cmd_bbc)
