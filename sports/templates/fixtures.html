@@ -1,37 +1,43 @@
-{% extends "base.html" %}
+{% extends 'base.html' %}
 {% block content %}
-  <div class="card shadow-sm">
-    <div class="card-header d-flex justify-content-between align-items-center">
-      <strong>Fixtures • {{ date_iso }}</strong>
-      <form class="d-flex" method="get">
-        <input type="date" class="form-control form-control-sm me-2" name="date" value="{{ date_iso }}">
-        <button class="btn btn-sm btn-primary">Go</button>
-      </form>
-    </div>
-    <div class="card-body">
-      <div class="mb-3">
-        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('fixtures_page', date=prev_date) }}">← {{ prev_date }}</a>
-        <a class="btn btn-sm btn-outline-secondary ms-2" href="{{ url_for('fixtures_page', date=next_date) }}">{{ next_date }} →</a>
-      </div>
-      {% if fixtures %}
-        <div class="table-responsive">
-          <table class="table table-sm">
-            <thead><tr><th>Competition</th><th>Home</th><th>Away</th><th>Match ID</th></tr></thead>
-            <tbody>
-            {% for m in fixtures %}
-              <tr>
-                <td>{{ m['comp'] }}</td>
-                <td>{{ m['home'] }}</td>
-                <td>{{ m['away'] }}</td>
-                <td><code>{{ m['match_id'] }}</code></td>
-              </tr>
-            {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      {% else %}
-        <em>No fixtures for {{ date_iso }}.</em>
-      {% endif %}
-    </div>
-  </div>
+<div class="card">
+  <h2 style="margin:0 0 10px 0;">Fixtures <span class="pill">{{ date_iso }}</span></h2>
+  <form class="inline" method="get" action="/fixtures">
+    <label for="date">Date</label>
+    <input type="date" id="date" name="date" value="{{ date_iso }}" />
+    <button class="btn" type="submit">Go</button>
+    <a class="btn secondary" href="/fixtures?date={{ prev_date }}">◀ {{ prev_date }}</a>
+    <a class="btn secondary" href="/fixtures?date={{ next_date }}">{{ next_date }} ▶</a>
+  </form>
+  {% if fixtures %}
+  <table class="table" style="margin-top:12px;">
+    <thead><tr><th style="width:26%">Competition</th><th>Home</th><th>Away</th><th style="width:28%">Match ID</th><th>Quick bet</th></tr></thead>
+    <tbody>
+      {% for m in fixtures %}
+      <tr>
+        <td>{{ m['comp'] }}</td>
+        <td>{{ m['home'] }}</td>
+        <td>{{ m['away'] }}</td>
+        <td class="muted">{{ m['match_id'] }}</td>
+        <td>
+          <form class="inline" method="post" action="/bets">
+            <input type="hidden" name="match_id" value="{{ m['match_id'] }}" />
+            <select name="sel">
+              <option value="H">H</option>
+              <option value="D">D</option>
+              <option value="A">A</option>
+            </select>
+            <input type="number" step="0.01" name="stake" placeholder="Stake" style="width:90px" />
+            <input type="number" step="0.01" name="price" placeholder="Price" style="width:90px" />
+            <button class="btn" type="submit">Add</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <div class="muted">No fixtures for this date.</div>
+  {% endif %}
+</div>
 {% endblock %}
