@@ -1,4 +1,4 @@
-
+import os
 import sqlite3
 import requests
 from bs4 import BeautifulSoup
@@ -7,7 +7,15 @@ from typing import Iterable, Tuple, Optional
 
 from sports.schema import upsert_match
 
-HEADERS = {"User-Agent": "autobet/fixtures (+https://github.com/warmo1/autobet)"}
+DEBUG = os.getenv("FIXTURE_DEBUG") == "1"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36",
+    "Accept-Language": "en-GB,en;q=0.9",
+    "Referer": "https://www.bbc.co.uk/sport/football/scores-fixtures",
+    "Cache-Control": "no-cache",
+}
+# Helps bypass the BBC consent wall when fetching HTML without a browser
+BBC_CONSENT_COOKIE = {"ckns_policy": "111", "ckns_policy_exp": "4102444800000"}
 
 # BBC football uses a date-scoped fixtures page
 FOOTBALL_URL = "https://www.bbc.co.uk/sport/football/scores-fixtures/{date}"  # YYYY-MM-DD
@@ -17,10 +25,24 @@ SUPPORTED_SPORTS = {"football"}
 
 def _fetch_html(url: str) -> Optional[str]:
     try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
+        s = requests.Session()
+        r = s.get(url, headers=HEADERS, timeout=30)
         r.raise_for_status()
-        return r.text
-    except Exception:
+        text = r.text
+        if DEBUG:
+            print(f"[BBC DEBUG] status={r.status_code} len={len(text)}")
+        # If we don't see any obvious fixture markup, retry with consent cookie set
+        if ("sp-c-fixture" not in text) and ("data-testid=\"match-block\"" not in text):
+            s.cookies.update(BBC_CONSENT_COOKIE)
+            r2 = s.get(url, headers=HEADERS, timeout=30)
+            r2.raise_for_status()
+            if DEBUG:
+                print(f"[BBC DEBUG] retry status={r2.status_code} len={len(r2.text)}")
+            return r2.text
+        return text
+    except Exception as e:
+        if DEBUG:
+            print(f"[BBC DEBUG] fetch error: {e}")
         return None
 
 
@@ -31,21 +53,23 @@ def _parse_football_day(html: str, date_iso: str) -> Iterable[Tuple[str, str, st
     """
     soup = BeautifulSoup(html, "html.parser")
 
+    found = 0
     # Each competition is typically in a <section> with fixture cards inside
-    sections = soup.select("[data-component='sport-fixtures'] section") or soup.select("section")
+    sections = soup.select("[data-component='sport-fixtures'] section, section.sp-c-fixture__wrapper, section")
+    sections_count = len(sections)
 
     for sec in sections:
         # Competition name can appear in various header tags
         header = sec.select_one("h3, h2, .sp-c-fixtures__date, [data-testid='link-text']")
         comp_name = (header.get_text(strip=True) if header else "").strip()
         if not comp_name:
-            # attempt a fallback if header missing
             comp_name = "Football"
 
         # Fixture cards within this competition
-        cards = sec.select("[data-testid='match-block'], .sp-c-fixture")
-        if not cards:
-            cards = sec.select("li.sp-c-fixture, .gs-o-list-ui__item")
+        cards = sec.select("[data-testid='match-block'], .sp-c-fixture, li.sp-c-fixture, .sp-c-match-list .sp-c-fixture")
+        cards_count = len(cards)
+        if DEBUG:
+            print(f"[BBC DEBUG] Section '{comp_name}' -> {cards_count} cards")
 
         for card in cards:
             # Try to read two team names in order (home, away)
@@ -75,7 +99,11 @@ def _parse_football_day(html: str, date_iso: str) -> Iterable[Tuple[str, str, st
                     away = parts[1].get_text(strip=True)
 
             if home and away:
+                found += 1
                 yield (comp_name, home, away)
+
+    if DEBUG:
+        print(f"[BBC DEBUG] Parsed fixtures: {found} (sections: {sections_count})")
 
 
 def ingest_bbc_fixtures(conn: sqlite3.Connection, sport: str, *, date_iso: Optional[str] = None) -> int:
@@ -101,6 +129,8 @@ def ingest_bbc_fixtures(conn: sqlite3.Connection, sport: str, *, date_iso: Optio
     print(f"[BBC Ingest] Fetching Football fixtures for {date_iso} → {url}")
 
     html = _fetch_html(url)
+    if DEBUG:
+        print(f"[BBC DEBUG] HTML bytes: {len(html.encode('utf-8')) if html else 0}")
     if not html:
         print("[BBC Ingest] No HTML returned from BBC; skipping.")
         return 0
