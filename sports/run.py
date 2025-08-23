@@ -199,7 +199,13 @@ def main(argv=None):
             except Exception as e:
                 why = _opt_import_errors.get('webapp') or str(e)
                 raise SystemExit(f"[WEB] Failed to import sports.webapp: {why}")
-        app = mod.create_app(db_url)
+        if hasattr(mod, 'create_app'):
+            app = mod.create_app(db_url)
+        elif hasattr(mod, 'app'):
+            # accept a module-level Flask app instance
+            app = getattr(mod, 'app')
+        else:
+            raise SystemExit('[WEB] sports.webapp has neither create_app(db_url) nor app')
         print(f"[WEB] Starting Flask on http://{args.host}:{args.port} (debug={args.debug}) DB={db_url}")
         app.run(host=args.host, port=args.port, debug=args.debug)
     sp_web.set_defaults(func=_cmd_web)
