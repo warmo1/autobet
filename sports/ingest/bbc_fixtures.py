@@ -4,6 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, date
 from typing import Iterable, Tuple, Optional
+import json
 
 from sports.schema import upsert_match
 
@@ -44,6 +45,42 @@ def _fetch_html(url: str) -> Optional[str]:
         if DEBUG:
             print(f"[BBC DEBUG] fetch error: {e}")
         return None
+
+
+def _parse_ld_json(html: str, date_iso: str) -> Iterable[Tuple[str, str, str]]:
+    """Fallback: parse application/ld+json blocks to extract SportsEvent entries."""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        scripts = soup.find_all("script", {"type": "application/ld+json"})
+        for sc in scripts:
+            try:
+                data = json.loads(sc.string or "{}")
+            except Exception:
+                continue
+            # Sometimes it's a single object, sometimes a list
+            items = data if isinstance(data, list) else [data]
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                if it.get("@type") not in ("SportsEvent", "Event"):
+                    continue
+                # only take events on the requested date
+                start = it.get("startDate") or it.get("startTime") or it.get("date")
+                if not start:
+                    continue
+                try:
+                    d = datetime.fromisoformat(start.replace("Z", "+00:00")).date().isoformat()
+                except Exception:
+                    d = None
+                if d and d != date_iso:
+                    continue
+                comp = (it.get("superEvent") or {}).get("name") or it.get("name") or "Football"
+                home = (it.get("homeTeam") or {}).get("name")
+                away = (it.get("awayTeam") or {}).get("name")
+                if home and away:
+                    yield (comp, home, away)
+    except Exception:
+        return []
 
 
 def _parse_football_day(html: str, date_iso: str) -> Iterable[Tuple[str, str, str]]:
@@ -136,7 +173,16 @@ def ingest_bbc_fixtures(conn: sqlite3.Connection, sport: str, *, date_iso: Optio
         return 0
 
     count = 0
-    for comp, home, away in _parse_football_day(html, date_iso):
+    parsed = list(_parse_football_day(html, date_iso))
+    if DEBUG:
+        print(f"[BBC DEBUG] primary parser found: {len(parsed)} fixtures")
+    if not parsed:
+        ld = list(_parse_ld_json(html, date_iso))
+        if DEBUG:
+            print(f"[BBC DEBUG] ld+json fallback found: {len(ld)} fixtures")
+        parsed = ld
+
+    for comp, home, away in parsed:
         try:
             upsert_match(
                 conn,
@@ -152,7 +198,9 @@ def ingest_bbc_fixtures(conn: sqlite3.Connection, sport: str, *, date_iso: Optio
                 source="bbc_html",
             )
             count += 1
-        except Exception:
+        except Exception as e:
+            if DEBUG:
+                print(f"[BBC DEBUG] upsert error: {e} for {home} vs {away}")
             continue
 
     print(f"[BBC Ingest] Upserted {count} football fixtures for {date_iso}.")
