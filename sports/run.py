@@ -11,7 +11,7 @@ from sports.ingest.cricket_cricsheet import ingest_dir as ingest_cric_dir
 from sports.ingest.football_kaggle import ingest_file as ingest_kaggle_file
 from sports.ingest.football_premier_league import ingest_dir as ingest_pl_dir
 from sports.ingest.football_openfootball import ingest_dir as ingest_openfootball_dir
-from sports.ingest.fixtures_api import ingest_fixtures
+from sports.ingest.fixtures_api import ingest_fixtures, SPORT_PATHS
 
 # Import suggestion and other core functions
 from sports.suggest import generate_football_suggestions
@@ -83,6 +83,26 @@ def main(argv=None):
         print(f"[Cricket] Ingested {n} rows.")
         conn.close()
     sp_cricket.set_defaults(func=_cmd_ingest_cricket)
+
+    # --- ESPN Fixtures Command ---
+    sp_espn = sub.add_parser("fetch-espn", help="Fetch ESPN fixtures/results for a league key")
+    sp_espn.add_argument("--league", required=True, choices=sorted(SPORT_PATHS.keys()))
+    sp_espn.add_argument("--date", help="YYYY-MM-DD (defaults to today)")
+    sp_espn.add_argument("--days", type=int, default=0, help="Also fetch N subsequent days")
+    sp_espn.add_argument("--debug", action="store_true", help="Verbose diagnostics")
+    def _cmd_fetch_espn(args):
+        if args.debug:
+            os.environ["FIXTURE_DEBUG"] = "1"
+        conn = connect(db_url); init_schema(conn)
+        try:
+            # Newer ingest supports (conn, league_key, date=None, days=0)
+            ingest_fixtures(conn, args.league, args.date, args.days)
+        except TypeError:
+            # Backward-compatible call (conn, sport)
+            ingest_fixtures(conn, args.league)
+        finally:
+            conn.close()
+    sp_espn.set_defaults(func=_cmd_fetch_espn)
 
     # --- Live Fixtures Command ---
     sp_fixtures = sub.add_parser("ingest-fixtures", help="Ingest upcoming fixtures from the ESPN API")
