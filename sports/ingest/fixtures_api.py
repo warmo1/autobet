@@ -3,61 +3,50 @@ from datetime import datetime
 from ..config import cfg
 
 # --- ESPN API Configuration ---
-# This maps our sport names to the specific paths used by the ESPN API.
+# This maps our internal sport names to the specific paths used by the ESPN API.
 SPORT_PATHS = {
     'football': 'soccer/eng.1', # English Premier League
     'rugby': 'rugby/league',     # Generic rugby league
-    # **FIX**: Changed to the more reliable ESPNCricinfo API endpoint
-    'cricket': 'cricket/scores/live'         
+    'cricket': 'cricket/ipl'     # Indian Premier League (as a stable example)
 }
 
 def ingest_fixtures(conn, sport: str) -> int:
     """
-    Fetches and ingests fixtures for a given sport directly from the stable ESPN and ESPNCricinfo APIs.
+    Fetches and ingests fixtures for a given sport directly from the stable ESPN API.
     """
     if sport not in SPORT_PATHS:
         print(f"[Ingest Error] Sport '{sport}' not supported by the ESPN ingestor.")
         return 0
 
-    # **FIX**: Use the correct base URL for cricket
-    base_url = "https://site.api.espn.com/apis/site/v2/sports/"
-    if sport == 'cricket':
-        base_url = "https://www.espncricinfo.com/apis/v2/scores/"
-
-    url = f"{base_url}{SPORT_PATHS[sport]}"
-    print(f"[Fixtures] Fetching {sport.title()} fixtures from: {url}")
+    url = f"http://site.api.espn.com/apis/site/v2/sports/{SPORT_PATHS[sport]}/scoreboard"
+    print(f"[Fixtures] Fetching {sport.title()} fixtures from ESPN API...")
 
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
         data = response.json()
         
-        # The structure of the Cricinfo response is different
-        if sport == 'cricket':
-            fixtures = data.get('matches', [])
-        else:
-            fixtures = data.get('events', [])
-
+        fixtures = data.get('events', [])
         if not fixtures:
-            print(f"[Fixtures] No {sport.title()} fixtures found for today.")
+            print(f"[Fixtures] No {sport.title()} fixtures found for today on ESPN.")
             return 0
             
         count = 0
         for event in fixtures:
-            if sport == 'cricket':
-                if event.get('status') != 'Scheduled': continue
-                home = event.get('teams', [{}, {}])[0].get('name')
-                away = event.get('teams', [{}, {}])[1].get('name')
-                date_str = event.get('startDate', '').split('T')[0]
-                league = event.get('series', {}).get('name', 'Unknown Series')
-            else: # Football and Rugby logic
-                if event.get('status', {}).get('type', {}).get('name') != 'STATUS_SCHEDULED': continue
-                competitors = event.get('competitions', [{}])[0].get('competitors', [])
-                if len(competitors) < 2: continue
-                home = competitors[0].get('team', {}).get('displayName')
-                away = competitors[1].get('team', {}).get('displayName')
-                date_str = event.get('date', '').split('T')[0]
-                league = data.get('leagues', [{}])[0].get('name', 'Unknown League')
+            # We only want to ingest matches that are scheduled for the future
+            if event.get('status', {}).get('type', {}).get('name') != 'STATUS_SCHEDULED':
+                continue
+
+            competitors = event.get('competitions', [{}])[0].get('competitors', [])
+            if len(competitors) < 2:
+                continue
+
+            home = competitors[0].get('team', {}).get('displayName')
+            away = competitors[1].get('team', {}).get('displayName')
+            
+            # ESPN provides dates in ISO 8601 format (e.g., '2025-08-21T19:00Z')
+            date_str = event.get('date', '').split('T')[0]
+            league = data.get('leagues', [{}])[0].get('name', 'Unknown League')
             
             if home and away and date_str:
                 conn.execute(
@@ -67,9 +56,15 @@ def ingest_fixtures(conn, sport: str) -> int:
                 count += 1
                 
         conn.commit()
-        print(f"[Fixtures] Ingested {count} {sport.title()} fixtures.")
+        print(f"[Fixtures] Ingested {count} {sport.title()} fixtures from ESPN.")
         return count
         
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+             print(f"[Fixtures] The ESPN API endpoint returned a 404 Not Found error. This may be due to the league being out of season.")
+             return 0
+        print(f"[API Error] Could not fetch data from ESPN: {e}")
+        return 0
     except Exception as e:
-        print(f"[API Error] Could not fetch data: {e}")
+        print(f"[API Error] An unexpected error occurred: {e}")
         return 0
