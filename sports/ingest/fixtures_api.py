@@ -16,14 +16,30 @@ HEADERS = {
 }
 
 # --- ESPN API Configuration ---
-# Map internal sport keys to ESPN paths. Start with soccer (EPL, Championship).
-# Rugby/Cricket endpoints on ESPN are inconsistent/unofficial; keep stubs for now.
+# Built-in league paths. You can add more at runtime with ESPN_EXTRA_PATHS="key=path,key2=path2"
 SPORT_PATHS = {
-    "football": "soccer/eng.1",               # English Premier League
-    "football_championship": "soccer/eng.2",  # EFL Championship
-    # "rugby": "rugby/267979",               # Premiership Rugby (numeric league ID) – verify first
-    # "cricket": "cricket/england",          # Placeholder; verify exact path before enabling
+    # Football (soccer)
+    "football": "soccer/eng.1",                  # English Premier League
+    "football_championship": "soccer/eng.2",     # EFL Championship
+    # Tennis (tour scoreboards aggregate daily matches)
+    "tennis_atp": "tennis/atp",
+    "tennis_wta": "tennis/wta",
+    # Golf (PGA Tour scoreboard shows current tournament rounds)
+    "golf_pga": "golf/pga",
+    # The following may vary by season/competition. Provide via ESPN_EXTRA_PATHS to avoid hardcoding:
+    # "rugby_premiership": "rugby/eng.1",        # Example placeholder – confirm exact path id first
+    # "rugby_urc": "rugby/206",
+    # "cricket_international": "cricket/icc",
+    # "horse_uk": "horse-racing/uk",           # Horse racing often not available via scoreboard
 }
+
+# Allow runtime extension via env, e.g. ESPN_EXTRA_PATHS="rugby_premiership=rugby/eng.1,cricket_blast=cricket/1234"
+_extra = os.getenv("ESPN_EXTRA_PATHS")
+if _extra:
+    for kv in _extra.split(","):
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            SPORT_PATHS[k.strip()] = v.strip()
 
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
 # Some slates only appear on the web subdomain API
@@ -56,6 +72,9 @@ def _upsert_match_raw(
     home: str,
     away: str,
     source: str,
+    fthg: Optional[int] = None,
+    ftag: Optional[int] = None,
+    ftr: Optional[str] = None,
 ):
     home_id = _ensure_team(conn, home)
     away_id = _ensure_team(conn, away)
@@ -75,9 +94,9 @@ def _upsert_match_raw(
             date,
             int(home_id),
             int(away_id),
-            None,
-            None,
-            None,
+            fthg,
+            ftag,
+            ftr,
             source,
         ),
     )
@@ -141,12 +160,29 @@ def _parse_event(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 home_team = home_team or competitors[0]
                 away_team = away_team or competitors[1]
 
+        # Tennis sometimes uses athlete blocks instead of team names
+        def _athlete_name(cand):
+            a = (cand or {}).get("athlete") or {}
+            n = a.get("displayName") or a.get("shortName") or a.get("fullName")
+            return n
+
         home_name = _safe_team_name(home_team) if home_team else None
         away_name = _safe_team_name(away_team) if away_team else None
+        if not home_name:
+            home_name = _athlete_name(home_team)
+        if not away_name:
+            away_name = _athlete_name(away_team)
+
         if not home_name or not away_name:
             if DEBUG:
                 print(f"[ESPN DEBUG] skip: missing team names h={bool(home_name)} a={bool(away_name)}")
             return None
+
+        # If we still have no two competitors (e.g., golf tournament), try to coerce an event
+        if not (home_team and away_team) and (ev.get('name') or comp0.get('venue')):
+            title = ev.get('name') or comp0.get('name') or (comp0.get('venue') or {}).get('fullName') or 'Event'
+            home_name = title
+            away_name = (comp0.get('venue') or {}).get('fullName') or 'Field'
 
         # Kickoff date – event.date, else competition.date/startDate
         iso_dt = ev.get("date") or comp0.get("date") or comp0.get("startDate")
@@ -168,11 +204,38 @@ def _parse_event(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             or "Football"
         )
 
+        # Optional scoring (if finished)
+        status = (ev.get("status") or {}).get("type") or {}
+        state = status.get("state")  # e.g., 'pre', 'in', 'post'
+        fthg = ftag = None
+        ftr = None
+        try:
+            comp_scores = comp0.get("competitors", [])
+            if len(comp_scores) >= 2:
+                # ESPN often provides integers as strings
+                def _score(c):
+                    s = c.get("score")
+                    try:
+                        return int(s) if s is not None else None
+                    except Exception:
+                        return None
+                # align scores to resolved home/away
+                home_score = next((_score(c) for c in comp_scores if (c.get("homeAway") == "home") or (c is home_team)), None)
+                away_score = next((_score(c) for c in comp_scores if (c.get("homeAway") == "away") or (c is away_team)), None)
+                if state == "post" and home_score is not None and away_score is not None:
+                    fthg, ftag = home_score, away_score
+                    ftr = "H" if fthg > ftag else ("A" if ftag > fthg else "D")
+        except Exception:
+            pass
+
         return {
             "date": match_date,
             "home": home_name,
             "away": away_name,
             "comp": league_name,
+            "fthg": fthg,
+            "ftag": ftag,
+            "ftr": ftr,
         }
     except Exception as e:
         if DEBUG:
@@ -201,7 +264,7 @@ def _fetch_events_for_date(path: str, date_str: str) -> list:
         e0 = events[0]
         comp0 = (e0.get("competitions") or [{}])[0]
         teams = comp0.get("competitors", [])
-        print(f"[ESPN DEBUG] sample: keys={list(e0.keys())[:8]} teams={len(teams)} date={e0.get('date') or comp0.get('date')}")
+        print(f"[ESPN DEBUG] sample: keys={list(e0.keys())[:8]} teams={len(teams)} date={e0.get('date') or comp0.get('date')} name={e0.get('name')}")
     return events
 
 
@@ -261,6 +324,9 @@ def ingest_fixtures(conn, sport: str, *, date_iso: Optional[str] = None) -> int:
                     home=norm["home"],
                     away=norm["away"],
                     source=f"espn:{path}",
+                    fthg=norm.get("fthg"),
+                    ftag=norm.get("ftag"),
+                    ftr=norm.get("ftr"),
                 )
                 count += 1
             except Exception as e:
