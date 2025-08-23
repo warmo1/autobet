@@ -31,15 +31,20 @@ BASE_URL_FALLBACK = "https://site.web.api.espn.com/apis/v2/sports/{path}/scorebo
 
 # --- Minimal, robust DB helpers (avoid brittle upsert_match assumptions) ---
 
-def _ensure_team(conn: sqlite3.Connection, name: str) -> str:
+def _ensure_team(conn: sqlite3.Connection, name: str) -> int:
+    # Try fetch existing row by UNIQUE name
     cur = conn.execute("SELECT team_id FROM teams WHERE name=?", (name,))
     row = cur.fetchone()
     if row:
-        return row[0]
-    # deterministic team_id based on name
-    team_id = name.strip()
-    conn.execute("INSERT OR IGNORE INTO teams(team_id, name) VALUES (?, ?)", (team_id, name))
-    return team_id
+        return int(row[0])
+    # Insert new team row; assume schema: team_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE
+    cur = conn.execute("INSERT OR IGNORE INTO teams(name) VALUES (?)", (name,))
+    if cur.lastrowid:
+        return int(cur.lastrowid)
+    # If IGNORE due to race, fetch again
+    cur = conn.execute("SELECT team_id FROM teams WHERE name=?", (name,))
+    row = cur.fetchone()
+    return int(row[0]) if row else 0
 
 
 def _upsert_match_raw(
@@ -55,17 +60,28 @@ def _upsert_match_raw(
     home_id = _ensure_team(conn, home)
     away_id = _ensure_team(conn, away)
     match_id = f"{sport}:{date}:{home}:{away}"
-    # insert if missing
+    # Insert if missing
     conn.execute(
         """
-        INSERT OR IGNORE INTO matches(match_id, sport, comp, season, date, home_id, away_id, fthg, ftag, ftr, source)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        INSERT OR IGNORE INTO matches(
+            match_id, sport, comp, season, date, home_id, away_id, fthg, ftag, ftr, source
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
-            match_id, sport, comp or "", "", date, home_id, away_id, None, None, None, source,
+            match_id,
+            sport,
+            comp or "",
+            "",
+            date,
+            int(home_id),
+            int(away_id),
+            None,
+            None,
+            None,
+            source,
         ),
     )
-    # small update to keep comp/source fresh
+    # Update comp/source if row already existed
     conn.execute(
         "UPDATE matches SET comp=COALESCE(?, comp), source=COALESCE(?, source) WHERE match_id=?",
         (comp or "", source or "", match_id),
