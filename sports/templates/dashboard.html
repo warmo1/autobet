@@ -30,7 +30,54 @@
         <a href="/bets" class="text-blue-600 hover:text-blue-800 font-medium">Bets</a>
       </div>
     </nav>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+<script>
+const ctx = document.getElementById('priceChart')?.getContext('2d');
+let chart;
 
+async function loadChart() {
+  const sym = document.getElementById('sym').value;
+  const tf  = document.getElementById('tf').value;
+  document.getElementById('trade_symbol').value = sym;
+
+  const res = await fetch(`/api/ohlcv?symbol=${encodeURIComponent(sym)}&timeframe=${encodeURIComponent(tf)}&limit=500`);
+  const js  = await res.json();
+  const rows = js.rows || [];
+
+  // Map both possible shapes:
+  // {t(ms), o,h,l,c}  OR  {time(sec), open,high,low,close}
+  const labels = rows.map(r => {
+    const ms = (r.t !== undefined) ? Number(r.t)
+             : (r.time !== undefined) ? Number(r.time) * 1000
+             : NaN;
+    return new Date(ms);
+  });
+
+  const closes = rows.map(r =>
+    (r.c !== undefined) ? Number(r.c)
+    : (r.close !== undefined) ? Number(r.close)
+    : NaN
+  );
+
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [{ label: `${js.symbol} ${js.timeframe} close`, data: closes }] },
+    options: {
+      responsive: true,
+      parsing: false,
+      elements: { point: { radius: 0 } },
+      scales: { x: { type: 'time' } }
+    }
+  });
+}
+
+document.getElementById('reload').addEventListener('click', loadChart);
+document.getElementById('sym').addEventListener('change', loadChart);
+document.getElementById('tf').addEventListener('change', loadChart);
+loadChart();
+</script>
     <!-- Flash Messages -->
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
