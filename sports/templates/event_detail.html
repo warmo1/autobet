@@ -1,0 +1,152 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <strong>Event</strong>
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('tote_events_page') }}">Back</a>
+  </div>
+  <div class="card-body">
+    <div class="mb-2">
+      <div><strong>{{ event.name }}</strong></div>
+      <div class="small text-muted">{{ event.venue }} • {{ event.country }} • <span class="time-iso" data-iso="{{ event.start_iso }}">{{ event.start_iso }}</span> • Sport: {{ event.sport or '—' }} • Status: {{ event.status }}</div>
+      {% if conditions %}
+        <div class="mt-1 small">
+          <span class="badge bg-light text-dark">Going: {{ conditions.going or '—' }}</span>
+          <span class="badge bg-light text-dark ms-1">Temp: {{ conditions.weather_temp_c is not none and (conditions.weather_temp_c | round(0) | int) ~ '°C' or '—' }}</span>
+          <span class="badge bg-light text-dark ms-1">Wind: {{ conditions.weather_wind_kph is not none and (conditions.weather_wind_kph | round(0) | int) ~ ' kph' or '—' }}</span>
+          <span class="badge bg-light text-dark ms-1">Precip: {{ conditions.weather_precip_mm is not none and (conditions.weather_precip_mm | round(1)) ~ ' mm' or '—' }}</span>
+        </div>
+      {% endif %}
+    </div>
+
+    {% if event.sport == 'horse_racing' %}
+      <div class="mb-3">
+        <strong>Runners</strong>
+        <div class="small text-muted">{{ runners|length }} runners</div>
+        <div class="table-responsive">
+          <table class="table table-sm">
+            <thead><tr><th>Horse</th></tr></thead>
+            <tbody>
+              {% for r in runners %}
+                <tr><td>{{ r.name }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    {% elif event.sport == 'football' %}
+      <div class="mb-3">
+        <strong>Match</strong>
+        <div>{{ event.home or 'Home' }} vs {{ event.away or 'Away' }}</div>
+      </div>
+    {% else %}
+      {% if competitors %}
+        <div class="mb-3">
+          <strong>Competitors</strong>
+          <div class="small text-muted">{{ competitors|length }} entries</div>
+          <div class="small">{{ competitors | map(attribute='name') | join(', ') }}</div>
+        </div>
+      {% endif %}
+    {% endif %}
+
+    {% if products %}
+      <div class="mb-2"><strong>Pools</strong></div>
+      <div class="table-responsive">
+        <table class="table table-sm">
+          <thead><tr><th>Bet</th><th>Status</th><th>Total Net</th><th>Product</th></tr></thead>
+          <tbody>
+            {% for p in products %}
+              <tr>
+                <td>{{ p.bet_type }}</td>
+                <td>{{ p.status }}</td>
+                <td>{{ '%.2f'|format(p.total_net or 0) }}</td>
+                <td class="text-truncate" style="max-width:320px;">{{ p.product_id }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+
+    {% if features %}
+      <div class="mt-3">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <strong>Runner Features</strong>
+          <small class="text-muted">{{ features|length }} rows</small>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Horse</th>
+                <th>Recent</th>
+                <th>Avg Fin</th>
+                <th>W L5</th>
+                <th>P L5</th>
+                <th>Days Since</th>
+                <th>Temp °C</th>
+                <th>Wind kph</th>
+                <th>Precip mm</th>
+                <th>Going</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for f in features %}
+              <tr>
+                <td>{{ f.cloth_number if f.cloth_number is not none else '—' }}</td>
+                <td>{{ f.horse_name or f.horse_id }}</td>
+                <td>{{ f.recent_runs if f.recent_runs is not none else '—' }}</td>
+                <td>{{ '%.2f' % f.avg_finish if f.avg_finish is not none else '—' }}</td>
+                <td>{{ f.wins_last5 if f.wins_last5 is not none else '—' }}</td>
+                <td>{{ f.places_last5 if f.places_last5 is not none else '—' }}</td>
+                <td>{{ f.days_since_last_run if f.days_since_last_run is not none else '—' }}</td>
+                <td>{{ '%.0f' % f.weather_temp_c if f.weather_temp_c is not none else '—' }}</td>
+                <td>{{ '%.0f' % f.weather_wind_kph if f.weather_wind_kph is not none else '—' }}</td>
+                <td>{{ '%.1f' % f.weather_precip_mm if f.weather_precip_mm is not none else '—' }}</td>
+                <td>{{ f.going or '—' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    {% endif %}
+
+    {% if runner_rows %}
+      <div class="mt-3">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <strong>Runners & Odds</strong>
+          <small class="text-muted">Dynamic; best live odds when available</small>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Horse</th>
+                <th>Best Odds</th>
+                <th>Book</th>
+                <th>Fair Odds</th>
+                <th>Win %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in runner_rows %}
+                <tr>
+                  <td>{{ r.cloth if r.cloth is not none else '—' }}</td>
+                  <td>{{ r.name }}</td>
+                  <td>{{ r.best_price is not none and ('%.2f' % r.best_price) or '—' }}</td>
+                  <td>{{ r.best_book or '' }}</td>
+                  <td>{{ r.fair_odds is not none and ('%.2f' % r.fair_odds) or '—' }}</td>
+                  <td>{{ r.proba is not none and ('%.1f%%' % (r.proba*100.0)) or '—' }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

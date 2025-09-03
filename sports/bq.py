@@ -291,6 +291,59 @@ class BigQuerySink:
             ]),
         )
 
+    def upsert_tote_dividend_updates(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_dividend_updates", rows, schema_hint={
+            "ts_ms": "INT64",
+            "dividend_type": "INT64",
+            "dividend_status": "INT64",
+            "dividend_amount": "FLOAT64",
+            "finishing_position": "INT64",
+        })
+        if not temp:
+            return
+        self._merge(
+            "tote_dividend_updates",
+            temp,
+            key_expr="T.product_id=S.product_id AND T.ts_ms=S.ts_ms AND T.leg_id=S.leg_id AND T.selection_id=S.selection_id",
+            update_set="dividend_name=S.dividend_name, dividend_type=S.dividend_type, dividend_status=S.dividend_status, dividend_amount=S.dividend_amount, dividend_currency=S.dividend_currency, finishing_position=S.finishing_position",
+        )
+
+    def upsert_tote_event_results_log(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_event_results_log", rows, schema_hint={
+            "ts_ms": "INT64",
+            "finishing_position": "INT64",
+        })
+        if not temp:
+            return
+        self._merge(
+            "tote_event_results_log",
+            temp,
+            key_expr="T.event_id=S.event_id AND T.ts_ms=S.ts_ms AND T.competitor_id=S.competitor_id",
+            update_set="finishing_position=S.finishing_position, status=S.status",
+        )
+
+    def upsert_tote_event_status_log(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_event_status_log", rows, schema_hint={"ts_ms": "INT64"})
+        if not temp:
+            return
+        self._merge(
+            "tote_event_status_log",
+            temp,
+            key_expr="T.event_id=S.event_id AND T.ts_ms=S.ts_ms",
+            update_set="status=S.status",
+        )
+
+    def upsert_tote_competitor_status_log(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_competitor_status_log", rows, schema_hint={"ts_ms": "INT64"})
+        if not temp:
+            return
+        self._merge(
+            "tote_competitor_status_log",
+            temp,
+            key_expr="T.event_id=S.event_id AND T.competitor_id=S.competitor_id AND T.ts_ms=S.ts_ms",
+            update_set="status=S.status",
+        )
+
     def upsert_hr_horse_runs(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("hr_horse_runs", rows, schema_hint={
             "finish_pos": "INT64",
@@ -545,12 +598,171 @@ class BigQuerySink:
         );
         """
         job = client.query(sql); job.result()
+        # Add optional tuning columns if missing (idempotent)
+        for name, typ in (
+            ("model_id", "STRING"),
+            ("ts_ms", "INT64"),
+            ("default_top_n", "INT64"),
+            ("target_coverage", "FLOAT64"),
+        ):
+            try:
+                client.query(f"ALTER TABLE `{ds}.tote_params` ADD COLUMN IF NOT EXISTS `{name}` {typ}").result()
+            except Exception:
+                pass
         # Insert default params if table is empty
         sql = f"""
         INSERT INTO `{ds}.tote_params`(t,f,stake_per_line,R)
         SELECT 0.30, 1.0, 0.10, 0.0
         FROM (SELECT 1) 
         WHERE (SELECT COUNT(1) FROM `{ds}.tote_params`) = 0;
+        """
+        job = client.query(sql); job.result()
+
+        # Runner strength view (predictions-based): choose latest ts for configured model_id (from tote_params)
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_superfecta_runner_strength` AS
+        WITH prm AS (
+          SELECT model_id, ts_ms, updated_ts
+          FROM `{ds}.tote_params`
+          WHERE model_id IS NOT NULL
+          ORDER BY updated_ts DESC LIMIT 1
+        ), latest AS (
+          SELECT p.model_id, IFNULL((SELECT ts_ms FROM prm LIMIT 1), MAX(p.ts_ms)) AS ts_ms
+          FROM `{ds}.predictions` p
+          WHERE p.model_id = (SELECT model_id FROM prm LIMIT 1)
+          GROUP BY p.model_id
+        )
+        SELECT
+          tp.product_id,
+          p.event_id,
+          p.horse_id AS runner_id,
+          GREATEST(p.proba, 1e-9) AS strength
+        FROM `{ds}.predictions` p
+        JOIN latest l ON l.model_id = p.model_id AND l.ts_ms = p.ts_ms
+        JOIN `{ds}.tote_products` tp ON tp.event_id = p.event_id
+        WHERE UPPER(tp.bet_type) = 'SUPERFECTA';
+        """
+        job = client.query(sql); job.result()
+
+        # Table function: enumerate & score permutations (Plackett–Luce style)
+        sql = f"""
+        CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_superfecta_perms`(
+          in_product_id STRING,
+          top_n INT64
+        )
+        RETURNS TABLE<
+          product_id STRING,
+          h1 STRING, h2 STRING, h3 STRING, h4 STRING,
+          p FLOAT64,
+          line_cost_cents INT64
+        > AS (
+          WITH runners AS (
+            SELECT product_id, runner_id, strength,
+                   ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY strength DESC) AS rnk
+            FROM `{ds}.vw_superfecta_runner_strength`
+            WHERE product_id = in_product_id
+          ), top_r AS (
+            SELECT * FROM runners WHERE rnk <= top_n
+          ), tot AS (
+            SELECT product_id, SUM(strength) AS sum_s FROM top_r GROUP BY product_id
+          )
+          SELECT
+            tr1.product_id,
+            tr1.runner_id AS h1,
+            tr2.runner_id AS h2,
+            tr3.runner_id AS h3,
+            tr4.runner_id AS h4,
+            (tr1.strength / t.sum_s) *
+            (tr2.strength / (t.sum_s - tr1.strength)) *
+            (tr3.strength / (t.sum_s - tr1.strength - tr2.strength)) *
+            (tr4.strength / (t.sum_s - tr1.strength - tr2.strength - tr3.strength)) AS p,
+            1 AS line_cost_cents
+          FROM top_r tr1
+          JOIN top_r tr2 ON tr2.runner_id != tr1.runner_id
+          JOIN top_r tr3 ON tr3.runner_id NOT IN (tr1.runner_id, tr2.runner_id)
+          JOIN top_r tr4 ON tr4.runner_id NOT IN (tr1.runner_id, tr2.runner_id, tr3.runner_id)
+          JOIN tot t USING (product_id)
+        );
+        """
+        job = client.query(sql); job.result()
+
+        # Table function: coverage curve and efficiency
+        sql = f"""
+        CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_superfecta_coverage`(
+          in_product_id STRING,
+          top_n INT64
+        )
+        RETURNS TABLE<
+          product_id STRING,
+          total_lines INT64,
+          line_index INT64,
+          h1 STRING, h2 STRING, h3 STRING, h4 STRING,
+          p FLOAT64,
+          cum_p FLOAT64,
+          lines_frac FLOAT64,
+          random_cov FLOAT64,
+          efficiency FLOAT64
+        > AS (
+          WITH perms AS (
+            SELECT * FROM `{ds}.tf_superfecta_perms`(in_product_id, top_n)
+          ), ordered AS (
+            SELECT product_id, h1,h2,h3,h4, p,
+                   ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY p DESC) AS rn,
+                   COUNT(*)    OVER (PARTITION BY product_id) AS total_lines
+            FROM perms
+          )
+          SELECT
+            product_id,
+            total_lines,
+            rn AS line_index,
+            h1,h2,h3,h4,
+            p,
+            SUM(p) OVER (PARTITION BY product_id ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum_p,
+            rn / total_lines AS lines_frac,
+            rn / total_lines AS random_cov,
+            SAFE_DIVIDE(
+              SUM(p) OVER (PARTITION BY product_id ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
+              rn / total_lines
+            ) AS efficiency
+          FROM ordered
+        );
+        """
+        job = client.query(sql); job.result()
+
+        # Table function: breakeven metrics for any coverage point
+        sql = f"""
+        CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_superfecta_breakeven`(
+          in_product_id STRING,
+          top_n INT64,
+          stake_per_line NUMERIC,
+          f_share FLOAT64,
+          net_rollover NUMERIC
+        )
+        RETURNS TABLE<
+          product_id STRING,
+          line_index INT64,
+          lines INT64,
+          lines_frac FLOAT64,
+          cum_p FLOAT64,
+          stake_total NUMERIC,
+          o_min_break_even NUMERIC
+        > AS (
+          WITH cov AS (
+            SELECT * FROM `{ds}.tf_superfecta_coverage`(in_product_id, top_n)
+          )
+          SELECT
+            cov.product_id,
+            cov.line_index,
+            cov.line_index AS lines,
+            cov.lines_frac,
+            cov.cum_p,
+            cov.line_index * stake_per_line AS stake_total,
+            SAFE_DIVIDE(
+              (cov.line_index * stake_per_line) - f_share * (0.70 * (cov.line_index * stake_per_line) + net_rollover),
+              0.70 * f_share
+            ) AS o_min_break_even
+          FROM cov
+        );
         """
         job = client.query(sql); job.result()
 

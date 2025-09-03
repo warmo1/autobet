@@ -29,8 +29,68 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
     }
     subprotocols = ["graphql-ws"]
     query = (
-        "subscription{ onPoolTotalChanged{ isFinalized productId total{ "
-        " netAmounts{ currency{ code } decimalAmount } grossAmounts{ currency{ code } decimalAmount } } } }"
+        """
+subscription {
+  onPoolTotalChanged {
+    isFinalized
+    productId
+    total {
+      netAmounts {
+        currency {
+          code
+        }
+        decimalAmount
+      }
+      grossAmounts {
+        currency {
+          code
+        }
+        decimalAmount
+      }
+    }
+  }
+  onPoolDividendChanged {
+    productId
+    dividends {
+      dividend {
+        name
+        type
+        status
+        amounts {
+          decimalAmount
+          currency {
+            code
+          }
+        }
+      }
+      legs {
+        legId
+        selections {
+          id
+          finishingPosition
+        }
+      }
+    }
+  }
+  onEventResultChanged {
+    eventId
+    competitorResults {
+      competitorId
+      finishingPosition
+      status
+    }
+  }
+  onEventStatusChanged {
+    eventId
+    status
+  }
+  onCompetitorStatusChanged {
+    eventId
+    competitorId
+    status
+  }
+}
+"""
     )
     start_msg = {
         "id": "1",
@@ -43,7 +103,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
     }
     ctx = ssl.SSLContext()
     started = time.time()
-    async with websockets.connect(url, subprotocols=subprotocols, extra_headers=headers, ping_interval=20) as ws:  # type: ignore
+    async with websockets.connect(url, subprotocols=subprotocols, extra_headers=headers, ssl=ssl.SSLContext(), ping_interval=20) as ws:  # type: ignore
         # init and start
         await ws.send(json.dumps(init_msg))
         await ws.send(json.dumps(start_msg))
@@ -76,42 +136,59 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                 conn.commit()
             except Exception:
                 pass
-            # Parse pool total change, write snapshot best-effort
+            # Parse message data
             try:
                 if payload.get("type") == "data":
-                    node = (((payload.get("payload") or {}).get("data") or {}).get("onPoolTotalChanged"))
-                    if node and isinstance(node, dict):
-                        pid = node.get("productId")
-                        # Choose first net/gross amounts
-                        net_list = ((node.get("total") or {}).get("netAmounts") or [])
-                        gross_list = ((node.get("total") or {}).get("grossAmounts") or [])
-                        net = None
-                        gross = None
-                        if net_list:
-                            try:
-                                net = float(net_list[0].get("decimalAmount"))
-                            except Exception:
-                                net = None
-                        if gross_list:
-                            try:
-                                gross = float(gross_list[0].get("decimalAmount"))
-                            except Exception:
-                                gross = None
-                        if pid:
-                            # Lookup product context
-                            row = conn.execute(
-                                "SELECT event_id, bet_type, status, currency, start_iso FROM tote_products WHERE product_id=?",
-                                (pid,),
-                            ).fetchone()
-                            ev, bt, st, curr, start_iso = (row or (None, None, None, None, None))
-                            conn.execute(
-                                """
-                                INSERT OR REPLACE INTO tote_pool_snapshots(product_id,event_id,bet_type,status,currency,start_iso,ts_ms,total_gross,total_net)
-                                VALUES(?,?,?,?,?,?,?,?,?)
-                                """,
-                                (pid, ev, bt, st, curr, start_iso, ts, gross, net),
-                            )
-                            conn.commit()
+                    data = (payload.get("payload") or {}).get("data") or {}
+                    
+                    # onPoolTotalChanged → snapshots
+                    if "onPoolTotalChanged" in data:
+                        node = data["onPoolTotalChanged"]
+                        if node and isinstance(node, dict):
+                            pid = node.get("productId")
+                            net_list = ((node.get("total") or {}).get("netAmounts") or [])
+                            gross_list = ((node.get("total") or {}).get("grossAmounts") or [])
+                            net = float(net_list[0].get("decimalAmount")) if net_list else None
+                            gross = float(gross_list[0].get("decimalAmount")) if gross_list else None
+                            if pid:
+                                row = conn.execute(
+                                    "SELECT event_id, bet_type, status, currency, start_iso FROM tote_products WHERE product_id=?",
+                                    (pid,),
+                                ).fetchone()
+                                ev, bt, st, curr, start_iso = (row or (None, None, None, None, None))
+                                conn.execute(
+                                    """
+                                    INSERT OR REPLACE INTO tote_pool_snapshots(product_id,event_id,bet_type,status,currency,start_iso,ts_ms,total_gross,total_net)
+                                    VALUES(?,?,?,?,?,?,?,?,?)
+                                    """,
+                                    (pid, ev, bt, st, curr, start_iso, ts, gross, net),
+                                )
+                                conn.commit()
+
+                    # onEventStatusChanged → update tote_events.status
+                    if "onEventStatusChanged" in data:
+                        node = data["onEventStatusChanged"]
+                        if node and isinstance(node, dict):
+                            eid = node.get("eventId") or node.get("EventId")
+                            status = node.get("status") or node.get("Status")
+                            if eid and status:
+                                try:
+                                    conn.execute("UPDATE tote_events SET status=? WHERE event_id=?", (status, eid))
+                                    conn.commit()
+                                except Exception:
+                                    pass
+
+                    # onEventResultChanged → set result_status to indicate results available
+                    if "onEventResultChanged" in data:
+                        node = data["onEventResultChanged"]
+                        if node and isinstance(node, dict):
+                            eid = node.get("eventId") or node.get("EventId")
+                            if eid:
+                                try:
+                                    conn.execute("UPDATE tote_events SET result_status=COALESCE(result_status,'RESULTED') WHERE event_id=?", (eid,))
+                                    conn.commit()
+                                except Exception:
+                                    pass
             except Exception:
                 pass
 
@@ -120,5 +197,16 @@ def run_subscriber(conn, *, audit: bool = False, duration: Optional[int] = None)
     url = cfg.tote_subscriptions_url or "wss://hub.production.racing.tote.co.uk/partner/connections/graphql/"
     if websockets is None:
         raise RuntimeError("websockets is not installed; pip install websockets")
-    asyncio.get_event_loop().run_until_complete(_subscribe_pools(url, conn, duration=duration))
-
+    try:
+        asyncio.run(_subscribe_pools(url, conn, duration=duration))
+    except RuntimeError:
+        # Fallback for environments with an existing loop policy
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(_subscribe_pools(url, conn, duration=duration))
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass

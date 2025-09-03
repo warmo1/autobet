@@ -7,11 +7,15 @@ from .config import cfg
 from .db import connect
 from .schema import init_schema
 import sqlite3
+from pathlib import Path
 import json
+import threading
+import traceback
 import math
 from typing import Optional, Sequence
 from google.cloud import bigquery
 from .providers.tote_bets import place_audit_superfecta
+from .export_bq import export_sqlite_to_bq
 
 # This check allows the app to work with both the old and new db.py files
 try:
@@ -29,6 +33,76 @@ def _get_db_conn():
 def _today_iso() -> str:
     """Returns today's date in YYYY-MM-DD format."""
     return date.today().isoformat()
+
+# --- Background: pool subscription (optional) ---
+_pool_thread_started = False
+_bq_export_thread_started = False
+
+def _pool_subscriber_loop():
+    from .providers.tote_subscriptions import run_subscriber
+    while True:
+        try:
+            conn = _get_db_conn(); init_schema(conn)
+            run_subscriber(conn, duration=None)
+        except Exception as e:
+            try:
+                print("[PoolSub] error:", e)
+                traceback.print_exc()
+            except Exception:
+                pass
+            try:
+                time.sleep(5)
+            except Exception:
+                pass
+
+def _maybe_start_pool_thread():
+    global _pool_thread_started
+    if _pool_thread_started:
+        return
+    flag = os.getenv("SUBSCRIBE_POOLS", "0").lower() in ("1","true","yes","on")
+    if flag:
+        t = threading.Thread(target=_pool_subscriber_loop, name="pool-subscriber", daemon=True)
+        t.start()
+        _pool_thread_started = True
+
+def _bq_exporter_loop(interval_sec: int, tables: list[str] | None):
+    while True:
+        try:
+            if not cfg.bq_write_enabled or not cfg.bq_project or not cfg.bq_dataset:
+                # Do nothing if BQ sink not configured
+                time.sleep(max(30, interval_sec));
+                continue
+            conn = _get_db_conn(); init_schema(conn)
+            try:
+                counts = export_sqlite_to_bq(conn, tables)
+                print(f"[BQ Exporter] exported: {counts}")
+            finally:
+                try: conn.close()
+                except Exception: pass
+            time.sleep(interval_sec)
+        except Exception as e:
+            try:
+                print("[BQ Exporter] error:", e)
+            except Exception:
+                pass
+            # Backoff a bit on error
+            time.sleep(max(15, interval_sec))
+
+def _maybe_start_bq_exporter():
+    global _bq_export_thread_started
+    if _bq_export_thread_started:
+        return
+    try:
+        iv = int(os.getenv("BQ_EXPORT_INTERVAL_SEC", "0") or 0)
+    except Exception:
+        iv = 0
+    if iv and iv > 0:
+        # Optional: limit to specific tables via env comma list
+        tbl_env = (os.getenv("BQ_EXPORT_TABLES") or "").strip()
+        tables = [t.strip() for t in tbl_env.split(",") if t.strip()] or None
+        t = threading.Thread(target=_bq_exporter_loop, args=(iv, tables), name="bq-exporter", daemon=True)
+        t.start()
+        _bq_export_thread_started = True
 
 # --- BigQuery read helper (optional) ---
 _bq_client: Optional[bigquery.Client] = None
@@ -124,206 +198,42 @@ def index():
         now_next_sf=(sfs.to_dict("records") if not sfs.empty else []),
     )
 
-# Removed legacy fixtures/suggestions pages
-
-@app.route("/bets", methods=["GET", "POST"])
-def bets_page():
-    """Handles displaying and placing paper bets."""
-    conn = _get_db_conn()
-    if request.method == "POST":
-        try:
-            event_id = int(request.form.get("event_id"))
-            price = float(request.form.get("price"))
-            stake = float(request.form.get("stake"))
-            selection = request.form.get("sel")
-            
-            conn.execute(
-                "INSERT INTO bets (ts, mode, event_id, market, selection, side, price, stake) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (int(time.time() * 1000), 'paper', event_id, '1X2', selection, 'back', price, stake)
-            )
-            conn.commit()
-            flash("Paper bet recorded successfully.", "success")
-        except Exception as e:
-            flash(f"Error placing bet: {e}", "error")
-        finally:
-            conn.close()
-        return redirect(url_for("bets_page"))
-
-    query = "SELECT b.*, e.home_team, e.away_team, e.start_date, e.comp FROM bets b JOIN events e ON b.event_id = e.event_id ORDER BY b.ts DESC"
-    all_bets = sql_df(conn, query)
-    conn.close()
-
-    if not all_bets.empty:
-        all_bets['formatted_ts'] = pd.to_datetime(all_bets['ts'], unit='ms').dt.strftime('%Y-%m-%d %H:%M')
-    return render_template("bets.html", bets=all_bets.to_dict("records"))
-
-@app.route("/bank", methods=["GET", "POST"])
-def bank_page():
-    """Handles updating the bankroll."""
-    conn = _get_db_conn()
-    if request.method == "POST":
-        try:
-            new_bal = float(request.form.get("balance", "0"))
-            conn.execute("INSERT OR REPLACE INTO bankroll_state (key, value) VALUES ('bankroll', ?)", (str(new_bal),))
-            conn.commit()
-            flash("Bankroll updated successfully.", "success")
-        except Exception as e:
-            flash(f"Error updating bankroll: {e}", "error")
-        finally:
-            conn.close()
-        return redirect(url_for("bank_page"))
-
-    bank_row = conn.execute("SELECT value FROM bankroll_state WHERE key = 'bankroll'").fetchone()
-    bankroll = float(bank_row[0]) if bank_row else cfg.paper_starting_bankroll
-    conn.close()
-    return render_template("bank.html", balance=bankroll)
-
-def create_app():
-    return app
-
-@app.route("/form/horse")
-def form_horse_page():
-    """Shows horse form by name, with conditions overlay, and suggests recent horses."""
-    name = (request.args.get("name") or "").strip()
-    limit = int(request.args.get("limit", "20") or 20)
-    days = int(request.args.get("days", "30") or 30)
-    conn = _get_db_conn(); init_schema(conn)
-    # Candidates: recent horses seen in last N days, optional filter by name substring
-    if _use_bq():
-        # BigQuery-friendly: use DATE_SUB and ARRAY_AGG for last_venue
-        cand_sql = (
-            "SELECT r.horse_name, "
-            "  MAX(r.event_date) AS last_date, "
-            "  ARRAY_AGG(r.venue ORDER BY r.event_date DESC LIMIT 1)[OFFSET(0)] AS last_venue, "
-            "  COUNT(1) AS n_runs "
-            "FROM vw_horse_runs_by_name r "
-            "WHERE r.event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL %d DAY) %s "
-            "GROUP BY r.horse_name ORDER BY last_date DESC LIMIT 50" % (days, " AND UPPER(r.horse_name) LIKE UPPER(?)" if name else "")
-        )
-    else:
-        cand_sql = (
-            "SELECT r.horse_name, "
-            "  (SELECT r2.event_date FROM vw_horse_runs_by_name r2 WHERE r2.horse_name = r.horse_name ORDER BY r2.event_date DESC LIMIT 1) AS last_date, "
-            "  (SELECT r3.venue FROM vw_horse_runs_by_name r3 WHERE r3.horse_name = r.horse_name ORDER BY r3.event_date DESC LIMIT 1) AS last_venue, "
-            "  COUNT(1) AS n_runs "
-            "FROM vw_horse_runs_by_name r "
-            "WHERE r.event_date >= DATE('now','-%d day') %s "
-            "GROUP BY r.horse_name ORDER BY last_date DESC LIMIT 50" % (days, " AND UPPER(r.horse_name) LIKE UPPER(?)" if name else "")
-        )
-    cand_params = (f"%{name}%",) if name else ()
-    cdf = sql_df(conn, cand_sql, params=cand_params)
-    # Form rows for a specific horse, if provided
-    rows = pd.DataFrame()
-    if name:
-        sql = (
-            "SELECT r.event_date, r.venue, r.race_name, r.cloth_number, r.finish_pos, r.status, rc.going, rc.weather_temp_c, rc.weather_wind_kph, rc.weather_precip_mm, r.event_id "
-            "FROM vw_horse_runs_by_name r "
-            "LEFT JOIN race_conditions rc ON rc.event_id = r.event_id "
-            "WHERE UPPER(r.horse_name) = UPPER(?) "
-            "ORDER BY r.event_date DESC LIMIT ?"
-        )
-        rows = sql_df(conn, sql, params=(name, limit))
-    conn.close()
-    return render_template(
-        "form_horse.html",
-        name=name,
-        days=days,
-        rows=(rows.to_dict("records") if not rows.empty else []),
-        candidates=(cdf.to_dict("records") if not cdf.empty else []),
-    )
-
-@app.route("/links")
-def links_page():
-    links = [
-        {"label": "Tote Events", "href": url_for('tote_events_page')},
-        {"label": "Tote Pools", "href": url_for('tote_pools_page')},
-        {"label": "Superfecta", "href": url_for('tote_superfecta_page')},
-        {"label": "Viability Calculator", "href": url_for('tote_viability_page')},
-        {"label": "Models", "href": url_for('models_page')},
-        {"label": "Horse Form", "href": url_for('form_horse_page')},
-        {"label": "Bank", "href": url_for('bank_page')},
-    ]
-    return render_template("links.html", links=links)
-
-# --- Tote Schema Directory ---
-
+# --- Schema helper routes (for Tote GraphQL docs/devtools) ---
 def _schema_path() -> str:
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'docs', 'tote_schema.graphqls'))
+    return str(Path(__file__).resolve().parent.parent / 'docs' / 'tote_schema.graphqls')
 
-def _read_sdl() -> str | None:
+def _sdl_to_html(sdl: str) -> str:
+    # Minimal pre block; avoid heavy formatting client-side
+    try:
+        return f"<pre style='white-space:pre-wrap; font-family:monospace;'>{sdl.replace('<','&lt;').replace('>','&gt;')}</pre>"
+    except Exception:
+        return "<pre>(error rendering SDL)</pre>"
+
+def _write_sdl(sdl: str) -> None:
+    p = _schema_path()
+    Path(p).parent.mkdir(parents=True, exist_ok=True)
+    with open(p, 'w', encoding='utf-8') as f:
+        f.write(sdl)
+
+@app.route("/tote/schema")
+def tote_schema_page():
+    sdl = None; err = None
     try:
         p = _schema_path()
         if os.path.exists(p):
             with open(p, 'r', encoding='utf-8') as f:
-                return f.read()
-    except Exception:
-        return None
-    return None
-
-def _write_sdl(text: str) -> None:
-    p = _schema_path()
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, 'w', encoding='utf-8') as f:
-        f.write(text)
-
-def _index_from_sdl(sdl: str):
-    import re
-    kinds = [
-        ("Type", r"^\s*type\s+([A-Za-z0-9_]+)\b"),
-        ("Interface", r"^\s*interface\s+([A-Za-z0-9_]+)\b"),
-        ("Enum", r"^\s*enum\s+([A-Za-z0-9_]+)\b"),
-        ("Input", r"^\s*input\s+([A-Za-z0-9_]+)\b"),
-        ("Union", r"^\s*union\s+([A-Za-z0-9_]+)\b"),
-        ("Scalar", r"^\s*scalar\s+([A-Za-z0-9_]+)\b"),
-    ]
-    lines = sdl.splitlines()
-    buckets = {k: [] for k, _ in kinds}
-    for ln in lines:
-        for k, pat in kinds:
-            m = re.match(pat, ln)
-            if m:
-                name = m.group(1)
-                anchor = f"def-{name}"
-                buckets[k].append({"name": name, "anchor": anchor})
-                break
-    out = []
-    for k, _ in kinds:
-        if buckets[k]:
-            out.append({"kind": k, "items": buckets[k]})
-    return out
-
-def _sdl_to_html(sdl: str) -> str:
-    import html, re
-    out_lines = []
-    def_line = re.compile(r"^\s*(type|interface|enum|input|union|scalar)\s+([A-Za-z0-9_]+)\b")
-    for ln in sdl.splitlines():
-        m = def_line.match(ln)
-        if m:
-            name = m.group(2)
-            anchor = f"def-{name}"
-            esc = html.escape(ln)
-            out_lines.append(f"<a id=\"{anchor}\"></a><span>{esc}</span>")
-        else:
-            out_lines.append(f"<span>{html.escape(ln)}</span>")
-    return "\n".join(out_lines)
-
-@app.route("/tote/schema")
-def tote_schema_page():
-    """Show Tote GraphQL schema from cached SDL file. No network on first load.
-
-    Use the Refresh button to fetch SDL from the API, and Probe to validate queries.
-    """
-    err = None
-    sdl = _read_sdl()
-    index = _index_from_sdl(sdl) if sdl else []
-    mtime = None
-    try:
-        st = os.stat(_schema_path())
-        mtime = int(st.st_mtime)
-    except Exception:
-        mtime = None
+                sdl = f.read()
+    except Exception as e:
+        err = str(e)
     sdl_html = _sdl_to_html(sdl) if sdl else None
-    return render_template("tote_schema.html", sdl_html=sdl_html, index=index, error=err, mtime=mtime)
+    # Basic index of helper links
+    index = [
+        ("Download SDL", url_for('tote_schema_download')),
+        ("Refresh SDL", url_for('tote_schema_refresh')),
+        ("Probe Products", url_for('tote_schema_probe')),
+        ("Example Queries", url_for('tote_schema_queries')),
+    ]
+    return render_template("tote_schema.html", sdl_html=sdl_html, index=index, error=err)
 
 @app.route("/tote/schema/download")
 def tote_schema_download():
@@ -345,320 +255,104 @@ def tote_schema_refresh():
         flash(f"Refresh failed: {e}", "error")
     return redirect(url_for('tote_schema_page'))
 
-@app.route("/tote/params", methods=["POST"])
-def tote_params_update():
-    """Persist tote_params defaults in BigQuery (t,f,stake_per_line,R)."""
-    if not _use_bq():
-        flash("BigQuery not enabled.", "error")
-        return redirect(url_for('tote_viability_page'))
-    try:
-        t = float(request.form.get('t') or 0.30)
-        fval = float(request.form.get('f') or 1.0)
-        stake = float(request.form.get('stake_per_line') or request.form.get('s') or 0.10)
-        R = float(request.form.get('R') or 0.0)
-    except Exception as e:
-        flash(f"Invalid parameters: {e}", "error")
-        return redirect(url_for('tote_viability_page'))
-    try:
-        client = _ensure_bq_client()
-        ds = f"{cfg.bq_project}.{cfg.bq_dataset}"
-        sql = f"INSERT INTO `{ds}.tote_params`(t,f,stake_per_line,R,updated_ts) VALUES(@t,@f,@s,@R,CURRENT_TIMESTAMP)"
-        job = client.query(sql, job_config=_ensure_bq_client().QueryJobConfig(  # type: ignore
-        ))
-    except Exception:
-        # Fallback to standard config
-        from google.cloud import bigquery
-        client = _ensure_bq_client()
-        ds = f"{cfg.bq_project}.{cfg.bq_dataset}"
-        job_config = bigquery.QueryJobConfig(query_parameters=[
-            bigquery.ScalarQueryParameter("t","FLOAT64", t),
-            bigquery.ScalarQueryParameter("f","FLOAT64", fval),
-            bigquery.ScalarQueryParameter("s","FLOAT64", stake),
-            bigquery.ScalarQueryParameter("R","FLOAT64", R),
-        ])
-        job = client.query(
-            f"INSERT INTO `{ds}.tote_params`(t,f,stake_per_line,R,updated_ts) VALUES(@t,@f,@s,@R,CURRENT_TIMESTAMP)",
-            job_config=job_config,
-        )
-    try:
-        job.result()
-        flash("Updated tote_params in BigQuery.", "success")
-    except Exception as e:
-        flash(f"Failed to update tote_params: {e}", "error")
-    return redirect(url_for('tote_viability_page'))
-
 @app.route("/tote/schema/probe")
 def tote_schema_probe():
-    """Run a minimal product query to verify fields; returns JSON text."""
     from flask import Response
     try:
         from .providers.tote_api import ToteClient
         from .ingest.tote_products import PRODUCTS_QUERY
         client = ToteClient()
         data = client.graphql(PRODUCTS_QUERY, {"first": 1, "status": "OPEN"})
-        txt = json.dumps(data, indent=2)[:100000]
+        import json as _json
+        txt = _json.dumps(data, indent=2)[:100000]
         return Response(txt, mimetype="application/json")
     except Exception as e:
-        return Response(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
+        import json as _json
+        return Response(_json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
 @app.route("/tote/schema/queries")
 def tote_schema_queries():
-    # Serve example queries file if present
     p = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'docs', 'tote_queries.graphql'))
     if os.path.exists(p):
         return send_file(p, as_attachment=True, download_name="tote_queries.graphql")
     flash("Example queries not found.", "error")
     return redirect(url_for('tote_schema_page'))
 
-@app.route("/event/<event_id>")
-def event_detail(event_id: str):
-    """Dynamic event page that adapts to sport and available enrichment."""
-    conn = _get_db_conn(); init_schema(conn)
-    edf = sql_df(conn, "SELECT * FROM tote_events WHERE event_id=?", params=(event_id,))
-    if edf.empty:
-        conn.close()
-        flash("Unknown event id", "error")
-        return redirect(url_for("tote_events_page"))
-    evd = edf.iloc[0].to_dict()
-    # Related data
-    prods = sql_df(conn, "SELECT * FROM tote_products WHERE event_id=? ORDER BY bet_type, start_iso", params=(event_id,)).to_dict("records")
-    cond = sql_df(conn, "SELECT * FROM race_conditions WHERE event_id=?", params=(event_id,))
-    # Prefer a fresh competitors list from GraphQL for horse racing
-    competitors = []
-    runners = []
-    if evd.get("sport") == "horse_racing":
-        # Optionally fetch fresh competitors (slow); default to stored JSON for speed
-        fetch_live = cfg.event_live_competitors
-        if fetch_live:
-            try:
-                from .providers.tote_api import ToteClient
-                client = ToteClient()
-                comp = client.event_competitors(event_id)
-                competitors = comp or []
-                for r in competitors:
-                    if isinstance(r, dict) and r.get('name'):
-                        item = {'name': r.get('name')}
-                        if r.get('__typename','').startswith('Horse'):
-                            item['cloth'] = r.get('clothNumber')
-                        runners.append(item)
-                runners = [x for x in runners if x.get('name')]
-                runners.sort(key=lambda x: (x.get('cloth') is None, x.get('cloth')))
-            except Exception:
-                pass
-        if not competitors and not runners:
-            # Fallback to stored competitors_json
-            try:
-                competitors = json.loads(evd.get("competitors_json") or "[]")
-            except Exception:
-                competitors = []
-            for c in competitors:
-                nm = c.get("name") if isinstance(c, dict) else None
-                if nm:
-                    runners.append({"name": nm})
-    # Load runner features if available
-    feats = sql_df(
-        conn,
-        "SELECT f.*, h.name AS horse_name FROM features_runner_event f LEFT JOIN hr_horses h ON h.horse_id=f.horse_id WHERE f.event_id=?",
-        params=(event_id,)
-    )
-    # Load available odds (best per runner, WIN market) and latest predictions for this event
-    odds_df = sql_df(
-        conn,
-        """
-        WITH latest AS (
-          SELECT runner, MAX(ts_ms) AS ts_ms
-          FROM odds_live
-          WHERE event_id=? AND market='WIN'
-          GROUP BY runner
-        )
-        SELECT o.runner, o.bookmaker, o.price, o.ts_ms
-        FROM odds_live o
-        JOIN latest l ON l.runner=o.runner AND l.ts_ms=o.ts_ms
-        WHERE o.event_id=? AND o.market='WIN'
-        """,
-        params=(event_id, event_id),
-    )
-    pred_df = sql_df(
-        conn,
-        """
-        WITH latest_ts AS (
-          SELECT MAX(ts_ms) AS ts_ms FROM predictions WHERE event_id=?
-        )
-        SELECT p.horse_id, p.proba, p.rank, p.model_id, p.ts_ms
-        FROM predictions p
-        JOIN latest_ts t ON t.ts_ms = p.ts_ms
-        WHERE p.event_id=?
-        """,
-        params=(event_id, event_id),
-    )
-    # Optional: load any known horse runs to get cloth numbers + horse names
-    runs_df = sql_df(
-        conn,
-        "SELECT r.horse_id, r.cloth_number, h.name AS horse_name FROM hr_horse_runs r LEFT JOIN hr_horses h ON h.horse_id=r.horse_id WHERE r.event_id=?",
-        params=(event_id,)
-    )
-    conn.close()
-    conditions = (cond.iloc[0].to_dict() if not cond.empty else {})
-    features = [] if feats.empty else feats.sort_values(["cloth_number", "horse_name"], na_position='last').to_dict("records")
-    # Build runner rows enriched with odds and predictions when available
-    odds_map = {}
-    if not odds_df.empty:
-        for r in odds_df.to_dict("records"):
-            odds_map[(r.get('runner') or '').strip().upper()] = {"bookmaker": r.get('bookmaker'), "price": r.get('price')}
-    pred_map = {}
-    if not pred_df.empty:
-        for r in pred_df.to_dict("records"):
-            pred_map[str(r.get('horse_id'))] = {"proba": r.get('proba'), "rank": r.get('rank'), "model_id": r.get('model_id')}
-    runner_rows = []
-    if not runs_df.empty:
-        for r in runs_df.to_dict("records"):
-            name = r.get('horse_name') or str(r.get('horse_id'))
-            key = (name or '').strip().upper()
-            o = odds_map.get(key) or {}
-            p = pred_map.get(str(r.get('horse_id')))
-            fair = (1.0 / p["proba"]) if p and p.get("proba") not in (None, 0) else None
-            runner_rows.append({
-                "cloth": r.get('cloth_number'),
-                "name": name,
-                "horse_id": r.get('horse_id'),
-                "best_price": o.get('price'),
-                "best_book": o.get('bookmaker'),
-                "fair_odds": fair,
-                "proba": p.get('proba') if p else None,
-            })
-        runner_rows.sort(key=lambda x: (x.get('cloth') is None, x.get('cloth')))
-    else:
-        for r in runners:
-            name = r.get('name') if isinstance(r, dict) else r
-            key = (name or '').strip().upper()
-            o = odds_map.get(key) or {}
-            runner_rows.append({
-                "cloth": r.get('cloth'),
-                "name": name,
-                "horse_id": None,
-                "best_price": o.get('price'),
-                "best_book": o.get('bookmaker'),
-                "fair_odds": None,
-                "proba": None,
-            })
-        runner_rows.sort(key=lambda x: (x.get('cloth') is None, x.get('cloth')))
-
-    return render_template("event_detail.html", event=evd, competitors=competitors, runners=runners, products=prods, conditions=conditions, features=features, runner_rows=runner_rows)
-
 @app.route("/tote-events")
 def tote_events_page():
+    """List Tote events with filters and pagination."""
     conn = _get_db_conn(); init_schema(conn)
-    # Filters
-    country = request.args.get("country")
-    sport = request.args.get("sport")
-    venue = request.args.get("venue")
-    name = request.args.get("name")
-    date_from = request.args.get("from")
-    date_to = request.args.get("to")
-    limit = int(request.args.get("limit", "200") or 200)
+    country = (request.args.get("country") or "").strip().upper()
+    sport = (request.args.get("sport") or "").strip()
+    venue = (request.args.get("venue") or "").strip()
+    name = (request.args.get("name") or "").strip()
+    date_from = (request.args.get("from") or "").strip()
+    date_to = (request.args.get("to") or "").strip()
+    limit = max(1, int(request.args.get("limit", "200") or 200))
     page = max(1, int(request.args.get("page", "1") or 1))
     offset = (page - 1) * limit
     where = []
-    params = []
+    params: list[object] = []
     if country:
-        where.append("UPPER(country) = UPPER(?)"); params.append(country)
+        where.append("UPPER(country)=?"); params.append(country)
     if sport:
-        where.append("sport = ?"); params.append(sport)
+        where.append("sport=?"); params.append(sport)
     if venue:
         where.append("UPPER(venue) LIKE UPPER(?)"); params.append(f"%{venue}%")
     if name:
-        where.append("UPPER(name) LIKE UPPER(?)"); params.append(f"%{name}%")
+        where.append("UPPER(name) LIKE UPPER(?)"); params.append(f"%{name.upper()}%")
     if date_from:
         where.append("start_iso >= ?"); params.append(date_from)
     if date_to:
         where.append("start_iso <= ?"); params.append(date_to)
-    sql = "SELECT * FROM tote_events"
+    base_sql = (
+        "SELECT event_id, name, venue, country, start_iso, sport, status, competitors_json, home, away "
+        "FROM tote_events"
+    )
+    count_sql = base_sql.replace("SELECT event_id, name, venue, country, start_iso, sport, status, competitors_json, home, away", "SELECT COUNT(1) AS c")
     if where:
-        sql += " WHERE " + " AND ".join(where)
-    # Total count
-    count_sql = sql.replace("SELECT *", "SELECT COUNT(1) AS c")
-    total = sql_df(conn, count_sql, params=tuple(params)).iloc[0]["c"] if where else sql_df(conn, "SELECT COUNT(1) AS c FROM tote_events").iloc[0]["c"]
-    # Page slice
-    sql += " ORDER BY start_iso DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
-    df = sql_df(conn, sql, params=tuple(params))
-    # Dropdown sources
-    countries_df = sql_df(conn, "SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country <> '' ORDER BY country")
-    sports_df = sql_df(conn, "SELECT DISTINCT sport FROM tote_events WHERE sport IS NOT NULL AND sport <> '' ORDER BY sport")
+        base_sql += " WHERE " + " AND ".join(where)
+        count_sql += " WHERE " + " AND ".join(where)
+    base_sql += " ORDER BY start_iso DESC LIMIT ? OFFSET ?"
+    params_paged = list(params) + [limit, offset]
+    df = sql_df(conn, base_sql, params=tuple(params_paged))
+    total = int(sql_df(conn, count_sql, params=tuple(params)).iloc[0]["c"]) if where else int(sql_df(conn, "SELECT COUNT(1) AS c FROM tote_events").iloc[0]["c"])
+    countries_df = sql_df(conn, "SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+    sports_df = sql_df(conn, "SELECT DISTINCT sport FROM tote_events WHERE sport IS NOT NULL AND sport<>'' ORDER BY sport")
     conn.close()
     events = df.to_dict("records") if not df.empty else []
     for ev in events:
+        comps = []
         try:
-            comps = json.loads(ev.get("competitors_json") or "[]")
-            ev["competitors"] = ", ".join([c.get("name") for c in comps if isinstance(c, dict) and c.get("name")])
+            arr = json.loads(ev.get("competitors_json") or "[]")
+            comps = [c.get("name") for c in arr if isinstance(c, dict) and c.get("name")]
         except Exception:
-            ev["competitors"] = ""
-    return render_template("tote_events.html", events=events, filters={
-        "country": country or "",
-        "sport": sport or "",
-        "venue": venue or "",
-        "name": name or "",
-        "date_from": date_from or "",
-        "date_to": date_to or "",
-        "limit": limit,
-        "page": page,
-        "total": int(total),
-    }, country_options=(countries_df['country'].tolist() if not countries_df.empty else []), sport_options=(sports_df['sport'].tolist() if not sports_df.empty else []))
+            comps = []
+        ev["competitors"] = ", ".join(comps)
+    return render_template(
+        "tote_events.html",
+        events=events,
+        filters={
+            "country": country or "",
+            "sport": sport or "",
+            "venue": venue or "",
+            "name": name or "",
+            "date_from": date_from or "",
+            "date_to": date_to or "",
+            "limit": limit,
+            "page": page,
+            "total": total,
+        },
+        country_options=(countries_df['country'].tolist() if not countries_df.empty else []),
+        sport_options=(sports_df['sport'].tolist() if not sports_df.empty else []),
+    )
 
 @app.route("/tote-superfecta", methods=["GET","POST"])
 def tote_superfecta_page():
+    """List SUPERFECTA products with filters, upcoming widget, and audit helpers."""
     conn = _get_db_conn(); init_schema(conn)
     if request.method == "POST":
-        try:
-            pid = (request.form.get("product_id") or "").strip()
-            sel = (request.form.get("selection") or "").strip()
-            stake_raw = (request.form.get("stake") or "0").strip()
-            # Build selection from builder fields if selection not provided
-            if not sel:
-                p1 = (request.form.get("pos1") or "").strip()
-                p2 = (request.form.get("pos2") or "").strip()
-                p3 = (request.form.get("pos3") or "").strip()
-                p4 = (request.form.get("pos4") or "").strip()
-                if all([p1,p2,p3,p4]):
-                    sel = f"{p1}-{p2}-{p3}-{p4}"
-            # Basic validations
-            if not pid:
-                raise ValueError("Missing product id")
-            try:
-                stake = float(stake_raw)
-            except Exception:
-                raise ValueError("Stake must be a number")
-            if stake <= 0:
-                raise ValueError("Stake must be > 0")
-            # Selection format: e.g. 3-7-1-5 (4 positions)
-            import re
-            if not re.fullmatch(r"\d+(?:-\d+){3}", sel):
-                raise ValueError("Selection must be like 3-7-1-5")
-            # Ensure product is OPEN and not started yet
-            prow = conn.execute("SELECT status,start_iso FROM tote_products WHERE product_id=?", (pid,)).fetchone()
-            if not prow:
-                raise ValueError("Unknown product")
-            status, start_iso = prow
-            if status and status.upper() != 'OPEN':
-                raise ValueError(f"Product not open (status {status})")
-            if start_iso:
-                try:
-                    start_dt = datetime.fromisoformat(start_iso.replace('Z','+00:00'))
-                    if datetime.utcnow().astimezone(start_dt.tzinfo) >= start_dt:
-                        raise ValueError("Event already started")
-                except Exception:
-                    pass
-            # Record bet
-            bet_id = f"{pid}:{int(time.time()*1000)}"
-            conn.execute(
-                "INSERT OR REPLACE INTO tote_bets(bet_id,ts,mode,product_id,selection,stake,currency,status) VALUES(?,?,?,?,?,?,?,?)",
-                (bet_id, int(time.time()*1000), 'paper', pid, sel, stake, None, 'placed')
-            )
-            conn.commit()
-            flash("Paper bet recorded.", "success")
-        except Exception as e:
-            flash(f"Error: {e}", "error")
-    # Filters (default to today, GB, OPEN)
+        flash("Paper betting is disabled. Use Audit placement.", "error")
     country = (request.args.get("country") or os.getenv("DEFAULT_COUNTRY", "GB")).strip().upper()
     status = (request.args.get("status") or "OPEN").strip().upper()
     date_from = request.args.get("from") or _today_iso()
@@ -701,8 +395,29 @@ def tote_superfecta_page():
                 upcoming = udf.to_dict("records")
         except Exception:
             upcoming = []
-    conn.close()
+    # Attach latest snapshot totals when available (SQLite path)
     products = df.to_dict("records") if not df.empty else []
+    if products and not _use_bq():
+        try:
+            pids = [p.get('product_id') for p in products if p.get('product_id')]
+            if pids:
+                qmarks = ",".join(["?"] * len(pids))
+                snap_sql = (
+                    f"SELECT s.product_id, s.total_gross AS latest_gross, s.total_net AS latest_net "
+                    f"FROM tote_pool_snapshots s "
+                    f"JOIN (SELECT product_id, MAX(ts_ms) ts FROM tote_pool_snapshots WHERE product_id IN ({qmarks}) GROUP BY product_id) t "
+                    f"ON s.product_id=t.product_id AND s.ts_ms=t.ts"
+                )
+                cur = conn.execute(snap_sql, tuple(pids))
+                snap_map = {row[0]: {"latest_gross": row[1], "latest_net": row[2]} for row in cur.fetchall()}
+                for p in products:
+                    sm = snap_map.get(p.get('product_id'))
+                    if sm:
+                        p['latest_gross'] = sm.get('latest_gross')
+                        p['latest_net'] = sm.get('latest_net')
+        except Exception:
+            pass
+    conn.close()
     return render_template(
         "tote_superfecta.html",
         products=products,
@@ -718,6 +433,26 @@ def tote_superfecta_page():
         status_options=(sdf['status'].tolist() if not sdf.empty else ['OPEN','CLOSED']),
         upcoming=(upcoming or []),
     )
+
+def create_app():
+    """Factory for Flask app; also starts background subscribers if configured."""
+    try:
+        _maybe_start_pool_thread()
+    except Exception:
+        pass
+    try:
+        _maybe_start_bq_exporter()
+    except Exception:
+        pass
+    return app
+
+# Removed legacy fixtures/suggestions pages
+
+@app.route("/bets", methods=["GET", "POST"])
+def bets_page():
+    """Paper betting UI disabled."""
+    flash("Paper betting is disabled in this UI.", "error")
+    return redirect(url_for("index"))
 
 @app.route("/tote-pools")
 def tote_pools_page():
@@ -1168,11 +903,70 @@ def tote_audit_superfecta_post():
         selections = [p for p in parts if p]
     res = place_audit_superfecta(conn, product_id=pid, selection=(sel or None), selections=selections, stake=sk, currency=currency, post=post_flag)
     conn.commit(); conn.close()
+    st = res.get("placement_status")
     if res.get("error"):
         flash(f"Audit bet error: {res.get('error')}", "error")
+    elif st:
+        ok = str(st).upper() in ("PLACED","ACCEPTED")
+        flash(f"Audit bet placement status: {st}", "success" if ok else "error")
     else:
-        flash("Audit bet recorded.", "success")
+        flash("Audit bet recorded (no placement status returned).", "success")
+    try:
+        print("[AuditBet] product=", pid, "sel=", sel or selections, "status=", st, "resp=", str(res.get("response"))[:500])
+    except Exception:
+        pass
     return redirect(request.referrer or url_for('tote_superfecta_page'))
+
+@app.route("/event/<event_id>")
+def event_detail(event_id: str):
+    """Display details for a single event."""
+    conn = _get_db_conn()
+    
+    # Fetch event details
+    event_df = sql_df(conn, "SELECT * FROM tote_events WHERE event_id=?", params=(event_id,))
+    if event_df.empty:
+        flash("Event not found", "error")
+        return redirect(url_for("tote_events_page"))
+    event = event_df.to_dict("records")[0]
+
+    # Fetch conditions
+    conditions_df = sql_df(conn, "SELECT * FROM race_conditions WHERE event_id=?", params=(event_id,))
+    conditions = None if conditions_df.empty else conditions_df.to_dict("records")[0]
+
+    # Fetch runners/competitors
+    runners = []
+    competitors = []
+    if event.get("competitors_json"):
+        try:
+            competitors = json.loads(event["competitors_json"])
+            if event.get("sport") == "horse_racing":
+                runners = competitors
+        except json.JSONDecodeError:
+            pass
+
+    # Fetch products
+    products_df = sql_df(conn, "SELECT * FROM tote_products WHERE event_id=? ORDER BY bet_type", params=(event_id,))
+    products = products_df.to_dict("records") if not products_df.empty else []
+
+    # Fetch features
+    features_df = sql_df(conn, "SELECT * FROM vw_runner_features WHERE event_id=?", params=(event_id,))
+    features = features_df.to_dict("records") if not features_df.empty else []
+
+    # Fetch runner rows (placeholder)
+    runner_rows = []
+
+    conn.close()
+
+    return render_template(
+        "event_detail.html",
+        event=event,
+        conditions=conditions,
+        runners=runners,
+        products=products,
+        features=features,
+        runner_rows=runner_rows,
+        competitors=competitors,
+    )
 
 @app.route("/tote-superfecta/<product_id>")
 def tote_superfecta_detail(product_id: str):

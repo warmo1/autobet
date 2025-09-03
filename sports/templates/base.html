@@ -12,10 +12,21 @@
         <a class="navbar-brand" href="{{ url_for('index') }}">Autobet</a>
         <div>
           <ul class="navbar-nav me-auto">
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('fixtures_page') }}">Fixtures</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('suggestions_page') }}">Suggestions</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('bets_page') }}">Paper Bets</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('bank_page') }}">Bank</a></li>
+            <li class="nav-item dropdown">
+              <a class="nav-link dropdown-toggle" href="#" id="navTote" role="button" data-bs-toggle="dropdown" aria-expanded="false">Tote</a>
+              <ul class="dropdown-menu" aria-labelledby="navTote">
+                <li><a class="dropdown-item" href="{{ url_for('tote_events_page') }}">Events</a></li>
+                <li><a class="dropdown-item" href="{{ url_for('tote_pools_page') }}">Pools</a></li>
+                <li><a class="dropdown-item" href="{{ url_for('tote_superfecta_page') }}">Superfecta</a></li>
+                <li><a class="dropdown-item" href="{{ url_for('tote_viability_page') }}">Viability Calculator</a></li>
+                <li><a class="dropdown-item" href="{{ url_for('models_page') }}">Models</a></li>
+                <li><hr class="dropdown-divider"></li>
+                <li><a class="dropdown-item" href="{{ url_for('tote_schema_page') }}">Schema</a></li>
+              </ul>
+            </li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('models_page') }}">Models</a></li>
+            
+            
           </ul>
         </div>
       </div>
@@ -24,15 +35,46 @@
     <div class="container">
       {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
-          <div class="mb-3">
+          <div aria-live="polite" aria-atomic="true" class="position-relative">
+            <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index:1080;">
             {% for category, message in messages %}
-              <div class="alert alert-{{ 'success' if category == 'success' else 'danger' }} py-2 mb-2">{{ message }}</div>
+              <div class="toast align-items-center text-bg-{{ 'success' if category=='success' else 'danger' }} border-0" role="alert" aria-live="assertive" aria-atomic="true">
+                <div class="d-flex">
+                  <div class="toast-body">{{ message }}</div>
+                  <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+                </div>
+              </div>
             {% endfor %}
+            </div>
           </div>
+          <script>
+            (function(){
+              document.querySelectorAll('.toast').forEach(function(el){
+                try{ new bootstrap.Toast(el,{delay:4000}).show(); }catch(e){}
+              });
+            })();
+          </script>
         {% endif %}
       {% endwith %}
 
       {% block content %}{% endblock %}
     </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      // Convert ISO timestamps to local readable strings
+      (function() {
+        function toLocal(el){
+          var iso = el.getAttribute('data-iso');
+          if(!iso) return;
+          try{
+            var d = new Date(iso);
+            if(isNaN(d.getTime())) d = new Date(iso.replace('Z',''));
+            el.textContent = d.toLocaleString();
+          }catch(e){}
+        }
+        document.querySelectorAll('.time-iso').forEach(toLocal);
+      })();
+    </script>
+    {% block scripts %}{% endblock %}
   </body>
 </html>

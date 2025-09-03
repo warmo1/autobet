@@ -25,7 +25,7 @@
             <thead><tr><th>#</th><th>Runner</th></tr></thead>
             <tbody>
               {% for r in runners %}
-                <tr><td>{{ r.cloth }}</td><td><a href="{{ url_for('form_horse_page') }}?name={{ r.name | urlencode }}">{{ r.name }}</a></td></tr>
+                <tr><td>{{ r.cloth }}</td><td>{{ r.name }}</td></tr>
               {% endfor %}
             </tbody>
           </table>
