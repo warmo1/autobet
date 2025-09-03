@@ -1,0 +1,817 @@
+from __future__ import annotations
+
+import os
+from typing import Iterable, Mapping, Any
+
+from .config import cfg
+
+
+class BigQuerySink:
+    def __init__(self, project: str, dataset: str, location: str = "EU"):
+        self.project = project
+        self.dataset = dataset
+        self.location = location
+        self._client = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.project and self.dataset)
+
+    def _client_obj(self):
+        if self._client is None:
+            try:
+                from google.cloud import bigquery  # type: ignore
+            except Exception as e:
+                raise RuntimeError("google-cloud-bigquery not installed") from e
+            self._bq = bigquery
+            self._client = bigquery.Client(project=self.project, location=self.location)
+        return self._client
+
+    def _table_exists(self, table: str) -> bool:
+        client = self._client_obj()
+        try:
+            client.get_table(f"{self.project}.{self.dataset}.{table}")
+            return True
+        except Exception:
+            return False
+
+    def _ensure_columns(self, table: str, schema_hint: dict[str, str]):
+        """Ensure destination table has given columns with types. Adds missing columns.
+
+        schema_hint: mapping of column name -> BigQuery type (e.g., STRING, INT64, FLOAT64).
+        """
+        client = self._client_obj(); self._ensure_dataset(); bq = self._bq
+        dest_fq = f"{self.project}.{self.dataset}.{table}"
+        try:
+            tbl = client.get_table(dest_fq)
+        except Exception:
+            # Will be created by _merge's CREATE TABLE IF NOT EXISTS
+            return
+        existing = {f.name.lower(): f for f in tbl.schema}
+        to_add = [(k, v) for k, v in (schema_hint or {}).items() if k.lower() not in existing]
+        if not to_add:
+            return
+        # Build ALTER TABLE statement(s)
+        alters = []
+        for name, typ in to_add:
+            safe_name = name.replace('`','')
+            alters.append(f"ADD COLUMN IF NOT EXISTS `{safe_name}` {typ}")
+        sql = f"ALTER TABLE `{dest_fq}`\n" + ",\n".join(alters)
+        job = client.query(sql)
+        job.result()
+
+    # --- generic helpers ---
+    def _ensure_dataset(self):
+        bq = self._bq; client = self._client_obj()
+        ds_ref = f"{self.project}.{self.dataset}"
+        try:
+            client.get_dataset(ds_ref)
+        except Exception:
+            ds = bq.Dataset(ds_ref)
+            ds.location = self.location
+            client.create_dataset(ds, exists_ok=True)
+
+    def _load_to_temp(self, table: str, rows: Iterable[Mapping[str, Any]], schema_hint: dict[str, str] | None = None):
+        client = self._client_obj(); self._ensure_dataset(); bq = self._bq
+        import uuid
+        temp_table = f"{self.project}.{self.dataset}._tmp_{table}_{uuid.uuid4().hex[:8]}"
+        job_config = bq.LoadJobConfig(write_disposition=bq.WriteDisposition.WRITE_TRUNCATE)
+        # Infer schema from first row
+        rows = list(rows)
+        if not rows:
+            return None
+        # Build types per column considering all rows and optional hints
+        schema = []
+        keys = list(rows[0].keys())
+        for k in keys:
+            ftype = None
+            if schema_hint and k in schema_hint:
+                ftype = schema_hint[k]
+            else:
+                has_float = False; has_int = False; has_str = False
+                for r in rows:
+                    v = r.get(k)
+                    if v is None:
+                        continue
+                    if isinstance(v, bool):
+                        has_int = True
+                    elif isinstance(v, int):
+                        has_int = True
+                    elif isinstance(v, float):
+                        has_float = True
+                    else:
+                        has_str = True
+                if has_float or (has_int and not has_str):
+                    ftype = "FLOAT64" if has_float else "INT64"
+                elif has_int and has_str:
+                    # Mixed types, prefer STRING to be safe
+                    ftype = "STRING"
+                else:
+                    # All None or strings
+                    ftype = "STRING"
+            schema.append(bq.SchemaField(k, ftype))
+        job_config.schema = schema
+        tbl = bq.Table(temp_table, schema=schema)
+        client.create_table(tbl, exists_ok=True)
+        job = client.load_table_from_json(rows, temp_table, job_config=job_config)
+        job.result()
+        return temp_table
+
+    def _merge(self, dest: str, temp: str, key_expr: str, update_set: str):
+        client = self._client_obj(); self._ensure_dataset()
+        dest_fq = f"{self.project}.{self.dataset}.{dest}"
+        # Ensure destination table exists first with temp schema (no rows)
+        sql_ctas = f"CREATE TABLE IF NOT EXISTS `{dest_fq}` AS SELECT * FROM `{temp}` WHERE 1=0;"
+        client.query(sql_ctas).result()
+
+        # Fetch schemas to build robust INSERT column list
+        dest_tbl = client.get_table(dest_fq)
+        temp_tbl = client.get_table(temp)
+        dest_cols = [f.name for f in dest_tbl.schema]
+        temp_cols = {f.name for f in temp_tbl.schema}
+        insert_cols = ", ".join(f"`{c}`" for c in dest_cols)
+        insert_vals_parts = []
+        for c in dest_cols:
+            if c in temp_cols:
+                insert_vals_parts.append(f"S.`{c}`")
+            else:
+                insert_vals_parts.append("NULL")
+        insert_vals = ", ".join(insert_vals_parts)
+
+        sql_merge = f"""
+        MERGE `{dest_fq}` T
+        USING `{temp}` S
+        ON {key_expr}
+        WHEN MATCHED THEN UPDATE SET {update_set}
+        WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})
+        """
+        client.query(sql_merge).result()
+        # Best-effort cleanup of staging table
+        try:
+            client.delete_table(temp, not_found_ok=True)
+        except Exception:
+            # Ignore cleanup errors
+            pass
+
+    # --- table-specific upserts ---
+    def upsert_tote_products(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_products", rows, schema_hint={
+            "total_gross": "FLOAT64",
+            "total_net": "FLOAT64",
+        })
+        if not temp:
+            return
+        self._merge(
+            "tote_products",
+            temp,
+            key_expr="T.product_id = S.product_id",
+            update_set=",".join([
+                "status=S.status",
+                "currency=S.currency",
+                "total_gross=S.total_gross",
+                "total_net=S.total_net",
+                "event_id=S.event_id",
+                "event_name=S.event_name",
+                "venue=S.venue",
+                "start_iso=S.start_iso",
+                "source=S.source",
+            ]),
+        )
+
+    def upsert_tote_product_dividends(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_product_dividends", rows, schema_hint={
+            "dividend": "FLOAT64",
+        })
+        if not temp:
+            return
+        self._merge(
+            "tote_product_dividends",
+            temp,
+            key_expr="T.product_id=S.product_id AND T.selection=S.selection AND T.ts=S.ts",
+            update_set="dividend=S.dividend",
+        )
+
+    def upsert_tote_events(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_events", rows)
+        if not temp:
+            return
+        # Backfill new columns if dest exists without them
+        self._ensure_columns("tote_events", {"result_status": "STRING"})
+        self._merge(
+            "tote_events",
+            temp,
+            key_expr="T.event_id=S.event_id",
+            update_set=",".join([
+                "name=S.name",
+                "sport=S.sport",
+                "venue=S.venue",
+                "country=S.country",
+                "start_iso=S.start_iso",
+                "status=S.status",
+                "result_status=S.result_status",
+                "comp=S.comp",
+                "home=S.home",
+                "away=S.away",
+                "competitors_json=S.competitors_json",
+                "source=S.source",
+            ]),
+        )
+
+    def upsert_tote_event_competitors_log(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_event_competitors_log", rows)
+        if not temp:
+            return
+        self._merge(
+            "tote_event_competitors_log",
+            temp,
+            key_expr="T.event_id=S.event_id AND T.ts_ms=S.ts_ms",
+            update_set="competitors_json=S.competitors_json",
+        )
+
+    def upsert_raw_tote(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("raw_tote", rows)
+        if not temp:
+            return
+        self._merge(
+            "raw_tote",
+            temp,
+            key_expr="T.raw_id=S.raw_id",
+            update_set=",".join([
+                "endpoint=S.endpoint",
+                "entity_id=S.entity_id",
+                "sport=S.sport",
+                "fetched_ts=S.fetched_ts",
+                "payload=S.payload",
+            ]),
+        )
+
+    def upsert_tote_product_selections(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_product_selections", rows, schema_hint={
+            "leg_index": "INT64",
+            "number": "INT64",
+        })
+        if not temp:
+            return
+        self._ensure_columns("tote_product_selections", {"product_leg_id": "STRING"})
+        self._merge(
+            "tote_product_selections",
+            temp,
+            key_expr="T.product_id=S.product_id AND T.leg_index=S.leg_index AND T.selection_id=S.selection_id",
+            update_set=",".join([
+                "product_leg_id=S.product_leg_id",
+                "competitor=S.competitor",
+                "number=S.number",
+                "leg_event_id=S.leg_event_id",
+                "leg_event_name=S.leg_event_name",
+                "leg_venue=S.leg_venue",
+                "leg_start_iso=S.leg_start_iso",
+            ]),
+        )
+
+    def upsert_tote_pool_snapshots(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_pool_snapshots", rows, schema_hint={
+            "ts_ms": "INT64",
+            "total_gross": "FLOAT64",
+            "total_net": "FLOAT64",
+        })
+        if not temp:
+            return
+        self._merge(
+            "tote_pool_snapshots",
+            temp,
+            key_expr="T.product_id=S.product_id AND T.ts_ms=S.ts_ms",
+            update_set=",".join([
+                "event_id=S.event_id",
+                "bet_type=S.bet_type",
+                "status=S.status",
+                "currency=S.currency",
+                "start_iso=S.start_iso",
+                "total_gross=S.total_gross",
+                "total_net=S.total_net",
+            ]),
+        )
+
+    def upsert_hr_horse_runs(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("hr_horse_runs", rows, schema_hint={
+            "finish_pos": "INT64",
+            "cloth_number": "INT64",
+        })
+        if not temp:
+            return
+        self._merge(
+            "hr_horse_runs",
+            temp,
+            key_expr="T.horse_id=S.horse_id AND T.event_id=S.event_id",
+            update_set=",".join([
+                "race_id=S.race_id",
+                "finish_pos=S.finish_pos",
+                "status=S.status",
+                "cloth_number=S.cloth_number",
+                "jockey=S.jockey",
+                "trainer=S.trainer",
+                "recorded_ts=S.recorded_ts",
+            ]),
+        )
+
+    def upsert_hr_horses(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("hr_horses", rows)
+        if not temp:
+            return
+        self._merge(
+            "hr_horses",
+            temp,
+            key_expr="T.horse_id=S.horse_id",
+            update_set=",".join([
+                "name=S.name",
+                "country=S.country",
+            ]),
+        )
+
+    def upsert_race_conditions(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("race_conditions", rows, schema_hint={
+            "weather_temp_c": "FLOAT64",
+            "weather_wind_kph": "FLOAT64",
+            "weather_precip_mm": "FLOAT64",
+        })
+        if not temp:
+            return
+        self._merge(
+            "race_conditions",
+            temp,
+            key_expr="T.event_id=S.event_id",
+            update_set=",".join([
+                "venue=S.venue",
+                "country=S.country",
+                "start_iso=S.start_iso",
+                "going=S.going",
+                "surface=S.surface",
+                "distance=S.distance",
+                "weather_desc=S.weather_desc",
+                "weather_temp_c=S.weather_temp_c",
+                "weather_wind_kph=S.weather_wind_kph",
+                "weather_precip_mm=S.weather_precip_mm",
+                "source=S.source",
+                "fetched_ts=S.fetched_ts",
+            ]),
+        )
+
+    def upsert_models(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("models", rows)
+        if not temp:
+            return
+        self._merge(
+            "models",
+            temp,
+            key_expr="T.model_id=S.model_id",
+            update_set=",".join([
+                "created_ts=S.created_ts",
+                "market=S.market",
+                "algo=S.algo",
+                "params_json=S.params_json",
+                "metrics_json=S.metrics_json",
+                "path=S.path",
+            ]),
+        )
+
+    def upsert_predictions(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("predictions", rows, schema_hint={
+            "ts_ms": "INT64",
+            "proba": "FLOAT64",
+            "rank": "INT64",
+        })
+        if not temp:
+            return
+        self._merge(
+            "predictions",
+            temp,
+            key_expr="T.model_id=S.model_id AND T.ts_ms=S.ts_ms AND T.event_id=S.event_id AND T.horse_id=S.horse_id",
+            update_set=",".join([
+                "market=S.market",
+                "proba=S.proba",
+                "rank=S.rank",
+            ]),
+        )
+
+    def upsert_features_runner_event(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("features_runner_event", rows, schema_hint={
+            "cloth_number": "INT64",
+            "total_net": "FLOAT64",
+            "weather_temp_c": "FLOAT64",
+            "weather_wind_kph": "FLOAT64",
+            "weather_precip_mm": "FLOAT64",
+            "weight_kg": "FLOAT64",
+            "weight_lbs": "FLOAT64",
+            "recent_runs": "INT64",
+            "avg_finish": "FLOAT64",
+            "wins_last5": "INT64",
+            "places_last5": "INT64",
+            "days_since_last_run": "INT64",
+        })
+        if not temp:
+            return
+        self._merge(
+            "features_runner_event",
+            temp,
+            key_expr="T.event_id=S.event_id AND T.horse_id=S.horse_id",
+            update_set=",".join([
+                "event_date=S.event_date",
+                "cloth_number=S.cloth_number",
+                "total_net=S.total_net",
+                "weather_temp_c=S.weather_temp_c",
+                "weather_wind_kph=S.weather_wind_kph",
+                "weather_precip_mm=S.weather_precip_mm",
+                "going=S.going",
+                "recent_runs=S.recent_runs",
+                "avg_finish=S.avg_finish",
+                "wins_last5=S.wins_last5",
+                "places_last5=S.places_last5",
+                "days_since_last_run=S.days_since_last_run",
+            ]),
+        )
+
+    def upsert_odds_live(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("odds_live", rows, schema_hint={
+            "price": "FLOAT64",
+            "ts_ms": "INT64",
+        })
+        if not temp:
+            return
+        self._merge(
+            "odds_live",
+            temp,
+            key_expr="T.event_id=S.event_id AND T.runner=S.runner AND T.market=S.market AND T.bookmaker=S.bookmaker AND T.ts_ms=S.ts_ms",
+            update_set=",".join([
+                "price=S.price",
+                "source=S.source",
+            ]),
+        )
+
+    def ensure_views(self):
+        """Create views required by the web app if missing (idempotent)."""
+        client = self._client_obj(); self._ensure_dataset()
+        ds = f"{self.project}.{self.dataset}"
+        # Ensure base tables required by views exist
+        sql = f"""
+        CREATE TABLE IF NOT EXISTS `{ds}.tote_pool_snapshots`(
+          product_id STRING,
+          event_id STRING,
+          bet_type STRING,
+          status STRING,
+          currency STRING,
+          start_iso STRING,
+          ts_ms INT64,
+          total_gross FLOAT64,
+          total_net FLOAT64
+        );
+        """
+        job = client.query(sql); job.result()
+        # vw_horse_runs_by_name
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_horse_runs_by_name` AS
+        WITH ep AS (
+          SELECT event_id,
+                 ANY_VALUE(event_name) AS event_name,
+                 ANY_VALUE(venue) AS venue,
+                 ANY_VALUE(start_iso) AS start_iso
+          FROM `{ds}.tote_products`
+          GROUP BY event_id
+        )
+        SELECT
+          h.name AS horse_name,
+          r.horse_id AS horse_id,
+          r.event_id AS event_id,
+          DATE(COALESCE(SUBSTR(te.start_iso,1,10), SUBSTR(ep.start_iso,1,10))) AS event_date,
+          COALESCE(te.venue, ep.venue) AS venue,
+          te.country AS country,
+          ep.event_name AS race_name,
+          r.cloth_number AS cloth_number,
+          r.finish_pos AS finish_pos,
+          r.status AS status
+        FROM `{ds}.hr_horse_runs` r
+        JOIN `{ds}.hr_horses` h ON h.horse_id = r.horse_id
+        LEFT JOIN `{ds}.tote_events` te ON te.event_id = r.event_id
+        LEFT JOIN ep ON ep.event_id = r.event_id;
+        """
+        job = client.query(sql)
+        job.result()
+
+        # vw_today_gb_events: today's GB events with competitor count
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_today_gb_events` AS
+        SELECT
+          e.event_id,
+          e.name,
+          e.status,
+          e.start_iso,
+          e.venue,
+          e.country,
+          ARRAY_LENGTH(JSON_EXTRACT_ARRAY(e.competitors_json, '$')) AS n_competitors
+        FROM `{ds}.tote_events` e
+        WHERE e.country = 'GB' AND DATE(SUBSTR(e.start_iso,1,10)) = CURRENT_DATE();
+        """
+        job = client.query(sql)
+        job.result()
+
+        # vw_today_gb_superfecta: today's GB superfecta products with pool totals and competitor count
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_today_gb_superfecta` AS
+        SELECT
+          p.product_id,
+          p.event_id,
+          p.event_name,
+          COALESCE(te.venue, p.venue) AS venue,
+          te.country,
+          p.start_iso,
+          p.status,
+          p.currency,
+          p.total_gross,
+          p.total_net,
+          ARRAY_LENGTH(JSON_EXTRACT_ARRAY(te.competitors_json, '$')) AS n_competitors
+        FROM `{ds}.tote_products` p
+        LEFT JOIN `{ds}.tote_events` te USING(event_id)
+        WHERE UPPER(p.bet_type) = 'SUPERFECTA' AND te.country = 'GB' AND DATE(SUBSTR(p.start_iso,1,10)) = CURRENT_DATE();
+        """
+        job = client.query(sql)
+        job.result()
+
+        # Ensure a tote_params table exists and has at least one row for defaults
+        sql = f"""
+        CREATE TABLE IF NOT EXISTS `{ds}.tote_params`(
+          t FLOAT64,                -- takeout fraction
+          f FLOAT64,                -- your share on winner
+          stake_per_line FLOAT64,   -- £ per combination
+          R FLOAT64,                -- net rollover/seed
+          updated_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+        job = client.query(sql); job.result()
+        # Insert default params if table is empty
+        sql = f"""
+        INSERT INTO `{ds}.tote_params`(t,f,stake_per_line,R)
+        SELECT 0.30, 1.0, 0.10, 0.0
+        FROM (SELECT 1) 
+        WHERE (SELECT COUNT(1) FROM `{ds}.tote_params`) = 0;
+        """
+        job = client.query(sql); job.result()
+
+        # vw_today_gb_superfecta_latest: latest pool snapshot per product (GB only)
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_today_gb_superfecta_latest` AS
+        WITH latest AS (
+          SELECT product_id, MAX(ts_ms) AS ts_ms
+          FROM `{ds}.tote_pool_snapshots`
+          GROUP BY product_id
+        )
+        SELECT s.*
+        FROM `{ds}.tote_pool_snapshots` s
+        JOIN latest l USING(product_id, ts_ms)
+        JOIN `{ds}.tote_products` p USING(product_id)
+        LEFT JOIN `{ds}.tote_events` e ON e.event_id = p.event_id
+        WHERE e.country = 'GB' AND DATE(SUBSTR(p.start_iso,1,10)) = CURRENT_DATE()
+          AND UPPER(p.bet_type)='SUPERFECTA';
+        """
+        job = client.query(sql); job.result()
+
+        # vw_today_gb_superfecta_be: add breakeven metrics using latest snapshots and tote_params (latest row)
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_today_gb_superfecta_be` AS
+        WITH params AS (
+          SELECT t, f, stake_per_line, R FROM `{ds}.tote_params`
+          ORDER BY updated_ts DESC LIMIT 1
+        )
+        SELECT
+          v.product_id,
+          v.event_id,
+          v.event_name,
+          v.venue,
+          v.country,
+          v.start_iso,
+          v.status,
+          v.currency,
+          v.total_gross,
+          v.total_net,
+          v.n_competitors,
+          -- permutations C = N*(N-1)*(N-2)*(N-3)
+          SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3) AS combos,
+          -- S = C * stake_per_line
+          SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line) AS S,
+          prm.t,
+          prm.f,
+          prm.R,
+          -- O_min = S/(f*(1-t)) - S - R/(1-t)
+          CASE
+            WHEN v.n_competitors >= 4 AND prm.f > 0 AND (1-prm.t) > 0 THEN (
+              (SAFE_DIVIDE(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line), (prm.f * (1-prm.t))))
+              - (SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line))
+              - (SAFE_DIVIDE(prm.R, (1-prm.t)))
+            ) ELSE NULL END AS O_min,
+          -- ROI at current pool using latest snapshot gross as O
+          CASE
+            WHEN v.n_competitors >= 4 AND prm.f > 0 AND (1-prm.t) > 0 AND s.latest_gross IS NOT NULL THEN (
+              (prm.f * (((1-prm.t) * ( (SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line)) + s.latest_gross)) + prm.R))
+              - (SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line))
+            ) / NULLIF(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line), 0)
+            ELSE NULL END AS roi_current,
+          CASE
+            WHEN v.n_competitors >= 4 AND prm.f > 0 AND (1-prm.t) > 0 AND s.latest_gross IS NOT NULL THEN (
+              (prm.f * (((1-prm.t) * ( (SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line)) + s.latest_gross)) + prm.R))
+              > (SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line))
+            ) ELSE NULL END AS viable_now
+        FROM `{ds}.vw_today_gb_superfecta` v
+        LEFT JOIN (
+          SELECT product_id,
+                 ANY_VALUE(total_gross) AS latest_gross,
+                 ANY_VALUE(total_net) AS latest_net,
+                 MAX(ts_ms) AS ts_ms
+          FROM `{ds}.tote_pool_snapshots`
+          GROUP BY product_id
+        ) s ON s.product_id = v.product_id
+        CROSS JOIN params prm;
+        """
+        job = client.query(sql)
+        job.result()
+
+        # vw_gb_open_superfecta_next60: GB Superfecta products starting in next 60 minutes
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_gb_open_superfecta_next60` AS
+        SELECT
+          p.product_id,
+          p.event_id,
+          p.event_name,
+          COALESCE(e.venue, p.venue) AS venue,
+          e.country,
+          p.start_iso,
+          p.status,
+          p.currency,
+          p.total_gross,
+          p.total_net,
+          ARRAY_LENGTH(JSON_EXTRACT_ARRAY(e.competitors_json, '$')) AS n_competitors
+        FROM `{ds}.tote_products` p
+        LEFT JOIN `{ds}.tote_events` e ON e.event_id = p.event_id
+        WHERE UPPER(p.bet_type)='SUPERFECTA'
+          AND e.country='GB'
+          AND p.status='OPEN'
+          AND TIMESTAMP(p.start_iso) BETWEEN CURRENT_TIMESTAMP() AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 60 MINUTE);
+        """
+        job = client.query(sql); job.result()
+
+        # vw_gb_open_superfecta_next60_be: with breakeven using latest snapshots and tote_params
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_gb_open_superfecta_next60_be` AS
+        WITH params AS (
+          SELECT t, f, stake_per_line, R FROM `{ds}.tote_params` ORDER BY updated_ts DESC LIMIT 1
+        ), latest AS (
+          SELECT product_id, ANY_VALUE(total_gross) AS latest_gross, ANY_VALUE(total_net) AS latest_net, MAX(ts_ms) AS ts_ms
+          FROM `{ds}.tote_pool_snapshots`
+          GROUP BY product_id
+        )
+        SELECT
+          v.*, prm.t, prm.f, prm.stake_per_line, prm.R,
+          SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3) AS combos,
+          SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line) AS S,
+          CASE WHEN v.n_competitors>=4 AND prm.f>0 AND (1-prm.t)>0 THEN (
+            SAFE_DIVIDE(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line), prm.f*(1-prm.t))
+            - SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line)
+            - SAFE_DIVIDE(prm.R, (1-prm.t))
+          ) END AS O_min,
+          CASE WHEN v.n_competitors>=4 AND prm.f>0 AND (1-prm.t)>0 THEN (
+            (prm.f * (((1-prm.t) * ( SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line) + COALESCE(l.latest_gross, v.total_gross))) + prm.R))
+            - SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line)
+          ) / NULLIF(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line),0) END AS roi_current,
+          CASE WHEN v.n_competitors>=4 AND prm.f>0 AND (1-prm.t)>0 THEN (
+            (prm.f * (((1-prm.t) * ( SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line) + COALESCE(l.latest_gross, v.total_gross))) + prm.R))
+            > SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3), prm.stake_per_line)
+          ) END AS viable_now
+        FROM `{ds}.vw_gb_open_superfecta_next60` v
+        CROSS JOIN params prm
+        LEFT JOIN latest l USING(product_id);
+        """
+        job = client.query(sql); job.result()
+
+        # vw_superfecta_products: convenient filter of products table
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_superfecta_products` AS
+        SELECT
+          p.product_id,
+          p.event_id,
+          p.event_name,
+          COALESCE(te.venue, p.venue) AS venue,
+          te.country,
+          p.start_iso,
+          p.status,
+          p.currency,
+          p.total_gross,
+          p.total_net
+        FROM `{ds}.tote_products` p
+        LEFT JOIN `{ds}.tote_events` te USING(event_id)
+        WHERE UPPER(p.bet_type) = 'SUPERFECTA';
+        """
+        job = client.query(sql)
+        job.result()
+
+        # vw_superfecta_dividends_latest: latest dividend per selection for each product
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_superfecta_dividends_latest` AS
+        SELECT
+          product_id,
+          selection,
+          ARRAY_AGG(dividend ORDER BY ts DESC LIMIT 1)[OFFSET(0)] AS dividend,
+          MAX(ts) AS ts
+        FROM `{ds}.tote_product_dividends`
+        GROUP BY product_id, selection;
+        """
+        job = client.query(sql)
+        job.result()
+
+        # vw_runner_features: join runner features with horse name (useful for UI/ML)
+        if self._table_exists("features_runner_event"):
+            sql = f"""
+            CREATE VIEW IF NOT EXISTS `{ds}.vw_runner_features` AS
+            SELECT
+              f.event_id,
+              f.horse_id,
+              h.name AS horse_name,
+              f.event_date,
+              f.cloth_number,
+              f.total_net,
+              f.weather_temp_c,
+              f.weather_wind_kph,
+              f.weather_precip_mm,
+              f.going,
+              f.recent_runs,
+              f.avg_finish,
+              f.wins_last5,
+              f.places_last5,
+              f.days_since_last_run
+            FROM `{ds}.features_runner_event` f
+            LEFT JOIN `{ds}.hr_horses` h ON h.horse_id = f.horse_id;
+            """
+            job = client.query(sql)
+            job.result()
+
+        # vw_superfecta_training: combine product/event context with runner results for modeling
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_superfecta_training` AS
+        SELECT
+          p.event_id,
+          p.product_id,
+          DATE(SUBSTR(COALESCE(te.start_iso, p.start_iso),1,10)) AS event_date,
+          COALESCE(te.venue, p.venue) AS venue,
+          te.country,
+          p.total_net,
+          rc.going,
+          rc.weather_temp_c,
+          rc.weather_wind_kph,
+          rc.weather_precip_mm,
+          r.horse_id,
+          r.cloth_number,
+          r.finish_pos,
+          r.status
+        FROM `{ds}.tote_products` p
+        JOIN `{ds}.hr_horse_runs` r ON r.event_id = p.event_id
+        LEFT JOIN `{ds}.race_conditions` rc ON rc.event_id = p.event_id
+        LEFT JOIN `{ds}.tote_events` te ON te.event_id = p.event_id
+        WHERE UPPER(p.bet_type) = 'SUPERFECTA' AND r.finish_pos IS NOT NULL;
+        """
+        job = client.query(sql)
+        job.result()
+
+    def cleanup_temp_tables(self, prefix: str = "_tmp_", older_than_days: int | None = None) -> int:
+        """Delete leftover staging tables with the given prefix. Returns count deleted.
+
+        If older_than_days is provided, only delete tables older than that many days.
+        """
+        client = self._client_obj(); self._ensure_dataset()
+        from datetime import datetime, timezone, timedelta
+        ds_ref = self._bq.DatasetReference(self.project, self.dataset)
+        deleted = 0
+        cutoff = None
+        if older_than_days is not None and older_than_days > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        for tbl in client.list_tables(ds_ref):
+            name = tbl.table_id
+            if not name.startswith(prefix):
+                continue
+            if cutoff is not None and getattr(tbl, "created", None):
+                try:
+                    if tbl.created and tbl.created.replace(tzinfo=timezone.utc) > cutoff:
+                        continue
+                except Exception:
+                    pass
+            try:
+                client.delete_table(tbl, not_found_ok=True)
+                deleted += 1
+            except Exception:
+                pass
+        return deleted
+
+
+def get_bq_sink() -> BigQuerySink | None:
+    if not cfg.bq_write_enabled:
+        return None
+    if not cfg.bq_project or not cfg.bq_dataset:
+        return None
+    try:
+        return BigQuerySink(cfg.bq_project, cfg.bq_dataset, cfg.bq_location)
+    except Exception:
+        return None
