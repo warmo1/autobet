@@ -191,14 +191,14 @@
           async function fetchPoolInfo() {
             const poolInfoDiv = document.getElementById('pool-info');
             try {
-              const response = await fetch(`/api/tote/viability?product_id={{ product.product_id }}`);
+              const response = await fetch(`/api/tote/pool_snapshot/{{ product.product_id }}`);
               const data = await response.json();
-              if (data.product) {
+              if (data.total_gross) {
                 poolInfoDiv.innerHTML = `
                   <h5>Live Pool Info</h5>
-                  <p>Total Pool: £${data.product.total_gross.toFixed(2)}</p>
-                  <p>Net Pool: £${data.product.total_net.toFixed(2)}</p>
-                  <p>Rollover: £${data.product.rollover ? data.product.rollover.toFixed(2) : '0.00'}</p>
+                  <p>Total Pool: £${data.total_gross.toFixed(2)}</p>
+                  <p>Net Pool: £${data.total_net.toFixed(2)}</p>
+                  <p>Rollover: £${data.rollover ? data.rollover.toFixed(2) : '0.00'}</p>
                 `;
               }
             } catch (error) {
@@ -207,7 +207,7 @@
           }
 
           fetchPoolInfo();
-          setInterval(fetchPoolInfo, 30000); // Refresh every 30 seconds
+          setInterval(fetchPoolInfo, 5000); // Refresh every 5 seconds
         </script>
         {% if recent_bets %}
         <div class="mt-3">
