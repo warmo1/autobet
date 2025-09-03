@@ -482,11 +482,13 @@ def init_schema(conn):
             conn.execute("ALTER TABLE tote_product_selections ADD COLUMN product_leg_id TEXT")
     except Exception:
         pass
-    # Migration: add rollover to tote_products
+    # Migration: add rollover and deduction_rate to tote_products
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(tote_products)").fetchall()]
         if 'rollover' not in cols:
             conn.execute("ALTER TABLE tote_products ADD COLUMN rollover REAL")
+        if 'deduction_rate' not in cols:
+            conn.execute("ALTER TABLE tote_products ADD COLUMN deduction_rate REAL")
     except Exception:
         pass
 
