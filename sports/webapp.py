@@ -1126,6 +1126,21 @@ def api_tote_product_runners():
     conn.close()
     return app.response_class(json.dumps(rows.to_dict("records") if not rows.empty else []), mimetype="application/json")
 
+@app.route("/api/tote/pool_snapshot/<product_id>")
+def api_tote_pool_snapshot(product_id: str):
+    conn = _get_db_conn()
+    row = conn.execute(
+        "SELECT * FROM tote_pool_snapshots WHERE product_id=? ORDER BY ts_ms DESC LIMIT 1",
+        (product_id,),
+    ).fetchone()
+    conn.close()
+    if row:
+        # convert row to dict
+        cols = [d[0] for d in row.keys()]
+        row_dict = {cols[i]: row[i] for i in range(len(cols))}
+        return app.response_class(json.dumps(row_dict), mimetype="application/json")
+    return app.response_class(json.dumps({"error": "not found"}), mimetype="application/json", status=404)
+
 @app.route("/tote/audit/superfecta", methods=["POST"])
 def tote_audit_superfecta_post():
     from .providers.tote_bets import place_audit_superfecta
