@@ -439,11 +439,56 @@ CREATE TABLE IF NOT EXISTS superfecta_eval (
 );
 """
 
+SCHEMA_SUBSCRIPTIONS_EXT = """
+-- Log of Tote subscription messages for dividends
+CREATE TABLE IF NOT EXISTS tote_dividend_updates (
+  product_id TEXT NOT NULL,
+  ts_ms INTEGER NOT NULL,
+  dividend_name TEXT,
+  dividend_type INTEGER,
+  dividend_status INTEGER,
+  dividend_amount REAL,
+  dividend_currency TEXT,
+  leg_id TEXT,
+  selection_id TEXT,
+  finishing_position INTEGER,
+  PRIMARY KEY (product_id, ts_ms, leg_id, selection_id)
+);
+
+-- Log of Tote subscription messages for event results
+CREATE TABLE IF NOT EXISTS tote_event_results_log (
+  event_id TEXT NOT NULL,
+  ts_ms INTEGER NOT NULL,
+  competitor_id TEXT NOT NULL,
+  finishing_position INTEGER,
+  status TEXT,
+  PRIMARY KEY (event_id, ts_ms, competitor_id)
+);
+
+-- Log of Tote subscription messages for event status
+CREATE TABLE IF NOT EXISTS tote_event_status_log (
+  event_id TEXT NOT NULL,
+  ts_ms INTEGER NOT NULL,
+  status TEXT,
+  PRIMARY KEY (event_id, ts_ms)
+);
+
+-- Log of Tote subscription messages for competitor status
+CREATE TABLE IF NOT EXISTS tote_competitor_status_log (
+  event_id TEXT NOT NULL,
+  competitor_id TEXT NOT NULL,
+  ts_ms INTEGER NOT NULL,
+  status TEXT,
+  PRIMARY KEY (event_id, competitor_id, ts_ms)
+);
+"""
+
 def init_schema(conn):
     conn.executescript(SCHEMA)
     conn.executescript(SCHEMA_ODDS_EXT)
     conn.executescript(SCHEMA_WEIGHTS)
     conn.executescript(SCHEMA_SF)
+    conn.executescript(SCHEMA_SUBSCRIPTIONS_EXT)
     # Lightweight migrations for feature columns
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(features_runner_event)").fetchall()]
