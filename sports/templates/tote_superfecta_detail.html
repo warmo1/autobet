@@ -1,0 +1,258 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <strong>Superfecta Builder</strong>
+    <a class="btn btn-sm btn-outline-primary" href="{{ url_for('tote_superfecta_page') }}">Back</a>
+  </div>
+  <div class="card-body">
+    <div class="mb-2">
+      <div><strong>Event:</strong> {{ product.event_name }} ({{ product.venue }})</div>
+      <div class="small text-muted">Start: <span class="time-iso" data-iso="{{ product.start_iso }}">{{ product.start_iso }}</span> - Product: {{ product.product_id }}</div>
+      {% if conditions %}
+      <div class="small mt-1">
+        <span class="badge bg-light text-dark">Going: {{ conditions.going or '—' }}</span>
+        <span class="badge bg-light text-dark ms-1">Temp: {{ conditions.weather_temp_c is not none and (conditions.weather_temp_c | round(0) | int) ~ '°C' or '—' }}</span>
+        <span class="badge bg-light text-dark ms-1">Wind: {{ conditions.weather_wind_kph is not none and (conditions.weather_wind_kph | round(0) | int) ~ ' kph' or '—' }}</span>
+        <span class="badge bg-light text-dark ms-1">Precip: {{ conditions.weather_precip_mm is not none and (conditions.weather_precip_mm | round(1)) ~ ' mm' or '—' }}</span>
+      </div>
+      {% endif %}
+    </div>
+    <div class="row">
+      <div class="col-lg-7">
+        <div class="table-responsive">
+          <table class="table table-sm">
+            <thead><tr><th>#</th><th>Runner</th></tr></thead>
+            <tbody>
+              {% for r in runners %}
+                <tr><td>{{ r.cloth }}</td><td><a href="{{ url_for('form_horse_page') }}?name={{ r.name | urlencode }}">{{ r.name }}</a></td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if finishing %}
+        <div class="mt-3">
+          <strong>Finishing Order</strong>
+          <div class="table-responsive">
+            <table class="table table-sm">
+              <thead><tr><th>Pos</th><th>Cloth</th><th>Horse</th><th>Status</th></tr></thead>
+              <tbody>
+                {% for f in finishing %}
+                  <tr>
+                    <td>{{ f.finish_pos }}</td>
+                    <td>{{ f.cloth_number }}</td>
+                    <td>{{ f.horse_id }}</td>
+                    <td>{{ f.status }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endif %}
+        {% if dividends %}
+        <div class="mt-3">
+          <strong>Reported Dividends</strong>
+          <div class="table-responsive">
+            <table class="table table-sm">
+              <thead><tr><th>Selection</th><th>Dividend</th><th>Last Seen</th></tr></thead>
+              <tbody>
+                {% for d in dividends %}
+                  <tr><td>{{ d.selection }}</td><td>{{ '%.2f'|format(d.dividend or 0) }}</td><td>{{ d.ts }}</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endif %}
+      </div>
+      <div class="col-lg-5">
+        <form method="post" action="{{ url_for('tote_superfecta_page') }}" class="row g-2 mb-3">
+          <input type="hidden" name="product_id" value="{{ product.product_id }}" />
+          <div class="col-12"><label class="form-label">Position 1</label>
+            <select class="form-select form-select-sm" name="pos1">
+              {% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }} - {{ r.name }}</option>{% endfor %}
+            </select>
+          </div>
+          <div class="col-12"><label class="form-label">Position 2</label>
+            <select class="form-select form-select-sm" name="pos2">
+              {% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }} - {{ r.name }}</option>{% endfor %}
+            </select>
+          </div>
+          <div class="col-12"><label class="form-label">Position 3</label>
+            <select class="form-select form-select-sm" name="pos3">
+              {% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }} - {{ r.name }}</option>{% endfor %}
+            </select>
+          </div>
+          <div class="col-12"><label class="form-label">Position 4</label>
+            <select class="form-select form-select-sm" name="pos4">
+              {% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }} - {{ r.name }}</option>{% endfor %}
+            </select>
+          </div>
+          <div class="col-8">
+            <label class="form-label">Stake</label>
+            <input class="form-control form-control-sm" type="number" step="0.01" name="stake" placeholder="Stake" />
+          </div>
+          <div class="col-4 d-grid align-items-end">
+            <button class="btn btn-sm btn-secondary" style="margin-top:24px;">Place Paper Bet</button>
+          </div>
+        </form>
+        <form method="post" action="{{ url_for('tote_audit_superfecta_post') }}" class="row g-2">
+          <input type="hidden" name="product_id" value="{{ product.product_id }}" />
+          <input type="hidden" name="selection" id="auditSel" />
+          <input type="hidden" name="post" value="on" />
+          <div class="col-8">
+            <label class="form-label">Stake</label>
+            <input class="form-control form-control-sm" type="number" step="0.01" name="stake" placeholder="Stake" />
+          </div>
+          <div class="col-4 d-grid align-items-end">
+            <button class="btn btn-sm btn-primary" style="margin-top:24px;" onclick="buildAuditSel(event)">Audit Bet</button>
+          </div>
+        </form>
+        <div class="mt-2">
+          <details open>
+            <summary>Multiple selections builder</summary>
+            <div id="multi-builder">
+              <div class="row g-2 align-items-center mt-1 selection-row">
+                <div class="col-2"><select class="form-select form-select-sm pos-1">{% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }}</option>{% endfor %}</select></div>
+                <div class="col-2"><select class="form-select form-select-sm pos-2">{% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }}</option>{% endfor %}</select></div>
+                <div class="col-2"><select class="form-select form-select-sm pos-3">{% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }}</option>{% endfor %}</select></div>
+                <div class="col-2"><select class="form-select form-select-sm pos-4">{% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }}</option>{% endfor %}</select></div>
+                <div class="col-2"><button class="btn btn-sm btn-danger btn-remove">X</button></div>
+              </div>
+            </div>
+            <button class="btn btn-sm btn-outline-primary mt-2" id="add-selection">Add Selection</button>
+            <form method="post" action="{{ url_for('tote_audit_superfecta_post') }}" class="row g-2 mt-2">
+              <input type="hidden" name="product_id" value="{{ product.product_id }}" />
+              <input type="hidden" name="post" value="on" />
+              <div class="col-12">
+                <label class="form-label">Selections (one per line)</label>
+                <textarea class="form-control" name="selections" id="selections-output" rows="3" placeholder="3-7-1-5\n2-3-1-6"></textarea>
+              </div>
+              <div class="col-8">
+                <label class="form-label">Stake/line (GBP)</label>
+                <input class="form-control" type="number" step="0.01" min="0" name="stake" placeholder="0.10" />
+              </div>
+              <div class="col-4 d-grid align-items-end">
+                <button class="btn btn-primary" style="margin-top:24px;" onclick="return confirm('Audit mode: submit multiple lines?')">Audit Multiple</button>
+              </div>
+            </form>
+          </details>
+        </div>
+        <div id="pool-info" class="mt-3"></div>
+        <script>
+          function buildAuditSel(ev){
+            try{
+              const p1 = document.querySelector('select[name="pos1"]').value;
+              const p2 = document.querySelector('select[name="pos2"]').value;
+              const p3 = document.querySelector('select[name="pos3"]').value;
+              const p4 = document.querySelector('select[name="pos4"]').value;
+              const sel = [p1,p2,p3,p4].join('-');
+              document.getElementById('auditSel').value = sel;
+            }catch(e){}
+          }
+
+          const multiBuilder = document.getElementById('multi-builder');
+          const addSelectionBtn = document.getElementById('add-selection');
+          const selectionsOutput = document.getElementById('selections-output');
+
+          function updateSelectionsOutput() {
+            const rows = multiBuilder.querySelectorAll('.selection-row');
+            const selections = [];
+            rows.forEach(row => {
+              const p1 = row.querySelector('.pos-1').value;
+              const p2 = row.querySelector('.pos-2').value;
+              const p3 = row.querySelector('.pos-3').value;
+              const p4 = row.querySelector('.pos-4').value;
+              selections.push([p1, p2, p3, p4].join('-'));
+            });
+            selectionsOutput.value = selections.join('\n');
+          }
+
+          addSelectionBtn.addEventListener('click', () => {
+            const newRow = multiBuilder.querySelector('.selection-row').cloneNode(true);
+            newRow.querySelector('.btn-remove').addEventListener('click', () => {
+              newRow.remove();
+              updateSelectionsOutput();
+            });
+            multiBuilder.appendChild(newRow);
+            updateSelectionsOutput();
+          });
+
+          multiBuilder.querySelectorAll('.btn-remove').forEach(btn => {
+            btn.addEventListener('click', () => {
+              btn.closest('.selection-row').remove();
+              updateSelectionsOutput();
+            });
+          });
+          multiBuilder.addEventListener('change', updateSelectionsOutput);
+          updateSelectionsOutput();
+
+          async function fetchPoolInfo() {
+            const poolInfoDiv = document.getElementById('pool-info');
+            try {
+              const response = await fetch(`/api/tote/viability?product_id={{ product.product_id }}`);
+              const data = await response.json();
+              if (data.product) {
+                poolInfoDiv.innerHTML = `
+                  <h5>Live Pool Info</h5>
+                  <p>Total Pool: £${data.product.total_gross.toFixed(2)}</p>
+                  <p>Net Pool: £${data.product.total_net.toFixed(2)}</p>
+                  <p>Rollover: £${data.product.rollover ? data.product.rollover.toFixed(2) : '0.00'}</p>
+                `;
+              }
+            } catch (error) {
+              poolInfoDiv.innerHTML = '<p class="text-danger">Error fetching pool info.</p>';
+            }
+          }
+
+          fetchPoolInfo();
+          setInterval(fetchPoolInfo, 30000); // Refresh every 30 seconds
+        </script>
+        {% if recent_bets %}
+        <div class="mt-3">
+          <strong>Recent Audit Bets</strong>
+          <div class="table-responsive">
+            <table class="table table-sm">
+              <thead><tr><th>Time</th><th>Selection</th><th>Stake</th><th>Status</th><th>Outcome</th><th></th></tr></thead>
+              <tbody>
+                {% for b in recent_bets %}
+                  <tr>
+                    <td>{{ (b.ts/1000) | datetime }}</td>
+                    <td>{{ b.selection }}</td>
+                    <td>{{ '%.2f'|format(b.stake or 0) }} {{ b.currency or '' }}</td>
+                    <td>{{ b.status }}{% if b.error %} <span class="text-danger" title="{{ b.error }}">(error)</span>{% endif %}</td>
+                    <td class="outcome">{{ b.outcome or '—' }}</td>
+                    <td><button type="button" class="btn btn-sm btn-outline-primary btn-refresh-bet" data-bid="{{ b.bet_id }}">Refresh</button></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  document.querySelectorAll('.btn-refresh-bet').forEach(function(btn){
+    btn.addEventListener('click', async function(){
+      const bid = btn.getAttribute('data-bid');
+      const row = btn.closest('tr');
+      try{
+        btn.disabled = true; btn.textContent = 'Refreshing...';
+        const r = await fetch('/api/tote/bet_status?bet_id=' + encodeURIComponent(bid));
+        const d = await r.json();
+        if(row){
+          const oc = row.querySelector('.outcome');
+          if(oc){ oc.textContent = d && d.outcome ? d.outcome : (d && d.status && d.status.status ? d.status.status : '—'); }
+        }
+      }catch(err){ /* noop */ }
+      finally { btn.disabled = false; btn.textContent = 'Refresh'; }
+    });
+  });
+})();
+</script>
+{% endblock %}
