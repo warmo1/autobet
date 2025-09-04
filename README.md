@@ -71,3 +71,18 @@ python -m sports.run live --symbol 'Home vs Away (Match Odds)' --side back --odd
 - `sports/llm.py`, `sports/news.py` – news fetch + LLM summaries
 - `sports/webapp.py` – Flask dashboard
 - `sports/run.py` – CLI entrypoint
+
+## GCP ingestion pipeline
+
+A basic pipeline using Google Cloud native services is included. Deploy
+`sports/gcp_ingest_service.py` to Cloud Run and create a Pub/Sub topic with a
+push subscription pointing at the service. Jobs can then be published with
+`scripts/publish_ingest_job.py`:
+
+```bash
+python scripts/publish_ingest_job.py --project <PROJECT> --topic <TOPIC> \
+    --url https://example.com/file.csv --bucket my-bucket --name raw/file.csv
+```
+
+The Cloud Run service downloads the referenced URL and stores the contents in
+the specified Cloud Storage bucket for downstream processing.
