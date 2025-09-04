@@ -140,3 +140,13 @@ cython_debug/
 sports_bot.db
 sports_bot.db-shm
 sports_bot.db-wal
+data/
+sports/data/
+models/
+*.db
+*.zip
+*.csv
+*.joblib
+*.parquet
+*.sqlite
+*.sqlite3

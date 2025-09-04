@@ -6,6 +6,7 @@
     <a class="btn btn-sm btn-outline-primary" href="{{ url_for('tote_superfecta_page') }}">Back</a>
   </div>
   <div class="card-body">
+    <div id="placementInfo" class="alert alert-info" style="display:none;"></div>
     <div class="mb-2">
       <div><strong>Event:</strong> {{ product.event_name }} ({{ product.venue }})</div>
       <div class="small text-muted">Start: <span class="time-iso" data-iso="{{ product.start_iso }}">{{ product.start_iso }}</span> - Product: {{ product.product_id }}</div>
@@ -253,6 +254,31 @@
       finally { btn.disabled = false; btn.textContent = 'Refresh'; }
     });
   });
+})();
+</script>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){
+  const btn = document.getElementById('btnCheckPlacement');
+  const box = document.getElementById('placementInfo');
+  if(btn && box){
+    btn.addEventListener('click', async function(){
+      try{
+        const pid = {{ product.product_id | tojson }};
+        const r = await fetch(`/api/tote/placement_id?product_id=${encodeURIComponent(pid)}`);
+        const j = await r.json();
+        if(j && !j.error){
+          box.style.display='';
+          box.innerText = `original=${j.original_product_id} -> placement=${j.placement_product_id} (method=${j.method}${j.selling_status? ', selling='+j.selling_status:''})`;
+        }else{
+          box.style.display='';
+          box.innerText = 'Error: ' + (j && j.error ? j.error : 'unknown');
+        }
+      }catch(err){ box.style.display=''; box.innerText = 'Error checking placement id'; }
+    });
+  }
 })();
 </script>
 {% endblock %}
