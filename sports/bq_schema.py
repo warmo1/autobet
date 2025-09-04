@@ -19,8 +19,23 @@ def export_bq_schema_to_csv():
         writer.writeheader()
 
         for table in client.list_tables(dataset_ref):
+            # Skip temporary staging tables
+            if table.table_id.startswith('_tmp_'):
+                continue
             table_details = client.get_table(table.reference)
-            for col in table_details.schema:
+            schema = table_details.schema or []
+            # If a view has no explicit schema, skip columns but still emit a header row
+            if not schema and table.table_type == 'VIEW':
+                writer.writerow({
+                    'table_name': table.table_id,
+                    'table_type': table.table_type,
+                    'column_name': '',
+                    'data_type': '',
+                    'description': '',
+                    'mode': ''
+                })
+                continue
+            for col in schema:
                 writer.writerow({
                     'table_name': table.table_id,
                     'table_type': table.table_type,
