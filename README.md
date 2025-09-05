@@ -85,3 +85,28 @@ python scripts/publish_ingest_job.py --project <PROJECT> --topic <TOPIC> \
 
 The Cloud Run service downloads the referenced URL and stores the contents in
 the specified Cloud Storage bucket for downstream processing.
+
+### Tote → GCS JSON → BigQuery (raw)
+
+You can now fetch Tote API JSON to Cloud Storage and append the payload to BigQuery `raw_tote` in one step via Pub/Sub:
+
+1) Prepare a GraphQL file with your query (e.g., `sql/tote_products_example.graphql`).
+
+2) Publish a job (London region project example):
+
+```bash
+python scripts/publish_tote_graphql_job.py \
+  --project autobet-470818 \
+  --topic ingest-jobs \
+  --bucket autobet-470818-data \
+  --name raw/tote/products_2025-09-05.json \
+  --query-file path/to/query.graphql \
+  --vars '{"first":100,"status":"OPEN"}'
+```
+
+The Cloud Run service will:
+- Execute the Tote GraphQL using `TOTE_API_KEY`/`TOTE_GRAPHQL_URL`.
+- Write the JSON response to `gs://<bucket>/<name>`.
+- If `BQ_*` envs are set and the message includes `bq.table=raw_tote` (default in the script), it appends the payload to BigQuery `raw_tote`.
+
+Note: structured tables (e.g., `tote_products`) are still supported by the local exporter. For a pure-GCP flow, land raw JSON first; transformation to structured can be added via scheduled jobs or BigQuery SQL later.

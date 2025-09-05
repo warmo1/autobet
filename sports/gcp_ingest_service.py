@@ -10,10 +10,13 @@ from __future__ import annotations
 import os
 import requests
 from flask import Flask, request
+import json
+import time
 
 from sports.gcp import parse_pubsub_envelope, upload_text_to_bucket
 from sports.config import cfg
 from sports.providers.tote_api import ToteClient, ToteError
+from sports.bq import get_bq_sink
 
 app = Flask(__name__)
 
@@ -48,7 +51,26 @@ def handle_pubsub() -> tuple[str, int]:
                 if not query:
                     return ("Missing GraphQL query", 204)
                 data = client.graphql(query, variables)
-                upload_text_to_bucket(bucket, name, json.dumps(data))
+                txt = json.dumps(data)
+                upload_text_to_bucket(bucket, name, txt)
+                # Optional: write raw into BigQuery
+                bq = (payload.get("bq") or {}).copy() if isinstance(payload.get("bq"), dict) else {}
+                if bq.get("table") == "raw_tote":
+                    sink = get_bq_sink()
+                    if sink and sink.enabled:
+                        try:
+                            raw = {
+                                "raw_id": f"graphql:{int(time.time()*1000)}",
+                                "endpoint": "graphql",
+                                "entity_id": str(bq.get("entity_id") or ""),
+                                "sport": str(bq.get("sport") or "horse_racing"),
+                                "fetched_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                "payload": txt,
+                            }
+                            sink.upsert_raw_tote([raw])
+                        except Exception:
+                            # Swallow BQ errors to avoid Pub/Sub retries
+                            pass
             else:
                 # REST path passthrough using requests with Tote auth header
                 path = payload.get("path") or "/"
@@ -64,10 +86,44 @@ def handle_pubsub() -> tuple[str, int]:
                 resp = requests.get(full_url, headers=headers, timeout=20)
                 resp.raise_for_status()
                 upload_text_to_bucket(bucket, name, resp.text)
+                # Optional: write raw into BigQuery (REST)
+                bq = (payload.get("bq") or {}).copy() if isinstance(payload.get("bq"), dict) else {}
+                if bq.get("table") == "raw_tote":
+                    sink = get_bq_sink()
+                    if sink and sink.enabled:
+                        try:
+                            raw = {
+                                "raw_id": f"rest:{int(time.time()*1000)}",
+                                "endpoint": path,
+                                "entity_id": str(bq.get("entity_id") or ""),
+                                "sport": str(bq.get("sport") or "horse_racing"),
+                                "fetched_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                "payload": resp.text,
+                            }
+                            sink.upsert_raw_tote([raw])
+                        except Exception:
+                            pass
         elif url:
             resp = requests.get(url, timeout=20)
             resp.raise_for_status()
             upload_text_to_bucket(bucket, name, resp.text)
+            # Optional: write raw into BigQuery (generic URL)
+            bq = (payload.get("bq") or {}).copy() if isinstance(payload.get("bq"), dict) else {}
+            if bq.get("table") == "raw_tote":
+                sink = get_bq_sink()
+                if sink and sink.enabled:
+                    try:
+                        raw = {
+                            "raw_id": f"url:{int(time.time()*1000)}",
+                            "endpoint": url,
+                            "entity_id": str(bq.get("entity_id") or ""),
+                            "sport": str(bq.get("sport") or "horse_racing"),
+                            "fetched_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "payload": resp.text,
+                        }
+                        sink.upsert_raw_tote([raw])
+                    except Exception:
+                        pass
         else:
             return ("Missing url/provider", 204)
     except ToteError as te:

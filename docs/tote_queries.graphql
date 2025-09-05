@@ -1,0 +1,95 @@
+# Products by date/status/bet types with legs, selections, pool, dividends
+query GetProducts($date: Date, $status: BettingProductSellingStatus, $first: Int, $betTypes: [BetTypeCode!]) {
+  products(date: $date, betTypes: $betTypes, sellingStatus: $status, first: $first) {
+    nodes {
+      id
+      name
+      ... on BettingProduct {
+        country { alpha2Code }
+        betType { code }
+        selling { status }
+        pool { total { grossAmount { decimalAmount } netAmount { decimalAmount } } }
+        legs {
+          nodes {
+            event { id name venue { name } scheduledStartDateTime { iso8601 } }
+            selections { nodes { id competitor { name details { __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } }
+          }
+        }
+        result {
+          status
+          dividends {
+            nodes {
+              dividend { amount { decimalAmount } }
+              dividendLegs { nodes { dividendSelections { nodes { id finishingPosition } } } }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+# Single product by id (same shape)
+query GetProduct($id: String!) {
+  product(id: $id) {
+    id
+    name
+    ... on BettingProduct {
+      country { alpha2Code }
+      betType { code }
+      selling { status }
+      pool { total { grossAmount { decimalAmount } netAmount { decimalAmount } } }
+      legs { nodes { event { id name venue { name } scheduledStartDateTime { iso8601 } } selections { nodes { id competitor { name details { __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } } } }
+      result { status dividends { nodes { dividend { amount { decimalAmount } } dividendLegs { nodes { dividendSelections { nodes { id finishingPosition } } } } } } }
+    }
+  }
+}
+
+# Event competitors (horse/greyhound details carry cloth/trap numbers)
+query GetEvent($id: String) {
+  event(id: $id) {
+    id
+    name
+    eventCompetitors {
+      nodes {
+        __typename
+        id
+        name
+        ... on HorseRacingEventCompetitor { clothNumber }
+        ... on GreyhoundEventCompetitor { trapNumber }
+      }
+    }
+  }
+}
+
+# Place bet (synchronous)
+mutation PlaceBets($input: PlaceBetsInput!) {
+  placeBets(input: $input) {
+    results {
+      toteBetId
+      status
+      failureReason
+    }
+  }
+}
+
+# Example variables for PlaceBets
+# {
+#   "input": {
+#     "bets": [
+#       {
+#         "bet": {
+#           "productId": "<product-id>",
+#           "stake": { "amount": { "decimalAmount": 1.0 }, "currency": "GBP" },
+#           "legs": [
+#             {
+#               "productLegId": "<leg-id>",
+#               "selections": [ { "productLegSelectionID": "<selection-id>", "position": 1 } ]
+#             }
+#           ]
+#         }
+#       }
+#     ]
+#   }
+# }
+

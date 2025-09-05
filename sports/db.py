@@ -1,23 +1,27 @@
-import os
-import sqlite3
+from __future__ import annotations
+from typing import TYPE_CHECKING
 
-def _path_from_url(url: str) -> str:
-    """Extracts the file path from a sqlite:/// URL."""
-    if url.startswith("sqlite:///"):
-        return url.replace("sqlite:///", "", 1)
-    raise ValueError("Only sqlite:/// URLs are supported in this version.")
+from .bq import get_bq_sink, BigQuerySink
 
-def connect(database_url: str) -> sqlite3.Connection:
-    """Establishes a connection to the SQLite database."""
-    path = _path_from_url(database_url)
-    # Ensure the directory for the database file exists
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    
-    # Connect to the database
-    conn = sqlite3.connect(path, check_same_thread=False)
-    
-    # Set recommended PRAGMA settings for performance and reliability
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    
-    return conn
+if TYPE_CHECKING:
+    from .bq import BigQuerySink
+
+_db: BigQuerySink | None = None
+
+def get_db() -> BigQuerySink:
+    """Returns a singleton BigQuerySink instance."""
+    global _db
+    if _db is None:
+        _db = get_bq_sink()
+        if not _db:
+            raise RuntimeError(
+                "BigQuery is not configured. Please set BQ_PROJECT and BQ_DATASET."
+            )
+    return _db
+
+def init_db():
+    """Initializes the database by ensuring all required views are created."""
+    print("Initializing BigQuery database...")
+    db = get_db()
+    db.ensure_views()
+    print("Database initialization complete.")

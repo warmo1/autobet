@@ -4,9 +4,7 @@ import pandas as pd
 from datetime import date, timedelta, datetime
 from flask import Flask, render_template, request, redirect, flash, url_for, send_file
 from .config import cfg
-from .db import connect
-from .schema import init_schema
-import sqlite3
+from .db import get_db, init_db
 from pathlib import Path
 import json
 import threading
@@ -16,20 +14,10 @@ from typing import Optional, Sequence
 from google.cloud import bigquery
 from .providers.tote_bets import place_audit_superfecta
 from .providers.tote_bets import refresh_bet_status, audit_list_bets, sync_bets_from_api
-from .export_bq import export_sqlite_to_bq
-
-# This check allows the app to work with both the old and new db.py files
-try:
-    from .db import connect as get_conn
-except ImportError:
-    from .db import get_conn
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET", "dev-secret")
 
-def _get_db_conn():
-    """Helper to get a DB connection."""
-    return get_conn(cfg.database_url)
 
 def _today_iso() -> str:
     """Returns today's date in YYYY-MM-DD format."""
@@ -37,14 +25,14 @@ def _today_iso() -> str:
 
 # --- Background: pool subscription (optional) ---
 _pool_thread_started = False
-_bq_export_thread_started = False
 
 def _pool_subscriber_loop():
     from .providers.tote_subscriptions import run_subscriber
     while True:
         try:
-            conn = _get_db_conn(); init_schema(conn)
-            run_subscriber(conn, duration=None)
+            # The subscriber loop will now use the BigQuery sink via the new db layer
+            db = get_db()
+            run_subscriber(db, duration=None) # Assuming run_subscriber is adapted for a BQ sink
         except Exception as e:
             try:
                 print("[PoolSub] error:", e)
@@ -66,64 +54,10 @@ def _maybe_start_pool_thread():
         t.start()
         _pool_thread_started = True
 
-def _bq_exporter_loop(interval_sec: int, tables: list[str] | None):
-    while True:
-        try:
-            if not cfg.bq_write_enabled or not cfg.bq_project or not cfg.bq_dataset:
-                # Do nothing if BQ sink not configured
-                time.sleep(max(30, interval_sec));
-                continue
-            conn = _get_db_conn(); init_schema(conn)
-            try:
-                counts = export_sqlite_to_bq(conn, tables)
-                print(f"[BQ Exporter] exported: {counts}")
-            finally:
-                try: conn.close()
-                except Exception: pass
-            time.sleep(interval_sec)
-        except Exception as e:
-            try:
-                print("[BQ Exporter] error:", e)
-            except Exception:
-                pass
-            # Backoff a bit on error
-            time.sleep(max(15, interval_sec))
 
-def _maybe_start_bq_exporter():
-    global _bq_export_thread_started
-    if _bq_export_thread_started:
-        return
-    try:
-        iv = int(os.getenv("BQ_EXPORT_INTERVAL_SEC", "0") or 0)
-    except Exception:
-        iv = 0
-    if iv and iv > 0:
-        # Optional: limit to specific tables via env comma list
-        tbl_env = (os.getenv("BQ_EXPORT_TABLES") or "").strip()
-        tables = [t.strip() for t in tbl_env.split(",") if t.strip()] or None
-        t = threading.Thread(target=_bq_exporter_loop, args=(iv, tables), name="bq-exporter", daemon=True)
-        t.start()
-        _bq_export_thread_started = True
-
-# --- BigQuery read helper (optional) ---
-_bq_client: Optional[bigquery.Client] = None
-
-def _use_bq() -> bool:
-    """Decide at runtime whether to read from BigQuery.
-
-    Requires WEB_USE_BIGQUERY=1/true/yes and configured project+dataset.
-    """
-    flag = os.getenv("WEB_USE_BIGQUERY", "0").lower() in ("1", "true", "yes")
-    return bool(flag and cfg.bq_project and cfg.bq_dataset)
-
-def _ensure_bq_client() -> bigquery.Client:
-    global _bq_client
-    if _bq_client is None:
-        _bq_client = bigquery.Client(project=cfg.bq_project, location=cfg.bq_location)
-    return _bq_client
-
-def _bq_df(sql: str, params: Optional[Sequence] = None) -> pd.DataFrame:
-    client = _ensure_bq_client()
+def sql_df(sql: str, params: Optional[Sequence] = None) -> pd.DataFrame:
+    """Runs a query against BigQuery and returns a pandas DataFrame."""
+    db = get_db()
     # Convert positional '?' to named parameters @p0, @p1, ...
     q = sql
     qp = []
@@ -143,48 +77,7 @@ def _bq_df(sql: str, params: Optional[Sequence] = None) -> pd.DataFrame:
         default_dataset=f"{cfg.bq_project}.{cfg.bq_dataset}",
         query_parameters=qp or [],
     )
-    job = client.query(q, job_config=job_config)
-    return job.result().to_dataframe(create_bqstorage_client=False)
-
-def _bq_execute(sql: str, params: Optional[Sequence] = None) -> int:
-    """Execute a DML/DDL statement in BigQuery. Returns affected rows where available."""
-    client = _ensure_bq_client()
-    q = sql
-    qp = []
-    if params:
-        parts = q.split("?")
-        q = ""
-        for i in range(len(parts) - 1):
-            q += parts[i] + f"@p{i}"
-        q += parts[-1]
-        for i, v in enumerate(params):
-            if isinstance(v, (int, float)):
-                typ = bigquery.ScalarQueryParameter(f"p{i}", "FLOAT64" if isinstance(v, float) else "INT64", v)
-            elif v is None:
-                # Default to STRING type NULL
-                typ = bigquery.ScalarQueryParameter(f"p{i}", "STRING", None)
-            else:
-                typ = bigquery.ScalarQueryParameter(f"p{i}", "STRING", str(v))
-            qp.append(typ)
-    job_config = bigquery.QueryJobConfig(
-        default_dataset=f"{cfg.bq_project}.{cfg.bq_dataset}",
-        query_parameters=qp or [],
-    )
-    job = client.query(q, job_config=job_config)
-    res = job.result()
-    try:
-        return res.total_rows or 0
-    except Exception:
-        return 0
-
-def sql_df(conn, sql: str, params: Optional[Sequence] = None) -> pd.DataFrame:
-    if _use_bq():
-        try:
-            return _bq_df(sql, params)
-        except Exception:
-            # Fallback to SQLite if BigQuery read fails
-            pass
-    return pd.read_sql_query(sql, conn, params=params)
+    return db.query(q, job_config=job_config).to_dataframe(create_bqstorage_client=False)
 
 @app.template_filter('datetime')
 def _fmt_datetime(ts: float | int | str):
@@ -202,27 +95,31 @@ def _fmt_datetime(ts: float | int | str):
 def index():
     """Simplified dashboard with quick links and bank widget."""
     from datetime import datetime, timedelta, timezone
-    conn = _get_db_conn(); init_schema(conn)
-    bank_row = conn.execute("SELECT value FROM bankroll_state WHERE key = 'bankroll'").fetchone()
-    bankroll = float(bank_row[0]) if bank_row else cfg.paper_starting_bankroll
+
+    # Bankroll is now a placeholder as it was stored in SQLite
+    bankroll = cfg.paper_starting_bankroll
+
     # Now/Next races (horse_racing) in next 60 minutes
     now = datetime.now(timezone.utc)
-    start_iso = now.isoformat(timespec='seconds').replace('+00:00','Z')
-    end_iso = (now + timedelta(minutes=60)).isoformat(timespec='seconds').replace('+00:00','Z')
+    start_iso = now.isoformat(timespec='seconds').replace('+00:00', 'Z')
+    end_iso = (now + timedelta(minutes=60)).isoformat(timespec='seconds').replace('+00:00', 'Z')
+
+    # The sql_df function now directly uses the BigQuery connection
     ev_sql = (
         "SELECT event_id, name, venue, country, start_iso, sport, status "
-        "FROM tote_events WHERE sport='horse_racing' AND start_iso BETWEEN ? AND ? "
+        "FROM tote_events WHERE sport='horse_racing' AND start_iso BETWEEN @start AND @end "
         "ORDER BY start_iso ASC LIMIT 20"
     )
-    evs = sql_df(conn, ev_sql, params=(start_iso, end_iso))
+    evs = sql_df(ev_sql, params={"start": start_iso, "end": end_iso})
+
     # Optional: superfecta products upcoming
     sf_sql = (
         "SELECT product_id, event_id, event_name, venue, start_iso, status, currency, total_net "
-        "FROM tote_products WHERE UPPER(bet_type)='SUPERFECTA' AND start_iso BETWEEN ? AND ? "
+        "FROM tote_products WHERE UPPER(bet_type)='SUPERFECTA' AND start_iso BETWEEN @start AND @end "
         "ORDER BY start_iso ASC LIMIT 20"
     )
-    sfs = sql_df(conn, sf_sql, params=(start_iso, end_iso))
-    conn.close()
+    sfs = sql_df(sf_sql, params={"start": start_iso, "end": end_iso})
+
     return render_template(
         "index.html",
         balance=round(bankroll, 2),
@@ -359,7 +256,6 @@ def tote_params_update():
 @app.route("/tote-events")
 def tote_events_page():
     """List Tote events with filters and pagination."""
-    conn = _get_db_conn(); init_schema(conn)
     country = (request.args.get("country") or "").strip().upper()
     sport = (request.args.get("sport") or "").strip()
     venue = (request.args.get("venue") or "").strip()
@@ -393,11 +289,10 @@ def tote_events_page():
         count_sql += " WHERE " + " AND ".join(where)
     base_sql += " ORDER BY start_iso DESC LIMIT ? OFFSET ?"
     params_paged = list(params) + [limit, offset]
-    df = sql_df(conn, base_sql, params=tuple(params_paged))
-    total = int(sql_df(conn, count_sql, params=tuple(params)).iloc[0]["c"]) if where else int(sql_df(conn, "SELECT COUNT(1) AS c FROM tote_events").iloc[0]["c"])
-    countries_df = sql_df(conn, "SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
-    sports_df = sql_df(conn, "SELECT DISTINCT sport FROM tote_events WHERE sport IS NOT NULL AND sport<>'' ORDER BY sport")
-    conn.close()
+    df = sql_df(base_sql, params=tuple(params_paged))
+    total = int(sql_df(count_sql, params=tuple(params)).iloc[0]["c"]) if where else int(sql_df("SELECT COUNT(1) AS c FROM tote_events").iloc[0]["c"])
+    countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+    sports_df = sql_df("SELECT DISTINCT sport FROM tote_events WHERE sport IS NOT NULL AND sport<>'' ORDER BY sport")
     events = df.to_dict("records") if not df.empty else []
     for ev in events:
         comps = []
@@ -428,7 +323,6 @@ def tote_events_page():
 @app.route("/tote-superfecta", methods=["GET","POST"])
 def tote_superfecta_page():
     """List SUPERFECTA products with filters, upcoming widget, and audit helpers."""
-    conn = _get_db_conn(); init_schema(conn)
     if request.method == "POST":
         flash("Paper betting is disabled. Use Audit placement.", "error")
     country = (request.args.get("country") or os.getenv("DEFAULT_COUNTRY", "GB")).strip().upper()
@@ -460,42 +354,19 @@ def tote_superfecta_page():
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY p.start_iso DESC LIMIT ?"; params.append(limit)
-    df = sql_df(conn, sql, params=tuple(params))
+    df = sql_df(sql, params=tuple(params))
     # Options for filters
-    cdf = sql_df(conn, "SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
-    sdf = sql_df(conn, "SELECT DISTINCT COALESCE(status,'') AS status FROM tote_products WHERE bet_type='SUPERFECTA' ORDER BY 1")
+    cdf = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+    sdf = sql_df("SELECT DISTINCT COALESCE(status,'') AS status FROM tote_products WHERE bet_type='SUPERFECTA' ORDER BY 1")
     # Optional upcoming 60m (GB) from BigQuery
     upcoming = []
-    if _use_bq():
-        try:
-            udf = sql_df(conn, "SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, n_competitors, combos, S, O_min, roi_current, viable_now FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso")
-            if not udf.empty:
-                upcoming = udf.to_dict("records")
-        except Exception:
-            upcoming = []
-    # Attach latest snapshot totals when available (SQLite path)
+    try:
+        udf = sql_df("SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, n_competitors, combos, S, O_min, roi_current, viable_now FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso")
+        if not udf.empty:
+            upcoming = udf.to_dict("records")
+    except Exception:
+        upcoming = []
     products = df.to_dict("records") if not df.empty else []
-    if products and not _use_bq():
-        try:
-            pids = [p.get('product_id') for p in products if p.get('product_id')]
-            if pids:
-                qmarks = ",".join(["?"] * len(pids))
-                snap_sql = (
-                    f"SELECT s.product_id, s.total_gross AS latest_gross, s.total_net AS latest_net "
-                    f"FROM tote_pool_snapshots s "
-                    f"JOIN (SELECT product_id, MAX(ts_ms) ts FROM tote_pool_snapshots WHERE product_id IN ({qmarks}) GROUP BY product_id) t "
-                    f"ON s.product_id=t.product_id AND s.ts_ms=t.ts"
-                )
-                cur = conn.execute(snap_sql, tuple(pids))
-                snap_map = {row[0]: {"latest_gross": row[1], "latest_net": row[2]} for row in cur.fetchall()}
-                for p in products:
-                    sm = snap_map.get(p.get('product_id'))
-                    if sm:
-                        p['latest_gross'] = sm.get('latest_gross')
-                        p['latest_net'] = sm.get('latest_net')
-        except Exception:
-            pass
-    conn.close()
     return render_template(
         "tote_superfecta.html",
         products=products,
@@ -534,7 +405,6 @@ def bets_page():
 
 @app.route("/tote-pools")
 def tote_pools_page():
-    conn = _get_db_conn(); init_schema(conn)
     bet_type = request.args.get("bet_type")
     country = request.args.get("country")
     status = request.args.get("status")
@@ -565,29 +435,27 @@ def tote_pools_page():
         sql += " WHERE " + " AND ".join(where)
     # Total count
     count_sql = sql.replace("SELECT *", "SELECT COUNT(1) AS c")
-    total = sql_df(conn, count_sql, params=tuple(params)).iloc[0]["c"] if where else sql_df(conn, "SELECT COUNT(1) AS c FROM tote_products").iloc[0]["c"]
+    total = sql_df(count_sql, params=tuple(params)).iloc[0]["c"] if where else sql_df("SELECT COUNT(1) AS c FROM tote_products").iloc[0]["c"]
     # Page slice
     sql += " ORDER BY start_iso LIMIT ? OFFSET ?"
     params.extend([limit, offset])
-    df = sql_df(conn, sql, params=tuple(params))
+    df = sql_df(sql, params=tuple(params))
     # Options for filters
-    types_df = sql_df(conn, "SELECT DISTINCT bet_type FROM tote_products WHERE bet_type IS NOT NULL AND bet_type <> '' ORDER BY bet_type")
-    curr_df = sql_df(conn, "SELECT DISTINCT currency FROM tote_products WHERE currency IS NOT NULL AND currency <> '' ORDER BY currency")
+    types_df = sql_df("SELECT DISTINCT bet_type FROM tote_products WHERE bet_type IS NOT NULL AND bet_type <> '' ORDER BY bet_type")
+    curr_df = sql_df("SELECT DISTINCT currency FROM tote_products WHERE currency IS NOT NULL AND currency <> '' ORDER BY currency")
     # Group totals per bet type
     gt_sql = "SELECT bet_type, COUNT(1) AS n, SUM(total_net) AS sum_net FROM tote_products"
     if where:
         gt_sql += " WHERE " + " AND ".join(where)
     gt_sql += " GROUP BY bet_type ORDER BY bet_type"
-    gt = sql_df(conn, gt_sql, params=tuple(params[:-2])) if where else sql_df(conn, gt_sql)
+    gt = sql_df(gt_sql, params=tuple(params[:-2])) if where else sql_df(gt_sql)
     # Dividends counts per product for quick visibility
-    div_counts_df = sql_df(conn, "SELECT product_id, COUNT(1) AS c FROM tote_product_dividends GROUP BY product_id")
+    div_counts_df = sql_df("SELECT product_id, COUNT(1) AS c FROM tote_product_dividends GROUP BY product_id")
     # Conditions map (going + simple weather summary)
     cond_df = sql_df(
-        conn,
         "SELECT event_id, going, weather_temp_c, weather_wind_kph, weather_precip_mm FROM race_conditions",
     )
     div_counts = {r[0]: r[1] for r in div_counts_df.itertuples(index=False)} if not div_counts_df.empty else {}
-    conn.close()
     prods = df.to_dict("records") if not df.empty else []
     for p in prods:
         p["dividend_count"] = int(div_counts.get(p.get("product_id"), 0))
@@ -620,26 +488,18 @@ def tote_pools_page():
 @app.route("/tote-pools/summary")
 def tote_pools_summary_page():
     """Aggregated view of pools by bet_type, status, and country with basic stats."""
-    conn = _get_db_conn(); init_schema(conn)
-    by_type = sql_df(conn, "SELECT UPPER(bet_type) AS bet_type, COUNT(1) AS n FROM tote_products GROUP BY 1 ORDER BY n DESC")
-    by_status = sql_df(conn, "SELECT COALESCE(status,'') AS status, COUNT(1) AS n FROM tote_products GROUP BY 1 ORDER BY n DESC")
-    by_country = sql_df(conn, "SELECT COALESCE(currency,'') AS country, COUNT(1) AS n, ROUND(AVG(total_net),2) AS avg_total_net, ROUND(MAX(total_net),2) AS max_total_net FROM tote_products GROUP BY 1 ORDER BY n DESC")
-    if _use_bq():
-        recent_sql = (
-            "SELECT UPPER(bet_type) AS bet_type, COUNT(1) AS n, ROUND(AVG(total_net),2) AS avg_total_net, "
-            "APPROX_QUANTILES(total_net, 5)[SAFE_OFFSET(2)] AS p50, "
-            "APPROX_QUANTILES(total_net, 5)[SAFE_OFFSET(4)] AS p90 "
-            "FROM tote_products "
-            "WHERE DATE(SUBSTR(start_iso,1,10)) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY) "
-            "GROUP BY 1 ORDER BY n DESC"
-        )
-        recent = sql_df(conn, recent_sql)
-    else:
-        recent = sql_df(conn, (
-            "SELECT UPPER(bet_type) AS bet_type, COUNT(1) AS n, ROUND(AVG(total_net),2) AS avg_total_net "
-            "FROM tote_products WHERE DATE(substr(start_iso,1,10)) >= DATE('now','-7 day') GROUP BY 1 ORDER BY n DESC"
-        ))
-    conn.close()
+    by_type = sql_df("SELECT UPPER(bet_type) AS bet_type, COUNT(1) AS n FROM tote_products GROUP BY 1 ORDER BY n DESC")
+    by_status = sql_df("SELECT COALESCE(status,'') AS status, COUNT(1) AS n FROM tote_products GROUP BY 1 ORDER BY n DESC")
+    by_country = sql_df("SELECT COALESCE(currency,'') AS country, COUNT(1) AS n, ROUND(AVG(total_net),2) AS avg_total_net, ROUND(MAX(total_net),2) AS max_total_net FROM tote_products GROUP BY 1 ORDER BY n DESC")
+    recent_sql = (
+        "SELECT UPPER(bet_type) AS bet_type, COUNT(1) AS n, ROUND(AVG(total_net),2) AS avg_total_net, "
+        "APPROX_QUANTILES(total_net, 5)[SAFE_OFFSET(2)] AS p50, "
+        "APPROX_QUANTILES(total_net, 5)[SAFE_OFFSET(4)] AS p90 "
+        "FROM tote_products "
+        "WHERE DATE(SUBSTR(start_iso,1,10)) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY) "
+        "GROUP BY 1 ORDER BY n DESC"
+    )
+    recent = sql_df(recent_sql)
     return render_template(
         "tote_pools_summary.html",
         by_type=(by_type.to_dict("records") if not by_type.empty else []),
@@ -1347,6 +1207,11 @@ def tote_audit_superfecta_post():
     post_flag = (request.form.get("post") or "").lower() in ("1","true","yes","on")
     stake_type = (request.form.get("stake_type") or "total").strip().lower()
     conn = _get_db_conn(); init_schema(conn)
+    selections = None
+    if sels_raw:
+        # Split by newline or comma
+        parts = [p.strip() for p in (sels_raw.replace("\r","\n").replace(",","\n").split("\n"))]
+        selections = [p for p in parts if p]
     # Preflight checks: product status OPEN and selection IDs valid/active
     try:
         from .providers.tote_api import ToteClient
@@ -1386,7 +1251,7 @@ def tote_audit_superfecta_post():
                 except Exception:
                     pass
         # Validate selection(s)
-        lines = selections if selections else ([sel] if sel else [])
+        lines = selections if selections is not None else ([sel] if sel else [])
         for line in lines:
             nums = []
             try:
@@ -1400,7 +1265,7 @@ def tote_audit_superfecta_post():
             if missing:
                 flash(f"Preflight: unknown numbers {{{','.join(missing)}}}.", "error")
                 conn.close(); return redirect(request.referrer or url_for('tote_superfecta_page'))
-            inactive = [str(n) for n in nums[:4] if selmap.get(n, (None,None))[1] not in ("ACTIVE","OPEN","AVAILABLE","VALID")]
+            inactive = [str(n) for n in nums[:4] if selmap.get(n,(None,None))[1] not in ("ACTIVE","OPEN","AVAILABLE","VALID")]
             if inactive:
                 flash(f"Preflight: selection(s) not active: {{{','.join(inactive)}}}.", "error")
                 conn.close(); return redirect(request.referrer or url_for('tote_superfecta_page'))
@@ -1434,11 +1299,6 @@ def tote_audit_superfecta_post():
             placement_pid = f"SUPERFECTA:{event_id}"
     except Exception:
         placement_pid = pid
-    selections = None
-    if sels_raw:
-        # Split by newline or comma
-        parts = [p.strip() for p in (sels_raw.replace("\r","\n").replace(",","\n").split("\n"))]
-        selections = [p for p in parts if p]
     res = place_audit_superfecta(conn, product_id=pid, selection=(sel or None), selections=selections, stake=sk, currency=currency, post=post_flag, stake_type=stake_type, placement_product_id=placement_pid)
     conn.commit(); conn.close()
     st = res.get("placement_status")

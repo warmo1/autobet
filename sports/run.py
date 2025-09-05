@@ -1,6 +1,7 @@
 import os
 import argparse
 import subprocess
+import json
 from dotenv import load_dotenv
 from sports.db import connect
 from sports.schema import init_schema
@@ -303,6 +304,8 @@ def main(argv=None):
         conn.close()
         print(f"[Export] Wrote {n} rows to {args.out}")
     sp_export.set_defaults(func=_cmd_export)
+
+    # (Football CSV ingest intentionally omitted for Tote-only pipeline)
 
     # --- Features build ---
     sp_feat = sub.add_parser("build-features", help="Build runner-level features for a date range")

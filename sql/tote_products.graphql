@@ -1,0 +1,35 @@
+# Example Tote GraphQL: products by date + status
+# Adjust field names/types to match your Tote provider schema.
+
+query ProductsByDateStatus($date: String!, $status: String!, $first: Int!, $after: String, $betTypes: [String!]) {
+  products(date: $date, status: $status, first: $first, after: $after, betTypes: $betTypes) {
+    edges {
+      cursor
+      node {
+        id
+        betType
+        status
+        currency
+        totalGross
+        totalNet
+        event {
+          id
+          name
+          venue
+          country
+          start
+        }
+        selections {
+          legIndex
+          selection {
+            id
+            number
+            name
+          }
+        }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+

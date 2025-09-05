@@ -1,0 +1,866 @@
+schema {
+  query: Query
+  mutation: Mutation
+}
+
+interface CompetitorDetails @source(name: "CompetitorDetails", schema: "event") {
+  id: ID
+}
+
+interface EventCompetitor @source(name: "EventCompetitor", schema: "event") {
+  id: ID
+  name: String
+  entryStatus: EntryStatus!
+}
+
+interface Product @source(name: "Product", schema: "product") {
+  id: ID
+  name: String
+  type: ProductType
+}
+
+interface ProductType @source(name: "ProductType", schema: "product") {
+  id: ID
+  name: String
+}
+
+type AuditBetResultGraphQL @source(name: "AuditBetResultGraphQL", schema: "bet") {
+  toteBetId: String!
+  status: AuditBetResultStatus!
+  failureReason: String
+}
+
+type AuditBetResultsGraphQL @source(name: "AuditBetResultsGraphQL", schema: "bet") {
+  results: [AuditBetResultGraphQL!]!
+}
+
+type Bet @source(name: "Bet", schema: "bet_placement") @source(name: "Bet", schema: "bet") {
+  id: ID
+  toteId: ID
+  ticket: Ticket
+  placement: BetPlacement
+  resulting: BetResulting
+  settlement: BetSettlement
+  betType: BetType
+  createDateTime: DateTimeWrapper
+}
+
+type BetPlacement @source(name: "BetPlacement", schema: "bet_placement") @source(name: "BetPlacement", schema: "bet") {
+  status: BetPlacementStatus!
+  stake: Money
+  rejectionReason: String
+  "The product id the bet is placed on"
+  productId: String
+  legs: [BetPlacementLeg]
+  product: Product @delegate(schema: "product", path: "product(id: $fields:productId)")
+}
+
+type BetPlacementLeg @source(name: "BetPlacementLeg", schema: "bet_placement") @source(name: "BetPlacementLeg", schema: "bet") {
+  "Unique ID of the leg from the product, which is used for bet placement"
+  productLegId: String
+  "Details selections for this bet"
+  selections: [BetPlacementLegSelection]
+  productLeg: BettingProductLeg @delegate(schema: "product", path: "leg(id: $fields:productLegId)")
+}
+
+type BetPlacementLegSelection @source(name: "BetPlacementLegSelection", schema: "bet_placement") @source(name: "BetPlacementLegSelection", schema: "bet") {
+  "Unique Id of the selection from the product, which is used for bet placement"
+  productLegSelectionID: String
+  "Optional for some products - the position of the selection"
+  position: Int
+  productLegSelection: BettingProductLegSelection @delegate(schema: "product", path: "selection(id: $fields:productLegSelectionID)")
+}
+
+type BetResulting @source(name: "BetResulting", schema: "bet_placement") @source(name: "BetResulting", schema: "bet") {
+  status: BettingResultingStatus!
+  returns: BetReturns
+}
+
+type BetReturns @source(name: "BetReturns", schema: "bet_placement") @source(name: "BetReturns", schema: "bet") {
+  totalAmount: Money
+  returnAmount: Money
+  refundAmount: Money
+  enhancementAmount: Money
+}
+
+type BetRule @source(name: "BetRule", schema: "product") {
+  min: Money
+  max: Money
+}
+
+type BetSettlement @source(name: "BetSettlement", schema: "bet_placement") @source(name: "BetSettlement", schema: "bet") {
+  status: BetSettlementStatus!
+}
+
+type BetType @source(name: "BetType", schema: "bet_placement") @source(name: "BetType", schema: "bet") {
+  id: ID
+  code: BetTypeCode!
+}
+
+type BetTypeRule @source(name: "BetTypeRule", schema: "product") {
+  bet: BetRule
+  line: LineRule
+  placePositions: Int
+}
+
+type BetTypeWithRulesGraphQl @source(name: "BetTypeWithRulesGraphQl", schema: "product") {
+  rules: BetTypeRule
+  id: ID
+  code: BetTypeCode!
+}
+
+"A connection to a list of items."
+type BetsConnection @source(name: "BetsConnection", schema: "bet_placement") @source(name: "BetsConnection", schema: "bet") {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [BetsEdge!]
+  "A flattened list of the nodes."
+  nodes: [Bet]
+  "Identifies the total count of items in the connection."
+  totalCount: Int!
+  totalStakes: [Money]
+  totalReturns: [Money]
+  totalRefunds: [Money]
+}
+
+"An edge in a connection."
+type BetsEdge @source(name: "BetsEdge", schema: "bet_placement") @source(name: "BetsEdge", schema: "bet") {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: Bet
+}
+
+type BettingProduct implements ProductType & Product @source(name: "BettingProduct", schema: "product") {
+  betType: BetTypeWithRulesGraphQl
+  selling: BettingProductSelling
+  legs: LegsConnection
+  lines: LinesConnection
+  lineHistory: String
+  pool: BettingProductPool
+  result: BettingProductResult
+  supportedCurrencies: [CurrencyCode!]
+  country: Country
+  id: ID
+  name: String
+  type: ProductType
+}
+
+type BettingProductLeg @source(name: "BettingProductLeg", schema: "product") {
+  id: String
+  eventId: String @deprecated(reason: "Use Event instead of EventId")
+  resulting: BettingProductLegResulting
+  selections: SelectionsConnection
+  event: Event @delegate(schema: "event", path: "event(id: $fields:eventId)")
+}
+
+type BettingProductLegResulting @source(name: "BettingProductLegResulting", schema: "product") {
+  status: BettingProductLegResultStatus!
+}
+
+type BettingProductLegSelection @source(name: "BettingProductLegSelection", schema: "product") {
+  id: String
+  name: String
+  eventCompetitorId: String @deprecated(reason: "Use Competitor instead of EventCompetitorId")
+  bettingSelectionId: String
+  status: BettingProductLegSelectionStatus!
+  "The total number of units on this selection"
+  totalUnits: Decimal!
+  eventCompetitor: EventCompetitor @delegate(schema: "event", path: "eventCompetitor(id: $fields:eventCompetitorId)") @deprecated(reason: "Use `competitor` instead.")
+  competitor: Competitor @delegate(schema: "event", path: "competitor(id: $fields:eventCompetitorId)")
+}
+
+type BettingProductLine @source(name: "BettingProductLine", schema: "product") {
+  id: String
+  legs: [BettingProductLineLeg]
+  odds: [BettingProductOdds]
+}
+
+type BettingProductLineLeg @source(name: "BettingProductLineLeg", schema: "product") {
+  legId: String
+  lineSelections: [BettingProductLineSelection]
+}
+
+type BettingProductLineSelection @source(name: "BettingProductLineSelection", schema: "product") {
+  selectionId: String
+  finishingPosition: String
+}
+
+type BettingProductOdds @source(name: "BettingProductOdds", schema: "product") {
+  name: String
+  decimal: Decimal!
+  status: BettingProductOddsStatus!
+  type: BettingProductOddsType!
+}
+
+type BettingProductPool @source(name: "BettingProductPool", schema: "product") {
+  total: BettingProductPoolTotal
+  takeout: BettingProductPoolTakeout
+  guarantee: BettingProductPoolGuarantee
+  carryIn: BettingProductPoolCarryIn
+  funds: [BettingProductPoolFund]
+}
+
+type BettingProductPoolCarryIn @source(name: "BettingProductPoolCarryIn", schema: "product") {
+  grossAmount: Money
+  netAmount: Money
+}
+
+type BettingProductPoolFund @source(name: "BettingProductPoolFund", schema: "product") {
+  percentage: Decimal!
+  total: BettingProductPoolFundTotal
+  carryIn: BettingProductPoolFundCarryIn
+  poolFundType: BettingProductPoolFundType!
+}
+
+type BettingProductPoolFundCarryIn @source(name: "BettingProductPoolFundCarryIn", schema: "product") {
+  grossAmount: Money
+  netAmount: Money
+}
+
+type BettingProductPoolFundTotal @source(name: "BettingProductPoolFundTotal", schema: "product") {
+  grossAmount: Money
+  netAmount: Money
+}
+
+type BettingProductPoolGuarantee @source(name: "BettingProductPoolGuarantee", schema: "product") {
+  grossAmount: Money
+  netAmount: Money
+  topUpGrossAmount: Money
+  topUpNetAmount: Money
+}
+
+type BettingProductPoolTakeout @source(name: "BettingProductPoolTakeout", schema: "product") {
+  percentage: Decimal!
+  amount: Money
+}
+
+type BettingProductPoolTotal @source(name: "BettingProductPoolTotal", schema: "product") {
+  grossAmount: Money
+  netAmount: Money
+}
+
+type BettingProductResult @source(name: "BettingProductResult", schema: "product") {
+  status: BettingProductResultStatus!
+  dividends("Returns the first _n_ elements from the list." first: Int "Returns the elements in the list that come after the specified cursor." after: String "Returns the last _n_ elements from the list." last: Int "Returns the elements in the list that come before the specified cursor." before: String): DividendsConnection
+}
+
+type BettingProductSelling @source(name: "BettingProductSelling", schema: "product") {
+  status: BettingProductSellingStatus!
+}
+
+type Competitor @source(name: "Competitor", schema: "event") {
+  id: ID
+  name: String
+  entryStatus: EntryStatus!
+  details: CompetitorDetails
+}
+
+type CompetitorsConnection @source(name: "CompetitorsConnection", schema: "event") {
+  nodes: [EventCompetitor]
+  edges: [EdgeOfEventCompetitor]! @deprecated(reason: "Paging capabilities have been removed. Please use Nodes to return all items in the collection.")
+  pageInfo: PageInfo! @deprecated(reason: "Paging capabilities have been removed.")
+}
+
+type Country @source(name: "Country", schema: "event") @source(name: "Country", schema: "product") {
+  name: String
+  alpha2Code: String
+  alpha3Code: String
+  numericCode: String
+}
+
+type CreditLimit @source(name: "CreditLimit", schema: "customer") {
+  lastResetDate: DateTime!
+  nextResetDate: DateTime!
+  creditLimits: [Money]
+}
+
+type Currency @source(name: "Currency", schema: "customer") @source(name: "Currency", schema: "bet_placement") @source(name: "Currency", schema: "bet") @source(name: "Currency", schema: "product") {
+  code: CurrencyCode!
+  name: String
+  number: Int!
+  symbol: String
+}
+
+type Customer @source(name: "Customer", schema: "customer") {
+  id: ID
+  wallet: Wallet
+  creditLimit: CreditLimit
+  stakeLimit: StakeLimit
+}
+
+type DateTimeWrapper @source(name: "DateTimeWrapper", schema: "event") @source(name: "DateTimeWrapper", schema: "bet_placement") @source(name: "DateTimeWrapper", schema: "bet") {
+  iso8601: String
+}
+
+type Dividend @source(name: "Dividend", schema: "product") {
+  name: String
+  type: DividendType!
+  status: DividendStatus!
+  amount: Money
+}
+
+type DividendLeg @source(name: "DividendLeg", schema: "product") {
+  id: String
+  dividendSelections("Returns the first _n_ elements from the list." first: Int "Returns the elements in the list that come after the specified cursor." after: String "Returns the last _n_ elements from the list." last: Int "Returns the elements in the list that come before the specified cursor." before: String): DividendSelectionsConnection
+}
+
+type DividendLegSelection @source(name: "DividendLegSelection", schema: "product") {
+  id: String
+  finishingPosition: String
+}
+
+"A connection to a list of items."
+type DividendLegsConnection @source(name: "DividendLegsConnection", schema: "product") {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [DividendLegsEdge!]
+  "A flattened list of the nodes."
+  nodes: [DividendLeg]
+}
+
+"An edge in a connection."
+type DividendLegsEdge @source(name: "DividendLegsEdge", schema: "product") {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: DividendLeg
+}
+
+type DividendLine @source(name: "DividendLine", schema: "product") {
+  dividend: Dividend
+  dividendLegs("Returns the first _n_ elements from the list." first: Int "Returns the elements in the list that come after the specified cursor." after: String "Returns the last _n_ elements from the list." last: Int "Returns the elements in the list that come before the specified cursor." before: String): DividendLegsConnection
+}
+
+"A connection to a list of items."
+type DividendSelectionsConnection @source(name: "DividendSelectionsConnection", schema: "product") {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [DividendSelectionsEdge!]
+  "A flattened list of the nodes."
+  nodes: [DividendLegSelection]
+}
+
+"An edge in a connection."
+type DividendSelectionsEdge @source(name: "DividendSelectionsEdge", schema: "product") {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: DividendLegSelection
+}
+
+"A connection to a list of items."
+type DividendsConnection @source(name: "DividendsConnection", schema: "product") {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [DividendsEdge!]
+  "A flattened list of the nodes."
+  nodes: [DividendLine]
+}
+
+"An edge in a connection."
+type DividendsEdge @source(name: "DividendsEdge", schema: "product") {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: DividendLine
+}
+
+type Echo @source(name: "Echo", schema: "bet_placement") {
+  success: Boolean!
+}
+
+type EdgeOfBettingProductLeg @source(name: "EdgeOfBettingProductLeg", schema: "product") {
+  node: BettingProductLeg!
+  cursor: String!
+}
+
+type EdgeOfBettingProductLegSelection @source(name: "EdgeOfBettingProductLegSelection", schema: "product") {
+  node: BettingProductLegSelection!
+  cursor: String!
+}
+
+type EdgeOfBettingProductLine @source(name: "EdgeOfBettingProductLine", schema: "product") {
+  node: BettingProductLine!
+  cursor: String!
+}
+
+type EdgeOfCompetitorGraphQL @source(name: "EdgeOfCompetitorGraphQL", schema: "event") {
+  node: Competitor!
+  cursor: String!
+}
+
+type EdgeOfEventCompetitor @source(name: "EdgeOfEventCompetitor", schema: "event") {
+  node: EventCompetitor!
+  cursor: String!
+}
+
+type Event @source(name: "Event", schema: "event") {
+  id: ID
+  name: String
+  scheduledStartDateTime: DateTimeWrapper
+  status: EventStatus!
+  venue: Venue
+  competitors: CompetitorsConnection @deprecated(reason: "Use EventCompetitors instead of Competitors")
+  eventCompetitors: EventCompetitorsConnection
+  result: EventResult
+}
+
+type EventCompetitorResult @source(name: "EventCompetitorResult", schema: "event") {
+  id: ID
+  name: String
+  finishingPosition: String
+  status: ResultStatus!
+}
+
+type EventCompetitorsConnection @source(name: "EventCompetitorsConnection", schema: "event") {
+  nodes: [Competitor]
+  edges: [EdgeOfCompetitorGraphQL]! @deprecated(reason: "Paging capabilities have been removed. Please use Nodes to return all items in the collection.")
+  pageInfo: PageInfo! @deprecated(reason: "Paging capabilities have been removed.")
+}
+
+type EventResult @source(name: "EventResult", schema: "event") {
+  status: ResultStatus!
+  results("Returns the first _n_ elements from the list." first: Int "Returns the elements in the list that come after the specified cursor." after: String "Returns the last _n_ elements from the list." last: Int "Returns the elements in the list that come before the specified cursor." before: String): ResultsConnection
+}
+
+"A connection to a list of items."
+type EventsConnection @source(name: "EventsConnection", schema: "event") {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [EventsEdge!]
+  "A flattened list of the nodes."
+  nodes: [Event]
+}
+
+"An edge in a connection."
+type EventsEdge @source(name: "EventsEdge", schema: "event") {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: Event
+}
+
+type GreyhoundDetails implements CompetitorDetails @source(name: "GreyhoundDetails", schema: "event") {
+  id: ID
+  trapNumber: Int!
+}
+
+type GreyhoundEventCompetitor implements EventCompetitor @source(name: "GreyhoundEventCompetitor", schema: "event") {
+  trapNumber: Int!
+  id: ID
+  name: String
+  entryStatus: EntryStatus!
+}
+
+type HorseDetails implements CompetitorDetails @source(name: "HorseDetails", schema: "event") {
+  id: ID
+  clothNumber: Int!
+}
+
+type HorseRacingEventCompetitor implements EventCompetitor @source(name: "HorseRacingEventCompetitor", schema: "event") {
+  clothNumber: Int!
+  id: ID
+  name: String
+  entryStatus: EntryStatus!
+}
+
+type LegsConnection @source(name: "LegsConnection", schema: "product") {
+  nodes: [BettingProductLeg]
+  edges: [EdgeOfBettingProductLeg]! @deprecated(reason: "Paging capabilities have been removed. Please use Nodes to return all items in the collection.")
+  pageInfo: PageInfo! @deprecated(reason: "Paging capabilities have been removed.")
+}
+
+type LineRule @source(name: "LineRule", schema: "product") {
+  min: Money
+  max: Money
+  increment: Money
+}
+
+type LinesConnection @source(name: "LinesConnection", schema: "product") {
+  nodes: [BettingProductLine]
+  edges: [EdgeOfBettingProductLine]! @deprecated(reason: "Paging capabilities have been removed. Please use Nodes to return all items in the collection.")
+  pageInfo: PageInfo! @deprecated(reason: "Paging capabilities have been removed.")
+}
+
+type Money @source(name: "Money", schema: "customer") @source(name: "Money", schema: "bet_placement") @source(name: "Money", schema: "bet") @source(name: "Money", schema: "product") {
+  currency: Currency
+  decimalAmount: Decimal!
+  stringAmount: String
+  minorUnitsTotalAmount: Int!
+}
+
+type Mutation {
+  "Placing bets on all products"
+  placeBets(input: PlaceBetsInput!): PlaceBetsPayload! @delegate(schema: "bet_placement")
+  "Placing bets asynchronously on all products"
+  placeBetsAsync(input: PlaceBetsAsyncInput!): PlaceBetsAsyncPayload! @delegate(schema: "bet_placement")
+  "Submits the result of a bet placed through the audit gateway"
+  auditBetResult(betResults: [AuditBetInput!]!): AuditBetResultsGraphQL! @delegate(schema: "bet")
+}
+
+"Information about pagination in a connection."
+type PageInfo @source(name: "PageInfo", schema: "event") @source(name: "PageInfo", schema: "bet_placement") @source(name: "PageInfo", schema: "bet") @source(name: "PageInfo", schema: "product") {
+  "Indicates whether more edges exist following the set defined by the clients arguments."
+  hasNextPage: Boolean!
+  "Indicates whether more edges exist prior the set defined by the clients arguments."
+  hasPreviousPage: Boolean!
+  "When paginating backwards, the cursor to continue."
+  startCursor: String
+  "When paginating forwards, the cursor to continue."
+  endCursor: String
+}
+
+type PlaceBetsAsyncPayload @source(name: "PlaceBetsAsyncPayload", schema: "bet_placement") {
+  ticket: Ticket
+  query: Query!
+}
+
+type PlaceBetsPayload @source(name: "PlaceBetsPayload", schema: "bet_placement") {
+  ticket: Ticket
+  query: Query!
+}
+
+"A connection to a list of items."
+type ProductsConnection @source(name: "ProductsConnection", schema: "product") {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [ProductsEdge!]
+  "A flattened list of the nodes."
+  nodes: [Product]
+}
+
+"An edge in a connection."
+type ProductsEdge @source(name: "ProductsEdge", schema: "product") {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: Product
+}
+
+type Query {
+  customer(customerId: ID): Customer @delegate(schema: "customer")
+  events(id: String since: DateTime until: DateTime venue: String country: String "Returns the first _n_ elements from the list." first: Int "Returns the elements in the list that come after the specified cursor." after: String "Returns the last _n_ elements from the list." last: Int "Returns the elements in the list that come before the specified cursor." before: String): EventsConnection @delegate(schema: "event")
+  event(id: String): Event @delegate(schema: "event")
+  competitor(id: String): Competitor @delegate(schema: "event")
+  eventCompetitor(id: String): EventCompetitor @delegate(schema: "event")
+  "Echo check the service is working ok"
+  echo: Echo @delegate(schema: "bet_placement")
+  bets(id: ID ids: [ID] toteId: ID toteIds: [ID] productId: ID productIds: [ID] customerId: ID since: DateTime until: DateTime betType: BetTypeCode betTypes: [BetTypeCode!] countryCode: String countryCodes: [String] venue: String venues: [String] "Returns the first _n_ elements from the list." first: Int "Returns the elements in the list that come after the specified cursor." after: String "Returns the last _n_ elements from the list." last: Int "Returns the elements in the list that come before the specified cursor." before: String): BetsConnection @delegate(schema: "bet")
+  tickets(id: ID toteId: ID customerId: ID since: DateTime until: DateTime "Returns the first _n_ elements from the list." first: Int "Returns the elements in the list that come after the specified cursor." after: String "Returns the last _n_ elements from the list." last: Int "Returns the elements in the list that come before the specified cursor." before: String): TicketsConnection @delegate(schema: "bet")
+  products(id: String date: Date betType: BetTypeCode betTypes: [BetTypeCode!] countryCode: String countryCodes: [String] venue: String venues: [String] sellingStatus: BettingProductSellingStatus currencyCode: CurrencyCode "Returns the first _n_ elements from the list." first: Int "Returns the elements in the list that come after the specified cursor." after: String "Returns the last _n_ elements from the list." last: Int "Returns the elements in the list that come before the specified cursor." before: String): ProductsConnection @delegate(schema: "product")
+  lines(query: PositionLinesQueryGraphQLInput): Product @delegate(schema: "product")
+  product(id: String): Product @delegate(schema: "product")
+  leg(id: String): BettingProductLeg @delegate(schema: "product")
+  selection(id: String): BettingProductLegSelection @delegate(schema: "product")
+}
+
+"A connection to a list of items."
+type ResultsConnection @source(name: "ResultsConnection", schema: "event") {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [ResultsEdge!]
+  "A flattened list of the nodes."
+  nodes: [EventCompetitorResult]
+}
+
+"An edge in a connection."
+type ResultsEdge @source(name: "ResultsEdge", schema: "event") {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: EventCompetitorResult
+}
+
+type SelectionsConnection @source(name: "SelectionsConnection", schema: "product") {
+  nodes: [BettingProductLegSelection]
+  edges: [EdgeOfBettingProductLegSelection]! @deprecated(reason: "Paging capabilities have been removed. Please use Nodes to return all items in the collection.")
+  pageInfo: PageInfo! @deprecated(reason: "Paging capabilities have been removed.")
+}
+
+type StakeLimit @source(name: "StakeLimit", schema: "customer") {
+  limits: [Money]
+}
+
+type Ticket @source(name: "Ticket", schema: "bet_placement") @source(name: "Ticket", schema: "bet") {
+  bets("Returns the first _n_ elements from the list." first: Int "Returns the elements in the list that come after the specified cursor." after: String "Returns the last _n_ elements from the list." last: Int "Returns the elements in the list that come before the specified cursor." before: String): BetsConnection
+  id: ID
+  toteId: ID
+  "A value indicating whether the ticket has been processed on a previous request"
+  idempotent: Boolean!
+}
+
+"A connection to a list of items."
+type TicketsConnection @source(name: "TicketsConnection", schema: "bet") {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [TicketsEdge!]
+  "A flattened list of the nodes."
+  nodes: [Ticket]
+}
+
+"An edge in a connection."
+type TicketsEdge @source(name: "TicketsEdge", schema: "bet") {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: Ticket
+}
+
+type Venue @source(name: "Venue", schema: "event") {
+  id: ID
+  name: String
+  country: Country
+}
+
+type Wallet @source(name: "Wallet", schema: "customer") {
+  balances: [Money]
+}
+
+input AuditBetInput @source(name: "AuditBetInput", schema: "bet") {
+  "Unique identifier for a bet from a tote perspective"
+  toteBetId: ID!
+  "Details of the resulting status"
+  resultingStatus: AuditBettingResultingStatus!
+  "Details of the return"
+  return: AuditMoneyInput!
+  "Details of the refund"
+  refund: AuditMoneyInput!
+}
+
+input AuditMoneyInput @source(name: "AuditMoneyInput", schema: "bet") {
+  "Amount in decimal format, i.e. £1.50 is 1.50"
+  amount: Decimal!
+  "The ISO 4217 3 letter currency for the amount"
+  currencyCode: CurrencyCode!
+}
+
+input BetLegInput @source(name: "BetLegInput", schema: "bet_placement") {
+  "Unique ID of the leg from the product, which is used for bet placement"
+  productLegId: ID!
+  "Details selections for this bet"
+  selections: [BetLegSelectionInput]!
+  "Ordered alternative selections for this bet. For each selection that is unavailable, the next unallocated alternative selection is chosen as a substitute. Any item within selections cannot also be listed as an alternative"
+  alternativeSelections: [BetLegSelectionInput]
+}
+
+input BetLegSelectionInput @source(name: "BetLegSelectionInput", schema: "bet_placement") {
+  "Unique Id of the selection from the product, which is used for bet placement"
+  productLegSelectionID: ID!
+  "Optional for some products - the position of the selection"
+  position: Int
+}
+
+input BetStakeInput @source(name: "BetStakeInput", schema: "bet_placement") {
+  "Amount in decimal format, i.e. �1.50 is 1.50"
+  totalAmount: Decimal
+  "The ISO 4217 3 letter currency for the amount"
+  currencyCode: CurrencyCode!
+  "Amount per line in decimal format, i.e. �1.50 is 1.50"
+  lineAmount: Decimal
+}
+
+input PlaceBetInput @source(name: "PlaceBetInput", schema: "bet_placement") {
+  "Unique identifier for a bet from a customer\/partner perspective"
+  betId: ID!
+  "The product id the bet is placed on"
+  productId: ID!
+  "Details of the stake"
+  stake: BetStakeInput!
+  "Details of the leg\/selections required for bet placement"
+  legs: [BetLegInput]!
+}
+
+input PlaceBetsAsyncInput @source(name: "PlaceBetsAsyncInput", schema: "bet_placement") {
+  "Input for the bets placement"
+  ticketId: ID!
+  "Input for the bets placement"
+  bets: [PlaceBetInput]!
+}
+
+input PlaceBetsInput @source(name: "PlaceBetsInput", schema: "bet_placement") {
+  "Input for the bets placement"
+  ticketId: ID!
+  "Input for the bets placement"
+  bets: [PlaceBetInput]!
+}
+
+input PositionLinesQueryGraphQLInput @source(name: "PositionLinesQueryGraphQLInput", schema: "product") {
+  productId: String
+  selections: [PositionLinesQuerySelectionGraphQLInput]
+}
+
+input PositionLinesQuerySelectionGraphQLInput @source(name: "PositionLinesQuerySelectionGraphQLInput", schema: "product") {
+  selectionId: String
+  finishingPosition: Int!
+}
+
+enum AuditBetResultStatus @source(name: "AuditBetResultStatus", schema: "bet") {
+  SUCCESS
+  FAILED
+}
+
+enum AuditBettingResultingStatus @source(name: "AuditBettingResultingStatus", schema: "bet") {
+  UNKNOWN
+  PENDING
+  RESULTED
+  CANCELLED
+}
+
+enum BetPlacementStatus @source(name: "BetPlacementStatus", schema: "bet_placement") @source(name: "BetPlacementStatus", schema: "bet") {
+  UNKNOWN
+  PLACED
+  ACCEPTED
+  CANCELLED
+  REJECTED
+  FAILED
+}
+
+enum BetSettlementStatus @source(name: "BetSettlementStatus", schema: "bet_placement") @source(name: "BetSettlementStatus", schema: "bet") {
+  UNKNOWN
+  PENDING
+  SETTLED
+  REFUNDED
+}
+
+enum BetTypeCode @source(name: "BetTypeCode", schema: "bet_placement") @source(name: "BetTypeCode", schema: "bet") @source(name: "BetTypeCode", schema: "product") {
+  WIN
+  PLACE
+  SHOW
+  EXACTA
+  QUINELLA
+  TRIFECTA
+  DOUBLE
+  TREBLE
+  QUADPOT
+  PLACEPOT
+  PLACEPOT7
+  SUPERFECTA
+  SWINGER
+  JACKPOT
+  SCOOP6
+  TRIO
+  SURVIVOR
+  IRISHJACKPOT
+  V64
+  V65
+  V75
+  G75
+  V86
+  V4
+  V5
+  FIRST4
+  DOUBLETRIO
+  TRIPLETRIO
+  SIXUP
+  QUARTET
+}
+
+enum BettingProductLegResultStatus @source(name: "BettingProductLegResultStatus", schema: "product") {
+  PENDING
+  RESULTED
+  CANCELLED
+}
+
+enum BettingProductLegSelectionStatus @source(name: "BettingProductLegSelectionStatus", schema: "product") {
+  UNKNOWN
+  AVAILABLE
+  NOT_AVAILABLE
+}
+
+enum BettingProductOddsStatus @source(name: "BettingProductOddsStatus", schema: "product") {
+  PROVISIONAL
+  FINAL
+  UNKNOWN
+}
+
+enum BettingProductOddsType @source(name: "BettingProductOddsType", schema: "product") {
+  POOL
+  FIXED
+  UNKNOWN
+}
+
+enum BettingProductPoolFundType @source(name: "BettingProductPoolFundType", schema: "product") {
+  WIN
+  PLACE
+  BONUS
+}
+
+enum BettingProductResultStatus @source(name: "BettingProductResultStatus", schema: "product") {
+  PROVISIONAL
+  FINAL
+}
+
+enum BettingProductSellingStatus @source(name: "BettingProductSellingStatus", schema: "product") {
+  UNKNOWN
+  OPEN
+  CLOSED
+}
+
+enum BettingResultingStatus @source(name: "BettingResultingStatus", schema: "bet_placement") @source(name: "BettingResultingStatus", schema: "bet") {
+  UNKNOWN
+  PENDING
+  RESULTED
+  CANCELLED
+}
+
+enum CurrencyCode @source(name: "CurrencyCode", schema: "customer") @source(name: "CurrencyCode", schema: "bet_placement") @source(name: "CurrencyCode", schema: "bet") @source(name: "CurrencyCode", schema: "product") {
+  GBP
+  EUR
+  HKD
+}
+
+enum DividendStatus @source(name: "DividendStatus", schema: "product") {
+  PROVISIONAL
+  FINAL
+}
+
+enum DividendType @source(name: "DividendType", schema: "product") {
+  FIXED
+  POOL
+}
+
+enum EntryStatus @source(name: "EntryStatus", schema: "event") {
+  UNKNOWN
+  PROVISIONAL
+  CONFIRMED
+  WITHDRAWN
+}
+
+enum EventStatus @source(name: "EventStatus", schema: "event") {
+  UNKNOWN
+  SCHEDULED
+  STARTED
+  FINISHED
+  CANCELLED
+  DELAYED
+}
+
+enum ResultStatus @source(name: "ResultStatus", schema: "event") {
+  PENDING
+  PROVISIONAL
+  FINAL
+}
+
+"Delegates a resolver to a remote schema."
+directive @delegate("The path to the field on the remote schema." path: String "The name of the schema to which this field shall be delegated to." schema: String!) on FIELD_DEFINITION
+
+"Annotates the original name of a type."
+directive @source("The original name of the annotated type." name: String! "The name of the schema to which this type belongs to." schema: String!) repeatable on OBJECT | FIELD_DEFINITION | ARGUMENT_DEFINITION | INTERFACE | UNION | ENUM | ENUM_VALUE | INPUT_OBJECT | INPUT_FIELD_DEFINITION
+
+"The `Date` scalar represents an ISO-8601 compliant date type."
+scalar Date
+
+"The `DateTime` scalar represents an ISO-8601 compliant date time type."
+scalar DateTime @specifiedBy(url: "https:\/\/www.graphql-scalars.com\/date-time")
+
+"The built-in `Decimal` scalar type."
+scalar Decimal

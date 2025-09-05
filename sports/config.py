@@ -42,4 +42,11 @@ class Config:
     tote_graphql_url: str = os.getenv("TOTE_GRAPHQL_URL", "")  # e.g. https://hub.production.racing.tote.co.uk/partner/connections/graphql/
     tote_subscriptions_url: str = os.getenv("TOTE_SUBSCRIPTIONS_URL", "")  # e.g. wss://.../graphql/
 
+    # --- BigQuery (writes + optional web reads) ---
+    # These are referenced by sports/bq.py and sports/webapp.py
+    bq_write_enabled: bool = os.getenv("BQ_WRITE_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+    bq_project: str = os.getenv("BQ_PROJECT", "")
+    bq_dataset: str = os.getenv("BQ_DATASET", "")
+    bq_location: str = os.getenv("BQ_LOCATION", "EU")
+
 cfg = Config()

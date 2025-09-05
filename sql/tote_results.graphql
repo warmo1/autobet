@@ -1,0 +1,19 @@
+# Example Tote GraphQL: results by date
+# Adjust field names/types to match your Tote provider schema.
+
+query ResultsByDate($date: String!, $first: Int!, $after: String) {
+  results(date: $date, first: $first, after: $after) {
+    edges {
+      cursor
+      node {
+        eventId
+        competitorId
+        finishingPosition
+        status
+        ts
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+

@@ -27,6 +27,11 @@ class BigQuerySink:
             self._client = bigquery.Client(project=self.project, location=self.location)
         return self._client
 
+    def query(self, sql: str, **kwargs):
+        """Run a query and return the results."""
+        client = self._client_obj()
+        return client.query(sql, **kwargs).result()
+
     def _table_exists(self, table: str) -> bool:
         client = self._client_obj()
         try:
