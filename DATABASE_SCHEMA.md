@@ -7,9 +7,9 @@ This document outlines the database schema, data import processes, and BigQuery 
 ## Local Database Schema
 
 The local database schema is defined in `sports/schema.py`. It is a SQLite database, and the schema is created and managed using standard SQL `CREATE TABLE` statements.
-
-### Core Tables
-
+ 
+### Core Sporting Tables
+ 
 *   **`teams`**: Stores team names and their unique IDs.
 *   **`matches`**: Contains information about individual matches, including sport, competition, season, date, teams, and results.
 *   **`odds`**: Stores odds for various matches from different bookmakers.
@@ -55,15 +55,9 @@ Data is imported from various sources using scripts located in the `sports/inges
 
 ### Data Sources
 
-*   **BBC (`bbc_fixtures.py`)**: Imports sports fixtures from the BBC.
-*   **Cricsheet (`cricket_cricsheet.py`)**: Ingests cricket match data from Cricsheet CSV files.
-*   **Football-Data.co.uk (`football_fd.py`)**: Imports football match results from CSV files.
-*   **Kaggle (`football_kaggle.py`, `hr_kaggle_results.py`)**: Imports football and horse racing data from Kaggle datasets.
-*   **Openfootball (`football_openfootball.py`)**: Ingests football data from Openfootball repositories.
-*   **Premier League (`football_premier_league.py`)**: Imports data from the official Premier League website.
-*   **Fantasy Premier League (`fpl_fixtures.py`)**: Imports fixtures from the Fantasy Premier League API.
 *   **Tote (`tote_events.py`, `tote_horse.py`, `tote_products.py`, `tote_results.py`)**: Ingests a wide range of betting data from the Tote API.
 *   **Weather (`weather.py`)**: Imports weather data.
+*   **Kaggle (`hr_kaggle_results.py`)**: Imports historical horse racing data from Kaggle datasets.
 
 ## BigQuery Integration
 

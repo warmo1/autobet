@@ -1,12 +1,11 @@
-# Sports Betting Bot (Starter)
+# Horse Racing Betting Bot (Tote)
 
-A pragmatic, extensible sports betting bot for football, rugby, and cricket:
-- Ingest historical results/odds (CSV)
-- Train simple models (Poisson for football; basic Elo for others)
-- Generate value **back**/**lay** suggestions (including **draw**)
-- Paper-bet with bankroll management (fractional Kelly)
-- Optional live Betfair integration (with `--confirm BET` guard)
-- Flask dashboard with weekly suggestions + AI news/insights
+A pragmatic, extensible betting bot for horse racing, focused on the Tote API:
+- Ingests events, products (pools), results, and horse data from the Tote API.
+- Ingests historical horse racing results from Kaggle CSVs.
+- Provides a framework for building and training predictive models (e.g., for WIN or SUPERFECTA markets).
+- Includes a Flask web dashboard for viewing data, placing audit bets, and analyzing pool viability.
+- Supports exporting data to Google BigQuery for advanced analytics.
 
 > This project is for research/education. **Gambling involves risk.** Bet responsibly and comply with local laws.
 
@@ -17,7 +16,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# edit .env, e.g. DATABASE_URL and provider keys if you want AI insights
+# edit .env, e.g. DATABASE_URL, TOTE_API_KEY, and BQ_* variables
 ```
 
 ### 1) Ingest historical CSVs

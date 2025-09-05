@@ -12,6 +12,8 @@ import requests
 from flask import Flask, request
 
 from sports.gcp import parse_pubsub_envelope, upload_text_to_bucket
+from sports.config import cfg
+from sports.providers.tote_api import ToteClient, ToteError
 
 app = Flask(__name__)
 
@@ -28,13 +30,53 @@ def handle_pubsub() -> tuple[str, int]:
     bucket = payload.get("bucket")
     name = payload.get("name")
 
-    if url and bucket and name:
-        resp = requests.get(url)
-        resp.raise_for_status()
-        upload_text_to_bucket(bucket, name, resp.text)
-    else:
-        # If required fields are missing we still return 204 so Pub/Sub doesn't retry indefinitely.
-        return ("Missing fields", 204)
+    # Support Tote-aware fetch when provider/op is specified, otherwise fallback to URL fetch
+    provider = (payload.get("provider") or "").lower()
+    op = (payload.get("op") or "").lower()
+
+    if not (bucket and name):
+        return ("Missing bucket/name", 204)
+
+    try:
+        if provider == "tote" and op:
+            client = ToteClient()
+            # For now support only GraphQL operations via 'graphql' with provided query/variables,
+            # or simple REST path passthrough via 'path'.
+            if op == "graphql":
+                query = payload.get("query")
+                variables = payload.get("variables") or {}
+                if not query:
+                    return ("Missing GraphQL query", 204)
+                data = client.graphql(query, variables)
+                upload_text_to_bucket(bucket, name, json.dumps(data))
+            else:
+                # REST path passthrough using requests with Tote auth header
+                path = payload.get("path") or "/"
+                base = cfg.tote_graphql_url or ""
+                # Convert GraphQL base to REST base if needed by trimming trailing path
+                # If caller passes full URL, use it directly
+                if path.startswith("http://") or path.startswith("https://"):
+                    full_url = path
+                else:
+                    base_root = base.split("/partner/")[0].rstrip("/") if base else ""
+                    full_url = f"{base_root}{path}"
+                headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
+                resp = requests.get(full_url, headers=headers, timeout=20)
+                resp.raise_for_status()
+                upload_text_to_bucket(bucket, name, resp.text)
+        elif url:
+            resp = requests.get(url, timeout=20)
+            resp.raise_for_status()
+            upload_text_to_bucket(bucket, name, resp.text)
+        else:
+            return ("Missing url/provider", 204)
+    except ToteError as te:
+        # Do not trigger Pub/Sub retry storms; log via response body
+        return (f"Tote error: {str(te)[:500]}", 204)
+    except requests.exceptions.Timeout:
+        return ("Timeout", 204)
+    except Exception as e:
+        return (f"Error: {str(e)[:500]}", 204)
 
     return ("", 204)
 

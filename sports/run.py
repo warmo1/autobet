@@ -5,17 +5,7 @@ from dotenv import load_dotenv
 from sports.db import connect
 from sports.schema import init_schema
 
-# Import all ingestor functions
-from sports.ingest.football_fd import ingest_dir as ingest_fd_dir
-from sports.ingest.cricket_cricsheet import ingest_dir as ingest_cric_dir
-from sports.ingest.football_kaggle import ingest_file as ingest_kaggle_file
-from sports.ingest.football_premier_league import ingest_dir as ingest_pl_dir
-from sports.ingest.football_openfootball import ingest_dir as ingest_openfootball_dir
-from sports.ingest.fixtures_api import ingest_fixtures, SPORT_PATHS
-
-# Import suggestion and other core functions
-from sports.suggest import generate_football_suggestions
-from sports.betdaq_api import place_bet_on_betdaq
+# Core application components
 from sports.webapp import create_app
 from sports.telegram_bot import run_bot
 from sports.providers.tote_api import ToteClient
@@ -23,13 +13,6 @@ from sports.providers.tote_bets import place_audit_superfecta, place_audit_win
 from sports.providers.tote_bets import refresh_bet_status
 from sports.providers.tote_bets import audit_list_bets, sync_bets_from_api
 from sports.providers.tote_subscriptions import run_subscriber as run_pool_subscriber
-from sports.providers.odds_rapidapi import (
-    RapidAPIClient,
-    store_raw_odds,
-    normalize_uk_betting_odds,
-    normalize_bet365_win_eachway,
-    upsert_odds_live_rows,
-)
 from sports.ingest.tote_horse import ingest_horse_day
 from sports.ingest.tote_events import ingest_tote_events
 from sports.ingest.tote_products import ingest_superfecta_products
@@ -69,91 +52,6 @@ def main(argv=None):
         subprocess.run(['bash', script_path, args.mode], check=True)
     sp_fetch.set_defaults(func=_cmd_fetch_openfootball)
 
-    # --- Historical Data Ingest Commands ---
-    sp_fd = sub.add_parser("ingest-football-csv", help="Ingest football-data.co.uk CSVs")
-    sp_fd.add_argument("--dir", required=True)
-    def _cmd_ingest_fd(args):
-        conn = connect(db_url); init_schema(conn)
-        n = ingest_fd_dir(conn, args.dir)
-        print(f"[Football-Data] Ingested {n} rows.")
-        conn.close()
-    sp_fd.set_defaults(func=_cmd_ingest_fd)
-
-    sp_kaggle = sub.add_parser("ingest-football-kaggle", help="Ingest Kaggle domestic football CSV")
-    sp_kaggle.add_argument("--file", required=True)
-    def _cmd_ingest_kaggle(args):
-        conn = connect(db_url); init_schema(conn)
-        n = ingest_kaggle_file(conn, args.file)
-        print(f"[Kaggle Football] Ingested {n} rows.")
-        conn.close()
-    sp_kaggle.set_defaults(func=_cmd_ingest_kaggle)
-
-    sp_pl = sub.add_parser("ingest-pl-stats", help="Ingest Kaggle Premier League stats CSVs")
-    sp_pl.add_argument("--dir", required=True)
-    def _cmd_ingest_pl(args):
-        conn = connect(db_url); init_schema(conn)
-        n = ingest_pl_dir(conn, args.dir)
-        print(f"[Premier League] Ingested {n} rows.")
-        conn.close()
-    sp_pl.set_defaults(func=_cmd_ingest_pl)
-
-    sp_openfootball = sub.add_parser("ingest-openfootball", help="Recursively ingest all openfootball .txt files")
-    sp_openfootball.add_argument("--dir", required=True)
-    def _cmd_ingest_openfootball(args):
-        conn = connect(db_url); init_schema(conn)
-        n = ingest_openfootball_dir(conn, args.dir)
-        print(f"[OpenFootball] Ingested a total of {n} rows.")
-        conn.close()
-    sp_openfootball.set_defaults(func=_cmd_ingest_openfootball)
-
-    sp_cricket = sub.add_parser("ingest-cricket-csv", help="Ingest Cricsheet CSVs")
-    sp_cricket.add_argument("--dir", required=True)
-    def _cmd_ingest_cricket(args):
-        conn = connect(db_url); init_schema(conn)
-        n = ingest_cric_dir(conn, args.dir)
-        print(f"[Cricket] Ingested {n} rows.")
-        conn.close()
-    sp_cricket.set_defaults(func=_cmd_ingest_cricket)
-
-    # --- ESPN Fixtures Command ---
-    sp_espn = sub.add_parser("fetch-espn", help="Fetch ESPN fixtures/results for a league key")
-    sp_espn.add_argument("--league", required=True, choices=sorted(SPORT_PATHS.keys()))
-    sp_espn.add_argument("--date", help="YYYY-MM-DD (defaults to today)")
-    sp_espn.add_argument("--days", type=int, default=0, help="Also fetch N subsequent days")
-    sp_espn.add_argument("--debug", action="store_true", help="Verbose diagnostics")
-    def _cmd_fetch_espn(args):
-        if args.debug:
-            os.environ["FIXTURE_DEBUG"] = "1"
-        conn = connect(db_url); init_schema(conn)
-        try:
-            # Newer ingest supports (conn, league_key, date=None, days=0)
-            ingest_fixtures(conn, args.league, args.date, args.days)
-        except TypeError:
-            # Backward-compatible call (conn, sport)
-            ingest_fixtures(conn, args.league)
-        finally:
-            conn.close()
-    sp_espn.set_defaults(func=_cmd_fetch_espn)
-
-    # --- Live Fixtures Command ---
-    sp_fixtures = sub.add_parser("ingest-fixtures", help="Ingest upcoming fixtures from the ESPN API")
-    sp_fixtures.add_argument("--sport", required=True, choices=['football', 'rugby', 'cricket'])
-    def _cmd_ingest_fixtures(args):
-        conn = connect(db_url); init_schema(conn)
-        ingest_fixtures(conn, args.sport)
-        conn.close()
-    sp_fixtures.set_defaults(func=_cmd_ingest_fixtures)
-
-    # --- Suggestion Generation Command ---
-    sp_suggest = sub.add_parser("generate-suggestions", help="Generate suggestions for upcoming fixtures")
-    sp_suggest.add_argument("--sport", required=True, choices=['football'])
-    def _cmd_generate_suggestions(args):
-        conn = connect(db_url); init_schema(conn)
-        if args.sport == 'football':
-            generate_football_suggestions(conn)
-        conn.close()
-    sp_suggest.set_defaults(func=_cmd_generate_suggestions)
-
     # --- Application Commands ---
     sp_web = sub.add_parser("web", help="Run the web dashboard")
     sp_web.add_argument("--port", type=int, default=int(os.getenv("PORT", "8010")))
@@ -166,22 +64,6 @@ def main(argv=None):
     def _cmd_telegram(args):
         run_bot()
     sp_telegram.set_defaults(func=_cmd_telegram)
-    
-    sp_betdaq = sub.add_parser("live-betdaq", help="Place a live bet on the Betdaq exchange")
-    sp_betdaq.add_argument("--symbol", required=True)
-    sp_betdaq.add_argument("--odds", required=True, type=float)
-    sp_betdaq.add_argument("--stake", required=True, type=float)
-    sp_betdaq.add_argument("--confirm", action="store_true")
-    def _cmd_live_betdaq(args):
-        if not args.confirm:
-            print("Error: You must add the --confirm flag to place a live bet.")
-            return
-        try:
-            result = place_bet_on_betdaq(args.symbol, args.odds, args.stake)
-            print("Bet placement result:", result)
-        except Exception as e:
-            print(f"An error occurred: {e}")
-    sp_betdaq.set_defaults(func=_cmd_live_betdaq)
 
     # --- Tote API: Horse Racing Ingest ---
     sp_tote_h = sub.add_parser("tote-horse", help="Ingest horse racing data from Tote API for a date or range")
@@ -408,47 +290,6 @@ def main(argv=None):
         print(f"[Backfill] Done. products={total_prod} runs={total_runs} weather_updates={total_wx}")
     sp_backfill.set_defaults(func=_cmd_backfill)
 
-    # --- RapidAPI Odds (generic fetch) ---
-    sp_odds = sub.add_parser("odds-rapidapi", help="Fetch odds from a RapidAPI host/path and store raw + optional normalized rows")
-    sp_odds.add_argument("--host", help="RapidAPI host (defaults to UK Betting Odds host)")
-    sp_odds.add_argument("--path", required=True, help="Endpoint path, e.g. /v1/odds")
-    sp_odds.add_argument("--param", action="append", default=[], help="Query param as key=value; repeatable")
-    sp_odds.add_argument("--normalize", choices=["none","uk","bet365"], default="none", help="Attempt to normalize and write to odds_live")
-    sp_odds.add_argument("--event-id", help="Optional event id to tag normalized rows")
-    def _cmd_odds(args):
-        client = RapidAPIClient()
-        # Choose default host by normalization type if not provided
-        if args.host:
-            host = args.host.strip()
-        else:
-            if args.normalize == "bet365":
-                host = (os.getenv("RAPIDAPI_BET365_HR_HOST") or cfg.rapidapi_host_bet365_hr).strip()
-            elif args.normalize == "uk":
-                host = (os.getenv("RAPIDAPI_UK_ODDS_HOST") or cfg.rapidapi_host_uk_odds).strip()
-            else:
-                host = (os.getenv("RAPIDAPI_UK_ODDS_HOST") or cfg.rapidapi_host_uk_odds).strip()
-        params = {}
-        for p in (args.param or []):
-            if "=" in p:
-                k, v = p.split("=", 1)
-                params[k] = v
-        data = client.get(host, args.path, params=params)
-        conn = connect(db_url); init_schema(conn)
-        rid = store_raw_odds(conn, provider=f"rapidapi:{host}", endpoint=args.path, params=params, payload=data)
-        print(f"[RapidAPI] stored raw id={rid}")
-        if args.normalize != "none":
-            if args.normalize == "uk":
-                rows = list(normalize_uk_betting_odds(data))
-            elif args.normalize == "bet365":
-                rows = list(normalize_bet365_win_eachway(data))
-            else:
-                rows = []
-            if rows:
-                upsert_odds_live_rows(conn, event_id=args.event_id, rows=rows, source=f"rapidapi:{host}")
-                print(f"[RapidAPI] normalized rows={len(rows)}")
-        conn.close()
-    sp_odds.set_defaults(func=_cmd_odds)
-
     # --- Dataset export for training ---
     sp_export = sub.add_parser("extract-training", help="Export runner-level training dataset to CSV")
     sp_export.add_argument("--from", dest="date_from", required=True, help="Start date YYYY-MM-DD (inclusive)")
@@ -635,86 +476,6 @@ def main(argv=None):
                 print(f"[Pipeline] BQ export ERROR: {e}")
         conn.close()
     sp_pipe.set_defaults(func=_cmd_pipeline)
-
-    # --- Odds Poller: periodically fetch live odds for upcoming horse racing events and store in odds_live ---
-    sp_odsp = sub.add_parser("odds-poll", help="Poll RapidAPI for horse racing odds for upcoming Tote events and store odds_live")
-    sp_odsp.add_argument("--host", help="RapidAPI host (e.g., uk-betting-odds.p.rapidapi.com or bet365-horseracing-win-eachway.p.rapidapi.com)")
-    sp_odsp.add_argument("--path", required=True, help="Endpoint path (supports {event_id},{name},{venue},{country},{date} placeholders)")
-    sp_odsp.add_argument("--param", action="append", default=[], help="Query param as key=value; supports placeholders; repeatable")
-    sp_odsp.add_argument("--normalize", choices=["uk","bet365"], default="uk", help="Payload normalizer")
-    sp_odsp.add_argument("--interval", type=int, default=60, help="Poll interval seconds")
-    sp_odsp.add_argument("--window", type=int, default=60, help="Lookahead window in minutes for events")
-    sp_odsp.add_argument("--duration", type=int, default=15, help="How many minutes to keep polling (<=0 to run once)")
-    sp_odsp.add_argument("--export-bq", action="store_true", help="Export odds_live to BigQuery after each cycle")
-    def _cmd_odds_poll(args):
-        import time
-        from urllib.parse import urlencode
-        from datetime import datetime, timedelta, timezone
-        from sports.providers.odds_rapidapi import RapidAPIClient, normalize_uk_betting_odds, normalize_bet365_win_eachway, upsert_odds_live_rows
-        host = (args.host or os.getenv("RAPIDAPI_UK_ODDS_HOST") or cfg.rapidapi_host_uk_odds).strip()
-        normalizer = normalize_uk_betting_odds if args.normalize == "uk" else normalize_bet365_win_eachway
-        client = RapidAPIClient()
-        def build_params(ev):
-            out = {}
-            for p in args.param:
-                if "=" in p:
-                    k, v = p.split("=", 1)
-                    v = v.replace("{event_id}", str(ev.get("event_id") or "")) \
-                         .replace("{name}", str(ev.get("name") or "")) \
-                         .replace("{venue}", str(ev.get("venue") or "")) \
-                         .replace("{country}", str(ev.get("country") or "")) \
-                         .replace("{date}", str((ev.get("start_iso") or "")[:10]))
-                    out[k] = v
-            return out
-        def subst_path(ev):
-            return (args.path
-                    .replace("{event_id}", str(ev.get("event_id") or ""))
-                    .replace("{name}", str(ev.get("name") or ""))
-                    .replace("{venue}", str(ev.get("venue") or ""))
-                    .replace("{country}", str(ev.get("country") or ""))
-                    .replace("{date}", str((ev.get("start_iso") or "")[:10]))
-            )
-        started = time.time()
-        cycle = 0
-        while True:
-            cycle += 1
-            now = datetime.now(timezone.utc)
-            start_iso = now.isoformat(timespec='seconds').replace('+00:00','Z')
-            end_iso = (now + timedelta(minutes=max(1, args.window))).isoformat(timespec='seconds').replace('+00:00','Z')
-            conn = connect(db_url); init_schema(conn)
-            # Upcoming horse events window
-            q = ("SELECT event_id, name, venue, country, start_iso FROM tote_events "
-                 "WHERE sport='horse_racing' AND start_iso BETWEEN ? AND ? ORDER BY start_iso ASC LIMIT 200")
-            evs = conn.execute(q, (start_iso, end_iso)).fetchall()
-            cols = [d[0] for d in conn.execute('PRAGMA table_info(tote_events)')]
-            # For each event, fetch odds and upsert
-            n_total = 0
-            for row in evs:
-                ev = {cols[i]: row[i] for i in range(len(cols))}
-                try:
-                    path = subst_path(ev)
-                    params = build_params(ev)
-                    payload = client.get(host, path, params=params)
-                    rows = list(normalizer(payload))
-                    if rows:
-                        upsert_odds_live_rows(conn, event_id=ev.get("event_id"), rows=rows, source=f"rapidapi:{host}")
-                        n_total += len(rows)
-                except Exception as e:
-                    print(f"[Odds Poll] {ev.get('event_id')}: ERROR {e}")
-            print(f"[Odds Poll] cycle={cycle} events={len(evs)} rows={n_total}")
-            # Optional export odds to BQ
-            if args.export_bq and n_total > 0:
-                try:
-                    res = export_sqlite_to_bq(conn, ["odds_live"])  # type: ignore
-                    print(f"[Odds Poll] Exported odds_live: {res.get('odds_live',0)} rows")
-                except Exception as e:
-                    print(f"[Odds Poll] Export error: {e}")
-            conn.close()
-            if args.duration and args.duration > 0:
-                if time.time() - started >= args.duration * 60:
-                    break
-            time.sleep(max(1, args.interval))
-    sp_odsp.set_defaults(func=_cmd_odds_poll)
 
     # --- Tote: Audit Bets ---
     sp_audit_sf = sub.add_parser("tote-audit-superfecta", help="Place an audit-mode SUPERFECTA bet (no live placement unless configured)")

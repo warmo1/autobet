@@ -36,4 +36,10 @@ class Config:
     rapidapi_host_tennis: str = os.getenv("RAPIDAPI_HOST_TENNIS", "")
     rapidapi_host_horse_racing: str = os.getenv("RAPIDAPI_HOST_HORSE_RACING", "")
 
+    # --- Tote API ---
+    # Provide via .env locally or Secret Manager on Cloud Run
+    tote_api_key: str = os.getenv("TOTE_API_KEY", "")
+    tote_graphql_url: str = os.getenv("TOTE_GRAPHQL_URL", "")  # e.g. https://hub.production.racing.tote.co.uk/partner/connections/graphql/
+    tote_subscriptions_url: str = os.getenv("TOTE_SUBSCRIPTIONS_URL", "")  # e.g. wss://.../graphql/
+
 cfg = Config()
