@@ -1,0 +1,182 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="container mt-3">
+  <h3>Superfecta Viability Calculator</h3>
+  <p class="text-muted">
+    Use the filters to find Superfecta products. Click 'Calculate' on a product to run the viability analysis using the parameters below.
+    This provides a baseline analysis assuming random line coverage.
+  </p>
+
+  <div class="row">
+    <div class="col-lg-8">
+      <!-- Product Selection -->
+      <div class="card mb-3">
+        <div class="card-header">1. Select Product</div>
+        <div class="card-body">
+          <form method="get" class="row g-2 mb-3 align-items-end">
+            <div class="col-md-4">
+              <label class="form-label small">Country</label>
+              <select name="country" class="form-select form-select-sm" onchange="this.form.submit()">
+                {% for c in country_options %}<option value="{{ c }}" {% if filters.country==c %}selected{% endif %}>{{ c }}</option>{% endfor %}
+              </select>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small">Venue</label>
+              <select name="venue" class="form-select form-select-sm">
+                <option value="">All Venues</option>
+                {% for v in venue_options %}<option value="{{ v }}" {% if filters.venue==v %}selected{% endif %}>{{ v }}</option>{% endfor %}
+              </select>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small">Date</label>
+              <input type="date" class="form-control form-control-sm" name="date" value="{{ filters.date }}">
+            </div>
+            <div class="col-12">
+              <button class="btn btn-sm btn-secondary" type="submit">Filter Products</button>
+            </div>
+          </form>
+
+          <h6>Available Products</h6>
+          <div class="table-responsive" style="max-height: 400px;">
+            <table class="table table-sm table-striped table-hover">
+              <thead><tr><th>Start Time</th><th>Venue</th><th>Race</th><th>Runners</th><th>Pool (£)</th><th></th></tr></thead>
+              <tbody>
+                {% for p in products %}
+                <tr class="{{ 'table-primary' if p.product_id == product_id else '' }}">
+                  <td>{{ p.start_iso[11:16] }}</td>
+                  <td>{{ p.venue }}</td>
+                  <td>{{ p.event_name }}</td>
+                  <td>{{ p.n_runners }}</td>
+                  <td>{{ '%.0f'|format(p.total_gross or 0) }}</td>
+                  <td>
+                    <a href="{{ url_for('tote_viability_page', product_id=p.product_id, country=filters.country, venue=filters.venue, date=filters.date) }}" class="btn btn-sm btn-primary">Calculate</a>
+                  </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="6" class="text-center">No products found for these filters.</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-4">
+      <!-- Parameters -->
+      <div class="card mb-3">
+        <div class="card-header">2. Set Parameters</div>
+        <div class="card-body">
+          <form id="params-form" method="get">
+            <!-- Hidden inputs to preserve filters -->
+            <input type="hidden" name="country" value="{{ filters.country }}">
+            <input type="hidden" name="venue" value="{{ filters.venue }}">
+            <input type="hidden" name="date" value="{{ filters.date }}">
+            <input type="hidden" name="product_id" value="{{ product_id }}">
+
+            <div class="mb-2">
+              <label class="form-label small">Stake per line (£)</label>
+              <input class="form-control form-control-sm" name="stake_per_line" value="{{ request.values.get('stake_per_line','0.01') }}">
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Takeout (t)</label>
+              <input class="form-control form-control-sm" name="take" value="{{ request.values.get('take','0.30') }}">
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Net Rollover (£)</label>
+              <input class="form-control form-control-sm" name="rollover" value="{{ request.values.get('rollover','0') }}">
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Dividend Multiplier</label>
+              <input class="form-control form-control-sm" name="mult" value="{{ request.values.get('mult','1.00') }}">
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Coverage % (0-100)</label>
+              <input class="form-control form-control-sm" name="alpha" value="{{ request.values.get('alpha','60') }}">
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">f-share Override (optional)</label>
+              <input class="form-control form-control-sm" name="f" value="{{ request.values.get('f','') }}">
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Include Self in Pool</label>
+              <select name="inc" class="form-select form-select-sm">
+                <option value="1" {% if request.values.get('inc','1') in ['1','true'] %}selected{% endif %}>Yes</option>
+                <option value="0" {% if request.values.get('inc','1') in ['0','false'] %}selected{% endif %}>No</option>
+              </select>
+            </div>
+            <button class="btn btn-sm btn-success w-100" type="submit" {% if not product_id %}disabled{% endif %}>Re-calculate</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {% if product_id and viab %}
+  <div class="row">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header">
+          3. Results for {{ product_details.event_name }} ({{ product_id }})
+        </div>
+        <div class="card-body">
+          <div class="row">
+            <div class="col-md-6">
+              <h5>Single Scenario Analysis</h5>
+              <p class="text-muted">Based on {{ request.values.get('alpha','60') }}% coverage.</p>
+              <table class="table table-sm">
+                <tr><th>Total Possible Lines</th><td>{{ viab.total_lines }}</td></tr>
+                <tr><th>Lines Covered</th><td>{{ viab.lines_covered }} ({{ '%.1f'|format(100*viab.coverage_frac) }}%)</td></tr>
+                <tr><th>Total Stake (S)</th><td>£{{ '%.2f'|format(viab.stake_total or 0) }}</td></tr>
+                <tr><th>Net Pool (if bet)</th><td>£{{ '%.2f'|format(viab.net_pool_if_bet or 0) }}</td></tr>
+                <tr><th>f-share Used</th><td>{{ '%.4f'|format(viab.f_share_used or 0) }}</td></tr>
+                <tr><th>Expected Return</th><td>£{{ '%.2f'|format(viab.expected_return or 0) }}</td></tr>
+                <tr class="{{ 'table-success' if viab.is_positive_ev else 'table-danger' }}">
+                  <th>Expected Profit</th>
+                  <td><strong>£{{ '%.2f'|format(viab.expected_profit or 0) }}</strong></td>
+                </tr>
+              </table>
+
+              <h5>Cover-All Analysis</h5>
+              <table class="table table-sm">
+                <tr><th>Stake to Cover All</th><td>£{{ '%.2f'|format(viab.cover_all_stake or 0) }}</td></tr>
+                <tr class="{{ 'table-success' if viab.cover_all_is_positive else 'table-danger' }}">
+                  <th>Expected Profit (Cover-All)</th>
+                  <td><strong>£{{ '%.2f'|format(viab.cover_all_expected_profit or 0) }}</strong></td>
+                </tr>
+                <tr><th>Min. Others' Gross (£) for +EV</th><td>£{{ '%.2f'|format(viab.cover_all_o_min_break_even or 0) }}</td></tr>
+                {% if viab.coverage_frac_min_positive is not none %}
+                <tr class="table-info"><th>Min. Coverage for +EV</th><td><strong>{{ '%.1f'|format(100*viab.coverage_frac_min_positive) }}%</strong></td></tr>
+                {% endif %}
+              </table>
+            </div>
+            <div class="col-md-6">
+              <h5>Coverage vs. EV Grid</h5>
+              <div class="table-responsive" style="max-height: 500px;">
+                <table class="table table-sm table-striped">
+                  <thead><tr><th>Coverage %</th><th>Lines</th><th>Stake (£)</th><th>Exp. Profit (£)</th><th>+EV?</th></tr></thead>
+                  <tbody>
+                    {% for r in grid %}
+                    <tr class="{{ 'table-success' if r.is_positive_ev else '' }}">
+                      <td>{{ '%.0f'|format(100*r.coverage_frac) }}</td>
+                      <td>{{ r.lines_covered }}</td>
+                      <td>{{ '%.2f'|format(r.stake_total or 0) }}</td>
+                      <td>{{ '%.2f'|format(r.expected_profit or 0) }}</td>
+                      <td>{% if r.is_positive_ev %}✔️{% else %}❌{% endif %}</td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% elif product_id %}
+  <div class="alert alert-warning">No results to display. Please select a product and click 'Calculate', or check the filters.</div>
+  {% endif %}
+
+</div>
+{% endblock %}

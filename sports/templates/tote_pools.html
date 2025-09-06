@@ -1,0 +1,24 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="container mt-3">
+  <h3>Tote Pools</h3>
+  <table class="table table-sm table-striped">
+    <thead><tr><th>Product</th><th>Bet Type</th><th>Event</th><th>Venue</th><th>Start</th><th>Status</th><th>Net</th><th>Divs</th></tr></thead>
+    <tbody>
+      {% for p in products %}
+      <tr>
+        <td>{{ p.product_id }}</td>
+        <td>{{ p.bet_type }}</td>
+        <td>{{ p.event_name }}</td>
+        <td>{{ p.venue }}</td>
+        <td>{{ p.start_iso }}</td>
+        <td>{{ p.status }}</td>
+        <td>{{ p.total_net }}</td>
+        <td>{{ p.dividend_count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+

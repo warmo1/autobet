@@ -5,7 +5,7 @@ A pragmatic, extensible betting bot for horse racing, focused on the Tote API:
 - Ingests historical horse racing results from Kaggle CSVs.
 - Provides a framework for building and training predictive models (e.g., for WIN or SUPERFECTA markets).
 - Includes a Flask web dashboard for viewing data, placing audit bets, and analyzing pool viability.
-- Supports exporting data to Google BigQuery for advanced analytics.
+- Uses Google BigQuery as the primary data store for the web app and analytics.
 
 > This project is for research/education. **Gambling involves risk.** Bet responsibly and comply with local laws.
 
@@ -16,7 +16,10 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# edit .env, e.g. DATABASE_URL, TOTE_API_KEY, and BQ_* variables
+# edit .env: TOTE_API_KEY, TOTE_GRAPHQL_URL, and BQ_* variables
+# authenticate to GCP (choose one):
+#  - gcloud: gcloud auth application-default login
+#  - service account: export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
 ```
 
 ### 1) Ingest historical CSVs
@@ -48,11 +51,20 @@ python -m sports.run news
 python -m sports.run insights
 ```
 
-### 6) Web dashboard
+### Web dashboard (BigQuery-only)
 ```bash
-python -m sports.run web
+python -c "from autobet.sports.webapp import app; app.run(host='0.0.0.0', port=8010)"
 # open http://localhost:8010
 ```
+The dashboard reads directly from BigQuery. Ensure `BQ_PROJECT` and `BQ_DATASET` are set and you are authenticated.
+
+Key pages:
+- `/tote-superfecta` – list of SUPERFECTA products (with upcoming 60m widget)
+- `/tote/calculators` – calculators using selection units or probable odds
+- `/tote/viability` – breakeven/threshold calculator (S, O_min, ROI)
+- `/tote-events` and `/event/<id>` – event lists/details
+- `/audit/bets` – audit bets via Tote API (read-only in BQ mode)
+- `/imports` – latest import stats (raw + structured)
 
 ### 7) Live (optional, Betfair - disabled by default)
 ```bash
@@ -60,16 +72,12 @@ python -m sports.run live --symbol 'Home vs Away (Match Odds)' --side back --odd
 ```
 
 ## Folder layout
-- `sports/db.py` – SQLite schema + helpers
-- `sports/ingest.py` – CSV ingestion
-- `sports/model_football.py` – Poisson goals model
-- `sports/model_generic.py` – simple Elo for rugby/cricket (stub)
-- `sports/odds.py` – odds & staking utilities
-- `sports/suggest.py` – suggestion engine
-- `sports/betfair_api.py` – Betfair connector (safe by default)
-- `sports/llm.py`, `sports/news.py` – news fetch + LLM summaries
-- `sports/webapp.py` – Flask dashboard
-- `sports/run.py` – CLI entrypoint
+- `sports/bq.py` – BigQuery sink, upsert helpers, and view creation
+- `sports/db.py` – Thin wrapper returning a configured BigQuerySink
+- `sports/ingest/` – Tote and historical data ingestors
+- `sports/webapp.py` – Flask dashboard (reads from BigQuery)
+- `sports/gcp_ingest_service.py` – Cloud Run handler for Pub/Sub → GCS (+ optional BQ raw)
+- `scripts/` – helper scripts (publish jobs, cleanup)
 
 ## GCP ingestion pipeline
 
@@ -90,7 +98,7 @@ the specified Cloud Storage bucket for downstream processing.
 
 You can now fetch Tote API JSON to Cloud Storage and append the payload to BigQuery `raw_tote` in one step via Pub/Sub:
 
-1) Prepare a GraphQL file with your query (e.g., `sql/tote_products_example.graphql`).
+1) Prepare a GraphQL file with your query (e.g., `sql/tote_products.graphql`).
 
 2) Publish a job (London region project example):
 
@@ -101,7 +109,7 @@ python scripts/publish_tote_graphql_job.py \
   --bucket autobet-470818-data \
   --name raw/tote/products_2025-09-05.json \
   --query-file path/to/query.graphql \
-  --vars '{"first":100,"status":"OPEN"}'
+  --vars '{"date":"2025-09-05","first":100,"status":"OPEN","betTypes":["WIN","PLACE","EXACTA","TRIFECTA","SUPERFECTA"]}'
 ```
 
 The Cloud Run service will:
@@ -109,4 +117,71 @@ The Cloud Run service will:
 - Write the JSON response to `gs://<bucket>/<name>`.
 - If `BQ_*` envs are set and the message includes `bq.table=raw_tote` (default in the script), it appends the payload to BigQuery `raw_tote`.
 
-Note: structured tables (e.g., `tote_products`) are still supported by the local exporter. For a pure-GCP flow, land raw JSON first; transformation to structured can be added via scheduled jobs or BigQuery SQL later.
+Notes:
+- The included query requests BettingProduct fields as per `docs/tote_queries.graphql`.
+- You can materialize structured tables directly from the webapp/ingestors (below), or transform `raw_tote` via scheduled jobs/BigQuery SQL.
+
+### Tote probable odds
+
+Fetch probable odds payloads via Pub/Sub and store in GCS + BigQuery raw:
+
+```bash
+python autobet/scripts/publish_tote_probable_job.py \
+  --project autobet-470818 --topic ingest-jobs \
+  --bucket autobet-470818-data \
+  --path /v1/products/<WIN_PRODUCT_ID>/probable-odds \
+  --name raw/tote/probable/<WIN_PRODUCT_ID>.json
+
+# Or publish for all today's open WIN products:
+python autobet/scripts/publish_probable_for_today.py \
+  --project autobet-470818 --topic ingest-jobs --bucket autobet-470818-data \
+  --limit 50 --bq-project autobet-470818 --bq-dataset autobet
+```
+
+Parsed view (created by `init_db`): `vw_tote_probable_odds` exposes product_id, cloth_number, selection_id, decimal_odds, ts_ms.
+
+### Direct Tote → BigQuery (structured)
+
+To load products (with events and selections) directly into BigQuery from your laptop:
+
+```bash
+python - <<'PY'
+from autobet.sports.db import get_db
+from autobet.sports.providers.tote_api import ToteClient
+from autobet.sports.ingest.tote_products import ingest_products
+db = get_db(); c = ToteClient()
+print(ingest_products(db, c, date_iso='2025-09-05', status='OPEN', first=400, bet_types=['WIN','PLACE','EXACTA','TRIFECTA','SUPERFECTA']))
+PY
+```
+
+This populates:
+- `tote_products` (product totals, status, event linkage)
+- `tote_events` (basic metadata inferred from leg event)
+- `tote_product_selections` (leg/selection map including cloth/trap numbers)
+- `tote_product_dividends` (latest known dividends per selection)
+
+Range ingest (multi-year):
+
+```bash
+python autobet/scripts/ingest_tote_range.py --from 2022-01-01 --to 2025-09-05 \
+  --bet-types WIN,PLACE,EXACTA,TRIFECTA,SUPERFECTA --first 400
+```
+
+### BigQuery temp-table cleanup
+
+Bulk upserts create temporary staging tables (prefix `_tmp_`). Clean them up periodically:
+
+```bash
+python autobet/scripts/bq_cleanup.py --older 3   # delete _tmp_ tables older than 3 days
+```
+
+Alternatively, from Python:
+
+```python
+from autobet.sports.bq import get_bq_sink
+sink = get_bq_sink(); print(sink.cleanup_temp_tables(older_than_days=3))
+```
+
+### Subscriptions (optional)
+
+Set `SUBSCRIBE_POOLS=1` and configure `TOTE_SUBSCRIPTIONS_URL` and `TOTE_API_KEY` to enable the background pool subscription (writes pool snapshots to BigQuery if your subscriber is adapted).

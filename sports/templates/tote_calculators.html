@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="container mt-3">
+  <h3>Superfecta Calculator</h3>
+  {% if runners and top_lines %}
+  <p>Total lines: {{ total_lines }}, Coverage: {{ params.coverage }}, Cum P: {{ '%.4f'|format(cum_p) }}</p>
+  <table class="table table-sm"><thead><tr><th>#</th><th>H1</th><th>H2</th><th>H3</th><th>H4</th><th>p</th><th>cum_p</th></tr></thead>
+  <tbody>
+    {% for l in top_lines %}
+    <tr><td>{{ l.rank }}</td><td>{{ l.h1 }}</td><td>{{ l.h2 }}</td><td>{{ l.h3 }}</td><td>{{ l.h4 }}</td><td>{{ '%.6f'|format(l.p) }}</td><td>{{ '%.6f'|format(l.cum_p) }}</td></tr>
+    {% endfor %}
+  </tbody></table>
+  {% else %}
+  <div class="alert alert-warning">Not enough data to compute permutations.</div>
+  {% endif %}
+</div>
+{% endblock %}
+

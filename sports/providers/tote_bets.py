@@ -3,7 +3,7 @@ import time
 from typing import Optional, Dict, Any, List
 import uuid
 
-from sports.config import cfg
+from ..config import cfg
 from .tote_api import ToteClient
 
 

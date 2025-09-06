@@ -1,0 +1,39 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="container mt-3">
+  <h3>Latest Imports</h3>
+  <div class="row">
+    <div class="col-md-6">
+      <div class="card mb-3"><div class="card-body">
+        <h5 class="card-title">Products Today</h5>
+        <p class="card-text">Count: {{ prod_today.c or 0 }}<br>Max Start: {{ prod_today.max_start or '-' }}</p>
+      </div></div>
+    </div>
+    <div class="col-md-6">
+      <div class="card mb-3"><div class="card-body">
+        <h5 class="card-title">Events Today</h5>
+        <p class="card-text">Count: {{ ev_today.c or 0 }}<br>Max Start: {{ ev_today.max_start or '-' }}</p>
+      </div></div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col-md-6">
+      <h6>Raw Tote (latest)</h6>
+      <ul>
+        {% for r in raw_latest %}
+        <li>{{ r.fetched_ts }} — {{ r.endpoint }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    <div class="col-md-6">
+      <h6>Raw Probable Odds (latest)</h6>
+      <ul>
+        {% for r in prob_latest %}
+        <li>{{ r.fetched_ts }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+</div>
+{% endblock %}
+

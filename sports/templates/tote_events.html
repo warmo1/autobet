@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="container mt-3">
+  <h3>Tote Events</h3>
+  <table class="table table-sm table-striped">
+    <thead><tr><th>Event</th><th>Venue</th><th>Country</th><th>Start</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+      {% for e in events %}
+      <tr>
+        <td>{{ e.name }}</td>
+        <td>{{ e.venue }}</td>
+        <td>{{ e.country }}</td>
+        <td>{{ e.start_iso }}</td>
+        <td>{{ e.status }}</td>
+        <td><a class="btn btn-sm btn-outline-primary" href="{{ url_for('event_detail', event_id=e.event_id) }}">View</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+

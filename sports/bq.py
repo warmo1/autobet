@@ -160,10 +160,16 @@ class BigQuerySink:
 
     # --- table-specific upserts ---
     def upsert_tote_products(self, rows: Iterable[Mapping[str, Any]]):
-        temp = self._load_to_temp("tote_products", rows, schema_hint={
-            "total_gross": "FLOAT64",
-            "total_net": "FLOAT64",
-        })
+        temp = self._load_to_temp(
+            "tote_products",
+            rows,
+            schema_hint={
+                "total_gross": "FLOAT64",
+                "total_net": "FLOAT64",
+                "rollover": "FLOAT64",
+                "deduction_rate": "FLOAT64",
+            },
+        )
         if not temp:
             return
         self._merge(
@@ -197,11 +203,22 @@ class BigQuerySink:
         )
 
     def upsert_tote_events(self, rows: Iterable[Mapping[str, Any]]):
-        temp = self._load_to_temp("tote_events", rows)
+        # Ensure optional columns exist on the staging side so MERGE can reference them safely
+        temp = self._load_to_temp(
+            "tote_events",
+            rows,
+            schema_hint={
+                "result_status": "STRING",
+                "comp": "STRING",
+                "home": "STRING",
+                "away": "STRING",
+                "competitors_json": "STRING",
+            },
+        )
         if not temp:
             return
         # Backfill new columns if dest exists without them
-        self._ensure_columns("tote_events", {"result_status": "STRING"})
+        self._ensure_columns("tote_events", {"result_status": "STRING", "comp": "STRING", "home": "STRING", "away": "STRING", "competitors_json": "STRING"})
         self._merge(
             "tote_events",
             temp,
@@ -336,6 +353,50 @@ class BigQuerySink:
             temp,
             key_expr="T.event_id=S.event_id AND T.ts_ms=S.ts_ms",
             update_set="status=S.status",
+        )
+
+    def upsert_tote_product_status_log(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_product_status_log", rows, schema_hint={"ts_ms": "INT64"})
+        if not temp:
+            return
+        self._merge(
+            "tote_product_status_log",
+            temp,
+            key_expr="T.product_id=S.product_id AND T.ts_ms=S.ts_ms",
+            update_set="status=S.status",
+        )
+
+    def upsert_tote_selection_status_log(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_selection_status_log", rows, schema_hint={"ts_ms": "INT64"})
+        if not temp:
+            return
+        self._merge(
+            "tote_selection_status_log",
+            temp,
+            key_expr="T.product_id=S.product_id AND T.selection_id=S.selection_id AND T.ts_ms=S.ts_ms",
+            update_set="status=S.status",
+        )
+
+    def upsert_tote_event_updated_log(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_event_updated_log", rows, schema_hint={"ts_ms": "INT64"})
+        if not temp:
+            return
+        self._merge(
+            "tote_event_updated_log",
+            temp,
+            key_expr="T.event_id=S.event_id AND T.ts_ms=S.ts_ms",
+            update_set="payload=S.payload",
+        )
+
+    def upsert_tote_lines_changed_log(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp("tote_lines_changed_log", rows, schema_hint={"ts_ms": "INT64"})
+        if not temp:
+            return
+        self._merge(
+            "tote_lines_changed_log",
+            temp,
+            key_expr="T.product_id=S.product_id AND T.ts_ms=S.ts_ms",
+            update_set="payload=S.payload",
         )
 
     def upsert_tote_competitor_status_log(self, rows: Iterable[Mapping[str, Any]]):
@@ -487,20 +548,27 @@ class BigQuerySink:
             ]),
         )
 
-    def upsert_odds_live(self, rows: Iterable[Mapping[str, Any]]):
-        temp = self._load_to_temp("odds_live", rows, schema_hint={
-            "price": "FLOAT64",
-            "ts_ms": "INT64",
-        })
+    def upsert_raw_tote_probable_odds(self, rows: Iterable[Mapping[str, Any]]):
+        """Append/merge raw probable odds payloads.
+
+        Expected row keys: raw_id (str), fetched_ts (INT64 or STRING ISO), payload (STRING)
+        """
+        temp = self._load_to_temp(
+            "raw_tote_probable_odds",
+            rows,
+            schema_hint={
+                "fetched_ts": "INT64",
+            },
+        )
         if not temp:
             return
         self._merge(
-            "odds_live",
+            "raw_tote_probable_odds",
             temp,
-            key_expr="T.event_id=S.event_id AND T.runner=S.runner AND T.market=S.market AND T.bookmaker=S.bookmaker AND T.ts_ms=S.ts_ms",
+            key_expr="T.raw_id=S.raw_id",
             update_set=",".join([
-                "price=S.price",
-                "source=S.source",
+                "fetched_ts=S.fetched_ts",
+                "payload=S.payload",
             ]),
         )
 
@@ -549,6 +617,212 @@ class BigQuerySink:
         JOIN `{ds}.hr_horses` h ON h.horse_id = r.horse_id
         LEFT JOIN `{ds}.tote_events` te ON te.event_id = r.event_id
         LEFT JOIN ep ON ep.event_id = r.event_id;
+        """
+        job = client.query(sql)
+        job.result()
+
+        # Viability calculator table functions (simple + grid)
+        sql = f"""
+        CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_superfecta_viability_simple`(
+          num_runners INT64,
+          pool_gross_other NUMERIC,
+          lines_covered INT64,
+          stake_per_line NUMERIC,
+          take_rate FLOAT64,
+          net_rollover NUMERIC,
+          include_self_in_pool BOOL,
+          dividend_multiplier FLOAT64,
+          f_share_override FLOAT64
+        )
+        RETURNS TABLE<
+          total_lines INT64,
+          lines_covered INT64,
+          coverage_frac FLOAT64,
+          stake_total NUMERIC,
+          net_pool_if_bet NUMERIC,
+          f_share_used FLOAT64,
+          expected_return NUMERIC,
+          expected_profit NUMERIC,
+          is_positive_ev BOOL,
+          cover_all_stake NUMERIC,
+          cover_all_expected_profit NUMERIC,
+          cover_all_is_positive BOOL,
+          cover_all_o_min_break_even NUMERIC,
+          coverage_frac_min_positive FLOAT64
+        > AS (
+          WITH base AS (
+            SELECT
+              CAST(num_runners AS INT64) AS N,
+              GREATEST(num_runners * (num_runners-1) * (num_runners-2) * (num_runners-3), 0) AS C,
+              CAST(pool_gross_other AS NUMERIC) AS O,
+              CAST(lines_covered AS INT64) AS M,
+              CAST(stake_per_line AS NUMERIC) AS stake_val,
+              CAST(take_rate AS FLOAT64) AS t,
+              CAST(net_rollover AS NUMERIC) AS R,
+              include_self_in_pool AS inc_self,
+              CAST(dividend_multiplier AS FLOAT64) AS mult,
+              CAST(f_share_override AS FLOAT64) AS f_fix
+          ),
+          k AS (
+            SELECT *, CASE WHEN C>0 THEN LEAST(GREATEST(M,0), C) ELSE 0 END AS M_adj FROM base
+          ),
+          cur AS (
+            SELECT *, SAFE_DIVIDE(M_adj, C) AS alpha, (M_adj * stake_val) AS S,
+              (CASE WHEN inc_self THEN (M_adj * stake_val) ELSE 0 END) AS S_inc
+            FROM k
+          ),
+          fshare AS (
+            SELECT *,
+              CASE WHEN C=0 OR (C*stake_val*stake_val + O)=0 THEN 0.0 ELSE CAST( (C*stake_val*stake_val) / (C*stake_val*stake_val + O) AS FLOAT64 ) END AS f_auto,
+              CAST( mult * ( (1.0 - t) * ( (O + S_inc) ) + R ) AS NUMERIC ) AS NetPool_now
+            FROM cur
+          ),
+          used AS (
+            SELECT *, CAST(COALESCE(f_fix, f_auto) AS FLOAT64) AS f_used FROM fshare
+          ),
+          now_metrics AS (
+            SELECT *, CAST(alpha * f_used * NetPool_now AS NUMERIC) AS ExpReturn,
+              CAST(alpha * f_used * NetPool_now - S AS NUMERIC) AS ExpProfit,
+              (alpha * f_used * NetPool_now - S) > 0 AS is_pos
+            FROM used
+          ),
+          cover_all AS (
+            SELECT *, CAST(C * stake_val AS NUMERIC) AS S_all,
+              CAST(CASE WHEN inc_self THEN (C * stake_val) ELSE 0 END AS NUMERIC) AS S_all_inc,
+              CAST( mult * ( (1.0 - t) * (O + (CASE WHEN inc_self THEN (C*stake_val) ELSE 0 END)) + R ) AS NUMERIC) AS NetPool_all,
+              CAST( CAST(COALESCE(f_fix, f_auto) AS FLOAT64) * CAST( mult * ( (1.0 - t) * (O + (CASE WHEN inc_self THEN (C*stake_val) ELSE 0 END)) + R ) AS NUMERIC) - (C * stake_val) AS NUMERIC) AS ExpProfit_all
+            FROM now_metrics
+          ),
+          cover_all_viab AS (
+            SELECT *, (ExpProfit_all > 0) AS cover_all_pos,
+              CAST( SAFE_DIVIDE( (C*stake_val) - (CAST(f_used AS FLOAT64) * mult * ( (1.0 - t) * (S_all_inc) + R ) ), (CAST(f_used AS FLOAT64) * mult * (1.0 - t)) ) AS NUMERIC ) AS O_min_cover_all
+            FROM cover_all
+          ),
+          alpha_min AS (
+            SELECT *,
+              CASE
+                WHEN C=0 OR stake_val=0 OR f_used<=0 OR (1.0 - t)<=0 THEN NULL
+                WHEN inc_self THEN LEAST(1.0, GREATEST(0.0,
+                  SAFE_DIVIDE(
+                    CAST(C*stake_val AS FLOAT64) - (f_used * mult * ( (1.0 - t) * CAST(O AS FLOAT64) + CAST(R AS FLOAT64) )),
+                    (f_used * mult * (1.0 - t) * CAST(C*stake_val AS FLOAT64))
+                  )
+                ))
+                WHEN (f_used * mult * ( (1.0 - t) * CAST(O AS FLOAT64) + CAST(R AS FLOAT64) )) > CAST(C*stake_val AS FLOAT64)
+                  THEN 0.0
+                ELSE NULL
+              END AS alpha_min_pos
+            FROM cover_all_viab
+          )
+          SELECT C AS total_lines, M_adj AS lines_covered, alpha AS coverage_frac, S AS stake_total,
+                 NetPool_now AS net_pool_if_bet, f_used AS f_share_used, ExpReturn AS expected_return,
+                 ExpProfit AS expected_profit, is_pos AS is_positive_ev,
+                 (C*stake_val) AS cover_all_stake, ExpProfit_all AS cover_all_expected_profit,
+                 cover_all_pos AS cover_all_is_positive, O_min_cover_all AS cover_all_o_min_break_even,
+                 alpha_min_pos AS coverage_frac_min_positive
+          FROM alpha_min
+        );
+        """
+        job = client.query(sql); job.result()
+
+        sql = f"""
+        CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_superfecta_viability_grid`(
+          num_runners INT64,
+          pool_gross_other NUMERIC,
+          stake_per_line NUMERIC,
+          take_rate FLOAT64,
+          net_rollover NUMERIC,
+          include_self_in_pool BOOL,
+          dividend_multiplier FLOAT64,
+          f_share_override FLOAT64,
+          steps INT64
+        )
+        RETURNS TABLE<
+          coverage_frac FLOAT64,
+          lines_covered INT64,
+          stake_total NUMERIC,
+          net_pool_if_bet NUMERIC,
+          f_share_used FLOAT64,
+          expected_return NUMERIC,
+          expected_profit NUMERIC,
+          is_positive_ev BOOL
+        > AS (
+          WITH cfg AS (
+            SELECT
+              CAST(num_runners AS INT64) AS N,
+              GREATEST(num_runners * (num_runners-1) * (num_runners-2) * (num_runners-3), 0) AS C,
+              CAST(pool_gross_other AS NUMERIC) AS O,
+              CAST(stake_per_line AS NUMERIC) AS stake_val,
+              CAST(take_rate AS FLOAT64) AS t,
+              CAST(net_rollover AS NUMERIC) AS R,
+              include_self_in_pool AS inc_self,
+              CAST(dividend_multiplier AS FLOAT64) AS mult,
+              CAST(f_share_override AS FLOAT64) AS f_fix,
+              CAST(GREATEST(steps,1) AS INT64) AS K
+          ), grid AS (
+            SELECT N,C,O,stake_val,t,R,inc_self,mult,f_fix,K, GENERATE_ARRAY(1, K) AS arr FROM cfg
+          ), grid_rows AS (
+            SELECT
+              N,C,O,stake_val,t,R,inc_self,mult,f_fix,K,
+              SAFE_DIVIDE(i, K) AS alpha,
+              CAST(ROUND(SAFE_DIVIDE(i, K) * C) AS INT64) AS L
+            FROM grid, UNNEST(arr) AS i
+          ), calc AS (
+            SELECT
+              N,C,O,stake_val,t,R,inc_self,mult,f_fix,
+              alpha, L,
+              (L * stake_val) AS S,
+              (CASE WHEN inc_self THEN (L * stake_val) ELSE 0 END) AS S_inc,
+              CASE WHEN C=0 OR (C*stake_val*stake_val + O)=0 THEN 0.0 ELSE CAST( (C*stake_val*stake_val) / (C*stake_val*stake_val + O) AS FLOAT64 ) END AS f_auto
+            FROM grid_rows
+          )
+          SELECT
+            alpha AS coverage_frac,
+            L AS lines_covered,
+            S AS stake_total,
+            CAST(mult * ( (1.0 - t) * (O + S_inc) + R ) AS NUMERIC) AS net_pool_if_bet,
+            CAST(COALESCE(f_fix, f_auto) AS FLOAT64) AS f_share_used,
+            CAST(alpha * COALESCE(f_fix, f_auto) * (mult * ( (1.0 - t) * (O + S_inc) + R )) AS NUMERIC) AS expected_return,
+            CAST(alpha * COALESCE(f_fix, f_auto) * (mult * ( (1.0 - t) * (O + S_inc) + R )) - S AS NUMERIC) AS expected_profit,
+            (alpha * COALESCE(f_fix, f_auto) * (mult * ( (1.0 - t) * (O + S_inc) + R )) - S) > 0 AS is_positive_ev
+          FROM calc
+        );
+        """
+        job = client.query(sql); job.result()
+
+        
+
+        # vw_products_coverage: per-product coverage and missing-data flags
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_products_coverage` AS
+        SELECT
+          p.product_id,
+          p.event_id,
+          UPPER(p.bet_type) AS bet_type,
+          COALESCE(p.status, '') AS status,
+          p.currency,
+          p.start_iso,
+          COALESCE(te.name, p.event_name) AS event_name,
+          COALESCE(te.venue, p.venue) AS venue,
+          COUNT(s.selection_id) AS n_selections,
+          te.event_id IS NOT NULL AS event_present,
+          (COUNT(s.selection_id) = 0) AS no_selections,
+          (te.event_id IS NULL) AS missing_event,
+          (p.start_iso IS NULL OR p.start_iso = '') AS missing_start_iso
+        FROM `{ds}.tote_products` p
+        LEFT JOIN `{ds}.tote_events` te ON te.event_id = p.event_id
+        LEFT JOIN `{ds}.tote_product_selections` s ON s.product_id = p.product_id
+        GROUP BY p.product_id, p.event_id, bet_type, status, p.currency, p.start_iso, event_name, venue, event_present, missing_event, missing_start_iso;
+        """
+        job = client.query(sql)
+        job.result()
+
+        # vw_products_coverage_issues: only products with missing data
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_products_coverage_issues` AS
+        SELECT *
+        FROM `{ds}.vw_products_coverage`
+        WHERE no_selections OR missing_event OR missing_start_iso;
         """
         job = client.query(sql)
         job.result()
@@ -686,7 +960,7 @@ class BigQuerySink:
           JOIN top_r tr2 ON tr2.runner_id != tr1.runner_id
           JOIN top_r tr3 ON tr3.runner_id NOT IN (tr1.runner_id, tr2.runner_id)
           JOIN top_r tr4 ON tr4.runner_id NOT IN (tr1.runner_id, tr2.runner_id, tr3.runner_id)
-          JOIN tot t USING (product_id)
+          JOIN tot t ON t.product_id = tr1.product_id
         );
         """
         job = client.query(sql); job.result()
@@ -763,8 +1037,9 @@ class BigQuerySink:
             cov.cum_p,
             cov.line_index * stake_per_line AS stake_total,
             SAFE_DIVIDE(
-              (cov.line_index * stake_per_line) - f_share * (0.70 * (cov.line_index * stake_per_line) + net_rollover),
-              0.70 * f_share
+              (cov.line_index * stake_per_line)
+              - CAST(f_share AS NUMERIC) * (CAST(0.70 AS NUMERIC) * (cov.line_index * stake_per_line) + net_rollover),
+              CAST(0.70 AS NUMERIC) * CAST(f_share AS NUMERIC)
             ) AS o_min_break_even
           FROM cov
         );
@@ -936,6 +1211,40 @@ class BigQuerySink:
           MAX(ts) AS ts
         FROM `{ds}.tote_product_dividends`
         GROUP BY product_id, selection;
+        """
+        job = client.query(sql)
+        job.result()
+
+        # vw_tote_probable_odds: parse latest probable odds per selection from raw payloads
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_tote_probable_odds` AS
+        WITH exploded AS (
+          SELECT
+            r.fetched_ts,
+            JSON_EXTRACT_SCALAR(sel, '$.selectionId') AS selection_id,
+            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds[0].decimal') AS FLOAT64) AS decimal_odds
+          FROM `{ds}.raw_tote_probable_odds` r,
+          UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
+          UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line,
+          UNNEST(JSON_EXTRACT_ARRAY(line, '$.legs')) AS leg,
+          UNNEST(JSON_EXTRACT_ARRAY(leg, '$.lineSelections')) AS sel
+        ), latest AS (
+          SELECT selection_id,
+                 ANY_VALUE(decimal_odds) AS decimal_odds,
+                 MAX(fetched_ts) AS ts_ms
+          FROM exploded
+          WHERE selection_id IS NOT NULL AND decimal_odds IS NOT NULL
+          GROUP BY selection_id
+        )
+        SELECT
+          s.product_id,
+          s.selection_id,
+          s.number AS cloth_number,
+          l.decimal_odds,
+          l.ts_ms
+        FROM latest l
+        JOIN `{ds}.tote_product_selections` s
+          ON s.selection_id = l.selection_id;
         """
         job = client.query(sql)
         job.result()

@@ -13,10 +13,10 @@ from flask import Flask, request
 import json
 import time
 
-from sports.gcp import parse_pubsub_envelope, upload_text_to_bucket
-from sports.config import cfg
-from sports.providers.tote_api import ToteClient, ToteError
-from sports.bq import get_bq_sink
+from .gcp import parse_pubsub_envelope, upload_text_to_bucket
+from .config import cfg
+from .providers.tote_api import ToteClient, ToteError
+from .bq import get_bq_sink
 
 app = Flask(__name__)
 
@@ -71,6 +71,30 @@ def handle_pubsub() -> tuple[str, int]:
                         except Exception:
                             # Swallow BQ errors to avoid Pub/Sub retries
                             pass
+            elif op in ("probable", "probable_odds"):
+                # Expected: path to Tote probable odds endpoint for a product or meeting
+                path = payload.get("path") or "/"
+                base = cfg.tote_graphql_url or ""
+                if path.startswith("http://") or path.startswith("https://"):
+                    full_url = path
+                else:
+                    base_root = base.split("/partner/")[0].rstrip("/") if base else ""
+                    full_url = f"{base_root}{path}"
+                headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
+                resp = requests.get(full_url, headers=headers, timeout=20)
+                resp.raise_for_status()
+                upload_text_to_bucket(bucket, name, resp.text)
+                # Also upsert to raw_tote_probable_odds if BQ enabled
+                sink = get_bq_sink()
+                if sink and sink.enabled:
+                    try:
+                        rid = f"probable:{int(time.time()*1000)}"
+                        ts_ms = int(time.time()*1000)
+                        sink.upsert_raw_tote_probable_odds([
+                            {"raw_id": rid, "fetched_ts": ts_ms, "payload": resp.text}
+                        ])
+                    except Exception:
+                        pass
             else:
                 # REST path passthrough using requests with Tote auth header
                 path = payload.get("path") or "/"

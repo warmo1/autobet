@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="container mt-3">
+  <h3>Audit Bets (API)</h3>
+  <table class="table table-sm table-striped">
+    <thead><tr><th>Tote Bet ID</th><th>Status</th><th>Selection</th><th>Stake</th><th>Currency</th><th>Created</th></tr></thead>
+    <tbody>
+      {% for b in bets %}
+      <tr>
+        <td>{{ b.tote_bet_id }}</td>
+        <td>{{ b.status }}</td>
+        <td>{{ b.selection }}</td>
+        <td>{{ b.stake }}</td>
+        <td>{{ b.currency }}</td>
+        <td>{{ b.created }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+

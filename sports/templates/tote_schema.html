@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="container mt-3">
+  <h3>Tote GraphQL Schema</h3>
+  {% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+  <p>
+    <a class="btn btn-sm btn-outline-primary" href="{{ url_for('tote_schema_download') }}">Download SDL</a>
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('tote_schema_refresh') }}">Refresh</a>
+    <a class="btn btn-sm btn-outline-info" href="{{ url_for('tote_schema_probe') }}">Probe Products</a>
+    <a class="btn btn-sm btn-outline-dark" href="{{ url_for('tote_schema_queries') }}">Example Queries</a>
+  </p>
+  <div class="mt-3">{{ sdl_html|safe }}</div>
+</div>
+{% endblock %}
+

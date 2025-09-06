@@ -5,7 +5,7 @@ import datetime
 import json
 from typing import Any, Dict, Optional
 
-from sports.providers.tote_api import ToteClient, store_raw
+from ..providers.tote_api import ToteClient, store_raw
 
 # GraphQL query to fetch upcoming racing events and their products.
 # This is a best-effort query based on observed patterns.

@@ -2,11 +2,37 @@
 
 ## Overview
 
-This document outlines the database schema, data import processes, and BigQuery integration for the Autobet project. The primary database is a SQLite database, with data being periodically exported to Google BigQuery for more advanced analysis.
+This document outlines the database schema, data import processes, and BigQuery integration for the Autobet project. The primary data store is Google BigQuery. Legacy SQLite helpers remain in the tree for historical reference but are not used by the web app.
 
-## Local Database Schema
+## BigQuery Schema (active)
 
-The local database schema is defined in `sports/schema.py`. It is a SQLite database, and the schema is created and managed using standard SQL `CREATE TABLE` statements.
+Structured tables and views are created on demand by the BigQuery sink (`sports/bq.py`) when you run `init_db()` or the ingestors. Key tables:
+
+- `tote_events` – tote events with basic metadata
+- `tote_products` – products (bet type, status, totals, event linkage)
+- `tote_product_selections` – selections per leg (cloth/trap numbers)
+- `tote_product_dividends` – latest known dividends per selection
+- `tote_pool_snapshots` – optional time-series of pool totals (from subscriptions)
+- `raw_tote` – raw API payloads
+- `raw_tote_probable_odds` – raw probable odds payloads
+
+Important views:
+
+- `vw_today_gb_events`, `vw_today_gb_superfecta`, `vw_today_gb_superfecta_be`
+- `vw_gb_open_superfecta_next60`, `vw_gb_open_superfecta_next60_be`
+- `vw_superfecta_dividends_latest`
+- `vw_tote_probable_odds`, `vw_probable_odds_by_event`
+- `vw_products_coverage`, `vw_products_coverage_issues`
+
+Run:
+
+```bash
+python -c "from autobet.sports.db import init_db; init_db()"
+```
+
+## Legacy SQLite (deprecated)
+
+The legacy SQLite schema is defined in `sports/schema.py` and was used for early experiments. It is no longer required for running the web app or the current ingestion flows.
  
 ### Core Sporting Tables
  

@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from sports.config import cfg
+from ..config import cfg
 
 
 class ToteError(RuntimeError):
@@ -88,4 +88,3 @@ def store_raw(conn, *, endpoint: str, entity_id: Optional[str], sport: Optional[
         (raw_id, endpoint, entity_id, sport, ts, json.dumps(payload)),
     )
     return raw_id
-
