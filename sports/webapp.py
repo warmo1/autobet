@@ -1,4 +1,3 @@
-from __future__ import annotations
 import os
 import time
 import pandas as pd
@@ -16,6 +15,20 @@ from google.cloud import bigquery
 from .providers.tote_bets import place_audit_superfecta
 from .providers.tote_bets import refresh_bet_status, audit_list_bets, sync_bets_from_api
 from .gcp import publish_pubsub_message
+import itertools
+import math
+from collections import defaultdict
+
+# Helper function for permutations (nPr) - not directly used in PL, but good to have
+def _permutations_count(n, r):
+    if r < 0 or r > n:
+        return 0
+    
+    res = 1
+    for i in range(r):
+        res *= (n - i)
+    return res
+
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET", "dev-secret")
@@ -185,6 +198,7 @@ def _row_to_json_response(df_row_series):
     return app.response_class(json.dumps(row_dict), mimetype="application/json")
 
 
+# This function is already in webapp.py, but including it here for context of its usage
 def sql_df(*args, **kwargs) -> pd.DataFrame:
     """Runs a query against BigQuery and returns a pandas DataFrame.
 
@@ -544,12 +558,6 @@ def tote_superfecta_page():
 
 def create_app():
     """Factory for Flask app; also starts background subscribers if configured."""
-    try:
-        # Ensure required BQ tables and views exist so status page and queries don't error
-        init_db()
-    except Exception:
-        # Don't block app if BQ is not fully configured; status endpoints will report errors
-        pass
     try:
         _maybe_start_pool_thread()
     except Exception:
@@ -2056,6 +2064,244 @@ def tote_superfecta_detail(product_id: str):
         finishing=finishing,
         conditions=conditions,
         recent_bets=recent_bets,
+    )
+
+@app.route("/tote/manual-calculator", methods=["GET", "POST"])
+def manual_calculator_page():
+    # Default values for form
+    calc_params = {
+        "num_runners": 8,
+        "bet_type": "SUPERFECTA",
+        "runners": [
+            {"name": f"Runner {i+1}", "odds": round((i+2)*2.0, 2), "is_key": False, "is_poor": False} for i in range(8)
+        ],
+        "bankroll": 100.0,
+        "key_horse_mult": 2.0,
+        "poor_horse_mult": 0.5,
+        "concentration": 0.0,
+        "market_inefficiency": 0.10,
+        "take_rate": 0.30,
+        "net_rollover": 0.0,
+        "inc_self": True,
+        "div_mult": 1.0,
+        "f_fix": None,
+        "pool_gross_other": 10000.0,
+    }
+
+    results = {}
+    errors = []
+
+    if request.method == "POST":
+        # Parse inputs from form
+        try:
+            calc_params["num_runners"] = int(request.form.get("num_runners", calc_params["num_runners"]))
+            calc_params["bet_type"] = request.form.get("bet_type", calc_params["bet_type"]).upper()
+            calc_params["bankroll"] = float(request.form.get("bankroll", calc_params["bankroll"]))
+            # New weighting multipliers
+            calc_params["key_horse_mult"] = float(request.form.get("key_horse_mult", calc_params["key_horse_mult"]))
+            calc_params["poor_horse_mult"] = float(request.form.get("poor_horse_mult", calc_params["poor_horse_mult"]))
+            calc_params["concentration"] = float(request.form.get("concentration", calc_params["concentration"]))
+            calc_params["market_inefficiency"] = float(request.form.get("market_inefficiency", calc_params["market_inefficiency"]))
+            calc_params["take_rate"] = float(request.form.get("take_rate", calc_params["take_rate"]))
+            calc_params["net_rollover"] = float(request.form.get("net_rollover", calc_params["net_rollover"]))
+            calc_params["inc_self"] = request.form.get("inc_self") == "1"
+            calc_params["div_mult"] = float(request.form.get("div_mult", calc_params["div_mult"]))
+            calc_params["f_fix"] = float(request.form.get("f_fix")) if request.form.get("f_fix") else None
+            calc_params["pool_gross_other"] = float(request.form.get("pool_gross_other", calc_params["pool_gross_other"]))
+
+            # Validate inputs
+            if calc_params["num_runners"] <= 0:
+                errors.append("Number of runners must be positive.")
+            if calc_params["bankroll"] <= 0:
+                errors.append("Bankroll must be positive.")
+            if not (0 <= calc_params["take_rate"] < 1):
+                errors.append("Takeout rate must be between 0 and 1 (e.g., 0.30 for 30%).")
+
+            # Parse runner grid
+            runners_from_form = []
+            try:
+                for i in range(calc_params["num_runners"]):
+                    odds = float(request.form.get(f"runner_odds_{i}", "10.0"))
+                    if odds <= 1.0: errors.append(f"Runner {i+1} odds must be greater than 1.0.")
+                    runners_from_form.append({
+                        "name": request.form.get(f"runner_name_{i}", f"Runner {i+1}"),
+                        "odds": odds,
+                        "is_key": request.form.get(f"runner_key_{i}") == "on",
+                        "is_poor": request.form.get(f"runner_poor_{i}") == "on",
+                    })
+                calc_params["runners"] = runners_from_form
+            except ValueError as e:
+                errors.append(f"Invalid odds format: {e}. Please use valid numbers.")
+
+        except ValueError as e:
+            errors.append(f"Invalid input: {e}. Please check numeric fields.")
+
+        if not errors:
+            # Determine K (positions for bet type)
+            k_map = {"WIN": 1, "EXACTA": 2, "TRIFECTA": 3, "SUPERFECTA": 4}
+            k_perm = k_map.get(calc_params["bet_type"], 4) # Default to Superfecta if unknown
+
+            if calc_params["num_runners"] < k_perm:
+                errors.append(f"Not enough runners ({calc_params['num_runners']}) for {calc_params['bet_type']} (needs at least {k_perm}).")
+
+        if not errors:
+            # --- Plackett-Luce Calculation ---
+            # Calculate final weights for each runner
+            runner_weights = []
+            for i, r in enumerate(calc_params["runners"]):
+                base_weight = 1.0 / r["odds"]
+                if r["is_key"]: base_weight *= calc_params["key_horse_mult"]
+                if r["is_poor"]: base_weight *= calc_params["poor_horse_mult"]
+                runner_weights.append(base_weight)
+
+            # Map runner IDs to their final weights and names
+            runners_with_strengths = [
+                {"id": i + 1, "name": calc_params["runners"][i]["name"], "strength": runner_weights[i]}
+                for i in range(calc_params["num_runners"])
+            ]
+            
+            # Generate all permutations and calculate PL probabilities
+            pl_permutations = []
+            for perm_tuple in itertools.permutations(runners_with_strengths, k_perm):
+                current_strength_pool = list(runners_with_strengths) # Copy to modify
+                perm_prob = 1.0
+                
+                for i, runner_details in enumerate(perm_tuple):
+                    runner_id = runner_details["id"]
+                    runner_strength = runner_details["strength"]
+                    remaining_strength_sum = sum(r['strength'] for r in current_strength_pool)
+                    if remaining_strength_sum == 0:
+                        perm_prob = 0.0 # Avoid division by zero if all remaining strengths are zero
+                        break
+                    
+                    prob_this_pos = runner_strength / remaining_strength_sum
+                    perm_prob *= prob_this_pos
+                    
+                    # Remove this runner from the pool for the next position's calculation by filtering on id
+                    current_strength_pool = [r for r in current_strength_pool if r["id"] != runner_id]
+                
+                pl_permutations.append({
+                    "line": " - ".join(str(r["name"]) for r in perm_tuple),
+                    "probability": perm_prob,
+                    "runners_detail": perm_tuple # For display/debugging
+                })
+            
+            # Sort by probability (descending)
+            pl_permutations.sort(key=lambda x: x["probability"], reverse=True)
+
+            # --- EV Optimization Loop ---
+            ev_grid = []
+            optimal_ev_scenario = None
+            max_ev = -float("inf")
+            C = len(pl_permutations)
+
+            for m in range(1, C + 1):
+                covered_lines = pl_permutations[:m]
+                hit_rate = sum(p['probability'] for p in covered_lines)
+                
+                S = calc_params['bankroll']
+                S_inc = S if calc_params['inc_self'] else 0.0
+                O = calc_params['pool_gross_other']
+                t = calc_params['take_rate']
+                R = calc_params['net_rollover']
+                mult = calc_params['div_mult']
+                
+                # Apply market inefficiency to O for f-share calculation
+                O_effective = O * (1.0 - calc_params['market_inefficiency'])
+
+                # Enhanced f-share calculation. Assumes others' money 'O' is spread according to PL probabilities.
+                # Our f-share on any of our covered lines is our effective stake density vs the market's.
+                if hit_rate > 0:
+                    stake_density = S / hit_rate
+                    f_auto = stake_density / (stake_density + O_effective)
+                else:
+                    f_auto = 0.0
+                f_used = float(calc_params['f_fix']) if (calc_params['f_fix'] is not None) else f_auto
+                
+                net_pool_if_bet = mult * (((1.0 - t) * (O + S_inc)) + R)
+                expected_return = hit_rate * f_used * net_pool_if_bet
+                expected_profit = expected_return - S
+                
+                ev_grid.append({"lines_covered": m, "hit_rate": hit_rate, "expected_profit": expected_profit})
+                
+                if expected_profit > max_ev:
+                    max_ev = expected_profit
+                    optimal_ev_scenario = {
+                        "lines_covered": m,
+                        "hit_rate": hit_rate,
+                        "expected_profit": expected_profit,
+                        "expected_return": expected_return,
+                        "f_share_used": f_used,
+                        "net_pool_if_bet": net_pool_if_bet,
+                        "total_stake": S,
+                    }
+
+            # --- Strategy Adjustment & Final Calculation ---
+            display_scenario = None
+            staking_plan = []
+            if optimal_ev_scenario:
+                concentration = calc_params["concentration"]
+                max_ev_lines = optimal_ev_scenario['lines_covered']
+                
+                # Calculate the final number of lines to cover based on concentration slider
+                final_lines_to_cover = max(1, int(round(max_ev_lines * (1.0 - concentration) + 1.0 * concentration)))
+
+                # Build the scenario that will actually be displayed and used for staking
+                final_covered_lines = pl_permutations[:final_lines_to_cover]
+                final_hit_rate = sum(p['probability'] for p in final_covered_lines)
+                
+                S = calc_params['bankroll']
+                S_inc = S if calc_params['inc_self'] else 0.0
+                O = calc_params['pool_gross_other']
+                t = calc_params['take_rate']
+                R = calc_params['net_rollover']
+                mult = calc_params['div_mult']
+                
+                # Apply market inefficiency to O for f-share calculation
+                O_effective = O * (1.0 - calc_params['market_inefficiency'])
+
+                # Enhanced f-share calculation for the final displayed scenario.
+                if final_hit_rate > 0:
+                    stake_density = S / final_hit_rate
+                    f_auto = stake_density / (stake_density + O_effective)
+                else:
+                    f_auto = 0.0
+                f_used = float(calc_params['f_fix']) if (calc_params['f_fix'] is not None) else f_auto
+                
+                net_pool_if_bet = mult * (((1.0 - t) * (O + S_inc)) + R)
+                expected_return = final_hit_rate * f_used * net_pool_if_bet
+                expected_profit = expected_return - S
+                
+                display_scenario = {
+                    "lines_covered": final_lines_to_cover,
+                    "hit_rate": final_hit_rate,
+                    "expected_profit": expected_profit,
+                    "expected_return": expected_return,
+                    "f_share_used": f_used,
+                    "net_pool_if_bet": net_pool_if_bet,
+                    "total_stake": S,
+                }
+
+                # Calculate the weighted staking plan for the final scenario
+                prob_sum_final = sum(p['probability'] for p in final_covered_lines)
+                for line in final_covered_lines:
+                    line['stake'] = (line['probability'] / prob_sum_final) * calc_params['bankroll'] if prob_sum_final > 0 else 0
+                staking_plan = final_covered_lines
+            
+            results["pl_model"] = {
+                "best_scenario": display_scenario,
+                "optimal_ev_scenario": optimal_ev_scenario,
+                "staking_plan": staking_plan,
+                "ev_grid": ev_grid,
+                "total_possible_lines": C,
+            }
+
+    return render_template(
+        "manual_calculator.html",
+        calc_params=calc_params,
+        results=results,
+        errors=errors,
+        bet_types=["WIN", "EXACTA", "TRIFECTA", "SUPERFECTA"]
     )
 
 @app.route("/api/tote/bet_status")

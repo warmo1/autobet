@@ -1,0 +1,388 @@
+{% extends 'base.html' %}
+{% block title %}Manual Betting Calculator{% endblock %}
+
+{% block head %}
+{{ super() }}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="container mt-3">
+    <h1>Manual Betting Calculator</h1>
+    <p class="text-muted">Model a race by inputting runner odds and find the optimal number of combinations to bet on to maximize Expected Value (EV).</p>
+
+    {% if errors %}
+        <div class="alert alert-danger">
+            <strong>Errors:</strong>
+            <ul>
+                {% for error in errors %}
+                    <li>{{ error }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+    {% endif %}
+
+    <div class="card mb-4">
+        <div class="card-header">
+            <h4>1. Input Parameters</h4>
+            <p class="text-muted small mb-0">Adjust the race details, your betting strategy, and financial assumptions.</p>
+        </div>
+        <div class="card-body">
+            <form method="POST">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label for="num_runners" class="form-label">Number of Runners (N)</label>
+                        <input type="number" class="form-control" id="num_runners" name="num_runners" value="{{ calc_params.num_runners }}" min="1" required>
+                        <div class="form-text">Total horses/dogs in the race.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label for="bet_type" class="form-label">Bet Type</label>
+                        <select class="form-select" id="bet_type" name="bet_type" required>
+                            {% for bt in bet_types %}
+                                <option value="{{ bt }}" {% if calc_params.bet_type == bt %}selected{% endif %}>{{ bt }}</option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">Determines the number of positions (K).</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label for="bankroll" class="form-label">Total Bankroll to Stake (£)</label>
+                        <input type="number" step="0.01" class="form-control" id="bankroll" name="bankroll" value="{{ calc_params.bankroll }}" min="0.01" required>
+                        <div class="form-text">Total to bet, distributed across covered lines.</div>
+                    </div>
+                </div>
+
+                <hr class="my-4">
+
+                <h5>Runner Details & Weighting</h5>
+                <div class="row g-3 mb-3">
+                    <div class="col-md-6">
+                        <label for="key_horse_mult" class="form-label">Key Horse Multiplier</label>
+                        <input type="number" step="0.1" class="form-control" id="key_horse_mult" name="key_horse_mult" value="{{ calc_params.key_horse_mult }}" min="1" required>
+                        <div class="form-text">Multiplier for "Key" horses' strength (e.g., 2.0).</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="poor_horse_mult" class="form-label">Poor Form Multiplier</label>
+                        <input type="number" step="0.1" class="form-control" id="poor_horse_mult" name="poor_horse_mult" value="{{ calc_params.poor_horse_mult }}" min="0" max="1" required>
+                        <div class="form-text">Multiplier for "Poor Form" horses' strength (e.g., 0.5).</div>
+                    </div>
+                </div>
+                <div id="runners-grid" class="table-responsive">
+                    <!-- JS will populate this table -->
+                </div>
+
+                <hr class="my-4">
+
+                <h5>Strategy & Risk Adjustment</h5>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label for="concentration" class="form-label">Bet Concentration</label>
+                        <div class="d-flex align-items-center">
+                            <span class="small text-muted me-2">Max Coverage (EV)</span>
+                            <input type="range" class="form-range" id="concentration" name="concentration" min="0" max="1" step="0.01" value="{{ calc_params.concentration }}">
+                            <span class="small text-muted ms-2">Max Concentration</span>
+                        </div>
+                        <div class="form-text">Adjust the trade-off between covering more lines (Max EV) and concentrating your stake on fewer, higher-probability lines (Max Concentration).</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="market_inefficiency" class="form-label">Market Inefficiency Assumption</label>
+                        <div class="d-flex align-items-center">
+                            <span class="small text-muted me-2">0%</span>
+                            <input type="range" class="form-range" id="market_inefficiency" name="market_inefficiency" min="0" max="0.9" step="0.01" value="{{ calc_params.market_inefficiency }}">
+                            <span class="small text-muted ms-2">90%</span>
+                        </div>
+                        <div class="form-text">Assume a percentage of others' money is "wasted" on very low-probability bets, increasing your potential f-share.</div>
+                    </div>
+                </div>
+
+                <hr class="my-4">
+
+                <h5>Financial Parameters</h5>
+                <div class="row g-3">
+                    <div class="col-md-3">
+                        <label for="take_rate" class="form-label">Takeout Rate (t)</label>
+                        <input type="number" step="0.01" class="form-control" id="take_rate" name="take_rate" value="{{ calc_params.take_rate }}" min="0" max="0.99" required>
+                        <div class="form-text">Operator's cut from the gross pool (e.g., 0.30 for 30%).</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="net_rollover" class="form-label">Net Rollover (£)</label>
+                        <input type="number" step="0.01" class="form-control" id="net_rollover" name="net_rollover" value="{{ calc_params.net_rollover }}" min="0" required>
+                        <div class="form-text">Funds carried over from previous races.</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="pool_gross_other" class="form-label">Current Pool Gross (Others' £)</label>
+                        <input type="number" step="0.01" class="form-control" id="pool_gross_other" name="pool_gross_other" value="{{ calc_params.pool_gross_other }}" min="0" required>
+                        <div class="form-text">Money in the pool from other bettors.</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="div_mult" class="form-label">Dividend Multiplier</label>
+                        <input type="number" step="0.01" class="form-control" id="div_mult" name="div_mult" value="{{ calc_params.div_mult }}" min="0" required>
+                        <div class="form-text">Factor applied to the dividend (e.g., 1.0).</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="f_fix" class="form-label">Your f-share Override (optional)</label>
+                        <input type="number" step="0.0001" class="form-control" id="f_fix" name="f_fix" value="{{ calc_params.f_fix if calc_params.f_fix is not none }}" placeholder="Auto-calculate if blank">
+                        <div class="form-text">Your proportion of the winning dividend.</div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-check form-switch mt-4">
+                            <input class="form-check-input" type="checkbox" id="inc_self" name="inc_self" value="1" {% if calc_params.inc_self %}checked{% endif %}>
+                            <label class="form-check-label" for="inc_self">Include my stake in pool</label>
+                            <div class="form-text">Does your stake contribute to the total pool?</div>
+                        </div>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary mt-4">Calculate Optimal Bet</button>
+            </form>
+        </div>
+    </div>
+
+    {% if results and results.pl_model %}
+        <div class="card mb-4">
+            <div class="card-header">
+                <h4>2. Optimal Strategy Results</h4>
+                <p class="text-muted small mb-0">Based on your inputs, the model has found the number of lines to cover that maximizes your Expected Profit.</p>
+            </div>
+            <div class="card-body">
+                {% with pl_res = results.pl_model %}
+                    {% with best = pl_res.best_scenario %}
+                        {% if not best %}
+                            <div class="alert alert-warning" role="alert">
+                                <strong>No Optimal Strategy Found.</strong> The model could not find a profitable betting strategy with the given parameters. This could be due to a high takeout rate, low pool size, or unfavorable odds. It may also occur if there are not enough runners for the selected bet type.
+                            </div>
+                        {% else %}
+                        {% with suggestion = pl_res.suggestion %}
+                            {% if suggestion %}
+                                <div class="alert alert-primary" role="alert">
+                                    <h5 class="alert-heading">💡 EV+ Suggestion</h5>
+                                    <p>Your current settings result in a negative expected profit. To find a potentially profitable strategy, the model suggests the following adjustment:</p>
+                                    <ul>
+                                        <li>Keep coverage at <strong>{{ suggestion.lines_covered }}</strong> lines (the point of maximum EV efficiency).</li>
+                                        <li>Increase <strong>Market Inefficiency</strong> to at least <strong>{{ "%.1f"|format(suggestion.market_inefficiency * 100) }}%</strong>.</li>
+                                    </ul>
+                                    <p class="mb-0 small">This assumes that a larger portion of the public's money is on very poor bets, which increases your potential dividend share. You can apply this setting using the slider above and recalculate.</p>
+                                </div>
+                            {% endif %}
+                        {% endwith %}
+                        {% with optimal_ev = pl_res.optimal_ev_scenario %}
+                            {% if optimal_ev and optimal_ev.lines_covered != best.lines_covered %}
+                                <div class="alert alert-info small" role="alert">
+                                    <strong>Note:</strong> Your current strategy covers <strong>{{ best.lines_covered }}</strong> lines. The model's maximum EV strategy suggests covering <strong>{{ optimal_ev.lines_covered }}</strong> lines for a potential profit of <strong>£{{ "%.2f"|format(optimal_ev.expected_profit) }}</strong>.
+                                </div>
+                            {% endif %}
+                        {% endwith %}
+                        <div class="row">
+                            <div class="col-lg-6">
+                                <h5>Optimal Staking Plan</h5>
+                                <ul class="list-group mb-3">
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Total Bankroll to Stake:
+                                        <strong>£{{ "%.2f"|format(calc_params.bankroll) }}</strong>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Optimal Lines to Cover:
+                                        <span class="badge bg-success rounded-pill">{{ best.lines_covered | int }} / {{ pl_res.total_possible_lines | int }}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Coverage of Total Permutations:
+                                        <strong>{{ "%.2f"|format(100 * best.lines_covered / pl_res.total_possible_lines if pl_res.total_possible_lines > 0 else 0) }}%</strong>
+                                    </li>
+                                </ul>
+                                
+                                <h5>Viability of Optimal Strategy</h5>
+                                <p class="small text-muted">This EV calculation is for the optimal scenario, where you cover <strong>{{ best.lines_covered | int }}</strong> lines with a total stake of <strong>£{{ "%.2f"|format(best.total_stake) }}</strong>. This strategy has a combined "hit rate" of <strong>{{ "%.2f"|format(best.hit_rate * 100) }}%</strong>.</p>
+                                
+                                <ul class="list-group">
+                                    <li class="list-group-item d-flex justify-content-between"><span>Total Stake (S)</span> <strong>£{{ "%.2f"|format(best.total_stake or 0) }}</strong></li>
+                                    <li class="list-group-item d-flex justify-content-between"><span>Net Pool (if bet)</span> <strong>£{{ "%.2f"|format(best.net_pool_if_bet or 0) }}</strong></li>
+                                    <li class="list-group-item d-flex justify-content-between"><span>f-share Used</span> <strong>{{ "%.4f"|format(best.f_share_used or 0) }}</strong></li>
+                                    <li class="list-group-item d-flex justify-content-between"><span>Expected Return</span> <strong>£{{ "%.2f"|format(best.expected_return or 0) }}</strong></li>
+                                    <li class="list-group-item d-flex justify-content-between {% if best.expected_profit > 0 %}list-group-item-success{% else %}list-group-item-danger{% endif %}">
+                                        <span><strong>Expected Profit</strong></span> <strong>£{{ "%.2f"|format(best.expected_profit or 0) }}</strong>
+                                    </li>
+                                </ul>
+                            </div>
+                            <div class="col-lg-6">
+                                <h5>Top Permutations & Weighted Stakes</h5>
+                                <p class="small text-muted">Showing the highest probability lines from your optimal set of {{ best.lines_covered | int }} combinations. Stakes are weighted by probability.</p>
+                                <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                                    <table class="table table-sm table-striped">
+                                        <thead>
+                                            <tr>
+                                                <th>Rank</th>
+                                                <th>Line (Combination)</th>
+                                                <th>Probability</th>
+                                                <th>Calculated Stake (£)</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for perm in (pl_res.staking_plan | sort(attribute='probability', reverse=True))[:100] %}
+                                                <tr>
+                                                    <td>{{ loop.index }}</td>
+                                                    <td>{{ perm.line }}</td>
+                                                    <td>{{ "%.6f"|format(perm.probability) }}</td>
+                                                    <td><strong>£{{ "%.2f"|format(perm.stake or 0) }}</strong></td>
+                                                </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                        {% endif %}
+                    {% endwith %}
+                {% endwith %}
+            </div>
+        </div>
+
+        {% if results and results.pl_model and results.pl_model.ev_grid %}
+        <div class="card mb-4">
+            <div class="card-header">
+                <h4>3. Expected Profit vs. Lines Covered</h4>
+                <p class="text-muted small mb-0">Visualize the relationship between the number of lines covered and the expected profit, helping to identify the optimal coverage.</p>
+            </div>
+            <div class="card-body">
+                <canvas id="evChart"></canvas>
+            </div>
+        </div>
+        {% endif %}
+
+
+        <div class="card mb-4">
+            <div class="card-header">
+                <h4>4. Understanding the Models (Plain English)</h4>
+            </div>
+            <div class="card-body">
+                <h5>Plackett-Luce Multiplicative Model</h5>
+                <p>Imagine you have a group of runners, each with a certain "strength" (calculated from their odds and your multipliers). The Plackett-Luce model helps us predict the probability of a specific finishing order (like Horse A first, Horse B second, etc.) based on these strengths.</p>
+                <p>Here's how it works for a sequence of finishes (e.g., 1st, 2nd, 3rd, 4th):</p>
+                <ol>
+                    <li><strong>For the 1st position:</strong> The probability of a horse winning is its strength divided by the total strength of *all* runners.</li>
+                    <li><strong>For the 2nd position:</strong> Once the first horse is chosen, we remove it from the pool. The probability of another horse finishing second is its strength divided by the total strength of the *remaining* runners.</li>
+                    <li>This process continues for each subsequent position.</li>
+                </ol>
+                <p>The probability of the entire sequence (e.g., A-B-C-D) is the product of these individual probabilities. This model naturally favors stronger horses and sequences where strong horses finish early.</p>
+
+                <h5>Expected Value (EV) Optimization</h5>
+                <p>The "Expected Profit" you see in the results is a crucial concept. It tells you, on average, how much money you expect to make (or lose) per bet if you were to make this exact bet many, many times. A positive Expected Profit means the bet is mathematically favorable in the long run.</p>
+                <p>The calculator runs a simulation: it checks the EV for covering just the #1 most probable line, then the top 2, then the top 3, and so on, all the way up to covering every possible combination. It then picks the number of lines that resulted in the highest EV. This is your "Optimal Strategy".</p>
+                <ul>
+                    <li><strong>Total Stake (S):</strong> The total amount of money you are putting down, which you defined in the form.</li>
+                    <li><strong>Hit Rate (α):</strong> The combined probability of all the specific combinations in your optimal set. If you cover the top 10% of lines by probability, your hit rate might be 50% (or higher), which is much more efficient than random coverage.</li>
+                    <li><strong>Net Pool (if bet):</strong> The total money available for payout after the operator takes their cut (takeout), and including any rollover, plus your own stake if it contributes to the pool.</li>
+                    <li><strong>f-share Used:</strong> Your estimated share of the winning dividend if you hit. This is calculated from your <strong>stake concentration</strong> (focusing your bankroll on a subset of lines) and the assumed <strong>market inefficiency</strong>. A higher inefficiency setting assumes more of the public's money is on poor bets, which increases your potential share of the dividend on a winning line. You can override this if you have a better estimate.</li>
+                    <li><strong>Expected Return:</strong> This is the average amount you expect to get back from your bet. It's calculated as: `(Hit Rate) × (f-share Used) × (Net Pool)`.</li>
+                    <li><strong>Expected Profit:</strong> This is simply your `Expected Return - Total Stake`. If it's positive, you have a theoretical edge!</li>
+                    <li><strong>Weighted Staking:</strong> The "Calculated Stake" for each line is determined by its probability relative to all other lines you are covering. Lines with a higher probability receive a larger portion of your total bankroll, which is a common strategy to maximize growth.</li>
+                </ul>
+                <p class="text-muted small">Remember, these calculations are based on the inputs you provide. Real-world results can vary due to many factors, including the actual finishing order, changes in pool size, and the distribution of other bettors' stakes.</p>
+            </div>
+        </div>
+    {% endif %}
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const numRunnersInput = document.getElementById('num_runners');
+    const runnersGrid = document.getElementById('runners-grid');
+    const existingRunners = {{ calc_params.runners | tojson }};
+
+    function updateRunnersGrid() {
+        const numRunners = parseInt(numRunnersInput.value, 10) || 0;
+        let tableHtml = `
+            <table class="table table-sm table-bordered">
+                <thead class="table-light">
+                    <tr>
+                        <th style="width: 5%;">#</th>
+                        <th>Name</th>
+                        <th style="width: 15%;">Odds</th>
+                        <th style="width: 10%;">Key Horse</th>
+                        <th style="width: 10%;">Poor Form</th>
+                        <th style="width: 15%;">Implied Strength</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        for (let i = 0; i < numRunners; i++) {
+            const runner = existingRunners[i] || { name: `Runner ${i+1}`, odds: 10.0, is_key: false, is_poor: false };
+            const strength = (1 / (parseFloat(runner.odds) || 10.0)).toFixed(4);
+            tableHtml += `
+                <tr>
+                    <td>${i + 1}</td>
+                    <td><input type="text" name="runner_name_${i}" class="form-control form-control-sm" value="${runner.name}" required></td>
+                    <td><input type="number" step="0.01" name="runner_odds_${i}" class="form-control form-control-sm runner-odds" value="${runner.odds}" min="1.01" required></td>
+                    <td class="text-center"><div class="form-check d-flex justify-content-center"><input class="form-check-input" type="checkbox" name="runner_key_${i}" ${runner.is_key ? 'checked' : ''}></div></td>
+                    <td class="text-center"><div class="form-check d-flex justify-content-center"><input class="form-check-input" type="checkbox" name="runner_poor_${i}" ${runner.is_poor ? 'checked' : ''}></div></td>
+                    <td class="strength-display text-muted small">${strength}</td>
+                </tr>
+            `;
+        }
+
+        tableHtml += '</tbody></table>';
+        runnersGrid.innerHTML = tableHtml;
+
+        // Add event listeners to update strength display
+        runnersGrid.querySelectorAll('.runner-odds').forEach(input => {
+            input.addEventListener('input', function() {
+                const odds = parseFloat(this.value);
+                const strengthCell = this.closest('tr').querySelector('.strength-display');
+                if (odds && odds > 1) {
+                    strengthCell.textContent = (1 / odds).toFixed(4);
+                } else {
+                    strengthCell.textContent = '0.0000';
+                }
+            });
+        });
+    }
+
+    if (numRunnersInput) {
+        numRunnersInput.addEventListener('change', updateRunnersGrid);
+        updateRunnersGrid(); // Initial call
+    }
+
+    // Chart.js logic
+    const gridData = {{ results.pl_model.ev_grid | tojson if results and results.pl_model else '[]' }};
+    if (gridData && gridData.length > 0) {
+        const ctx = document.getElementById('evChart').getContext('2d');
+        const labels = gridData.map(d => d.lines_covered);
+        const profits = gridData.map(d => d.expected_profit);
+        
+        let maxProfit = -Infinity;
+        let peakLines = 0;
+        profits.forEach((profit, index) => {
+            if (profit > maxProfit) {
+                maxProfit = profit;
+                peakLines = labels[index];
+            }
+        });
+
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Expected Profit (£)',
+                    data: profits,
+                    borderColor: 'rgb(75, 192, 192)',
+                    backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                    tension: 0.1,
+                    fill: true,
+                    pointRadius: 0,
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    title: { display: false },
+                    legend: { display: false },
+                },
+                scales: {
+                    y: { title: { display: true, text: 'Expected Profit (£)' } },
+                    x: { title: { display: true, text: 'Number of Lines Covered' } }
+                }
+            }
+        });
+    }
+});
+</script>
+{% endblock %}
