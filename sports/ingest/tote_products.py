@@ -83,7 +83,7 @@ query GetProducts($date: Date, $status: BettingProductSellingStatus, $first: Int
 """
 
 PRODUCT_BY_ID_QUERY = """
-query GetProduct($id: ID!) {
+query GetProduct($id: String!) {
   product(id: $id) {
     id
     ... on BettingProduct {
@@ -181,7 +181,8 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
                 "venue": event.get("venue"),
                 "country": ((src.get("country") or {}).get("alpha2Code")),
                 "start_iso": event.get("start_iso"),
-                "status": None,
+                # Use product selling status as a proxy for event status when available
+                "status": ((src.get("selling") or {}).get("status")),
                 "result_status": (src.get("result") or {}).get("status"),
                 "competitors_json": None,
                 "comp": None,

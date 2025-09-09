@@ -177,22 +177,37 @@ Troubleshooting GraphQL endpoints:
 
 ### Tote probable odds
 
-Fetch probable odds payloads via Pub/Sub and store in GCS + BigQuery raw:
+Ingest probable odds into BigQuery raw, then read via parsed views.
+
+- Task-based (recommended): publish jobs the fetcher understands (by `event_id`).
 
 ```bash
+# Publish a single task
 python autobet/scripts/publish_tote_probable_job.py \
-  --project autobet-470818 --topic ingest-jobs \
-  --bucket autobet-470818-data \
-  --path /v1/products/<WIN_PRODUCT_ID>/probable-odds \
-  --name raw/tote/probable/<WIN_PRODUCT_ID>.json
+  --project autobet-470818 --topic ingest-jobs --event-id <EVENT_ID>
 
-# Or publish for all today's open WIN products:
+# Publish for all today's open WIN events (task mode; no bucket needed)
 python autobet/scripts/publish_probable_for_today.py \
-  --project autobet-470818 --topic ingest-jobs --bucket autobet-470818-data \
-  --limit 50 --bq-project autobet-470818 --bq-dataset autobet
+  --project autobet-470818 --topic ingest-jobs \
+  --limit 50 --bq-project autobet-470818 --bq-dataset autobet --mode task
 ```
 
-Parsed view (created by `init_db`): `vw_tote_probable_odds` exposes product_id, cloth_number, selection_id, decimal_odds, ts_ms.
+- Local testing (no Pub/Sub): fetch or load probable odds directly into `raw_tote_probable_odds`.
+
+```bash
+# Fetch by event (resolves WIN product automatically)
+python autobet/scripts/import_probable_local.py --event-id <EVENT_ID>
+
+# Fetch by product
+python autobet/scripts/import_probable_local.py --product-id <WIN_PRODUCT_ID>
+
+# Load from a local file containing a probable payload
+python autobet/scripts/import_probable_local.py --file ./sample_probable.json
+```
+
+Parsed views (created by `init_db`):
+- `vw_tote_probable_odds` – latest odds per selection per product
+- `vw_tote_probable_history` – parsed stream of odds with timestamps
 
 ### Direct Tote → BigQuery (structured)
 

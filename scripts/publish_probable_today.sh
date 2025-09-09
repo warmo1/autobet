@@ -5,11 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/_common.sh"
 
 usage() {
-  echo "Usage: $0 --project <GCP_PROJECT> --topic <TOPIC> --bucket <GCS_BUCKET> [--limit N]" >&2
+  echo "Usage: $0 --project <GCP_PROJECT> --topic <TOPIC> [--bucket <GCS_BUCKET>] [--limit N]" >&2
 }
 
-PROJECT="${BQ_PROJECT:-}"
-TOPIC="ingest-jobs"
+PROJECT="${GCP_PROJECT:-${BQ_PROJECT:-}}"
+TOPIC="${PUBSUB_TOPIC_ID:-ingest-jobs}"
 BUCKET=""
 LIMIT=50
 
@@ -24,17 +24,22 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$PROJECT" || -z "$TOPIC" || -z "$BUCKET" ]]; then
+if [[ -z "$PROJECT" || -z "$TOPIC" ]]; then
   usage; exit 2
 fi
 
-echo "Publishing probable-odds jobs for today's open WIN products..."
-$PY "$REPO_ROOT/scripts/publish_probable_for_today.py" \
-  --project "$PROJECT" \
-  --topic "$TOPIC" \
-  --bucket "$BUCKET" \
-  --limit "$LIMIT" \
-  --bq-project "${BQ_PROJECT}" \
+echo "Publishing probable-odds jobs for today's open WIN products (task mode)..."
+ARGS=(
+  --project "$PROJECT"
+  --topic "$TOPIC"
+  --limit "$LIMIT"
+  --bq-project "${BQ_PROJECT}"
   --bq-dataset "${BQ_DATASET}"
+  --mode task
+)
+if [[ -n "$BUCKET" ]]; then
+  # If provided, still pass bucket (used only in legacy mode)
+  ARGS+=(--bucket "$BUCKET")
+fi
+$PY "$REPO_ROOT/scripts/publish_probable_for_today.py" "${ARGS[@]}"
 echo "Done."
-

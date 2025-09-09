@@ -142,8 +142,12 @@ class BigQuerySink:
         client = self._client_obj(); self._ensure_dataset()
         dest_fq = f"{self.project}.{self.dataset}.{dest}"
         # Ensure destination table exists first with temp schema (no rows)
-        sql_ctas = f"CREATE TABLE IF NOT EXISTS `{dest_fq}` AS SELECT * FROM `{temp}` WHERE 1=0;"
-        client.query(sql_ctas).result()
+        # Avoid issuing DDL on every upsert to reduce BigQuery table update rate limits.
+        try:
+            client.get_table(dest_fq)
+        except Exception:
+            sql_ctas = f"CREATE TABLE IF NOT EXISTS `{dest_fq}` AS SELECT * FROM `{temp}` WHERE 1=0;"
+            client.query(sql_ctas).result()
 
         # Fetch schemas to build robust INSERT column list
         dest_tbl = client.get_table(dest_fq)

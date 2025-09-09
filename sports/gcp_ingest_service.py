@@ -1,9 +1,12 @@
 """Cloud Run entrypoint to handle ingestion jobs from Pub/Sub.
 
-The service expects Pub/Sub push messages containing JSON with the keys
-``url`` (HTTP resource to fetch), ``bucket`` (Cloud Storage bucket), and
-``name`` (destination object name). The referenced resource is downloaded
-and stored in the given bucket.
+Expected payloads (task-based):
+  {"task": "ingest_probable_odds", "event_id": "..."}
+  {"task": "ingest_events_for_day", "date": "YYYY-MM-DD|today"}
+  {"task": "ingest_products_for_day", "date": "YYYY-MM-DD|today", "status": "OPEN|CLOSED|..."}
+  ...
+
+Legacy REST-shaped envelopes (provider/op/path) are no longer used by this service.
 """
 from __future__ import annotations
 
@@ -60,6 +63,17 @@ def handle_pubsub() -> tuple[str, int]:
             bet_types = payload.get("bet_types")
             ingest_products(sink, client, date_iso=date_iso, status=status_filter, first=1000, bet_types=bet_types)
 
+        elif task == "ingest_events_for_day":
+            date_iso = payload.get("date", time.strftime("%Y-%m-%d"))
+            if date_iso == "today":
+                date_iso = time.strftime("%Y-%m-%d")
+            since_iso = f"{date_iso}T00:00:00Z"
+            until_iso = f"{date_iso}T23:59:59Z"
+            # Pull a generous page size to reduce pagination overhead
+            n = ingest_tote_events(sink, client, first=1000, since_iso=since_iso, until_iso=until_iso)
+            metrics = {"events_ingested": int(n)}
+            print(f"Ingested {n} events for {date_iso}")
+
         elif task == "ingest_single_product":
             product_id = payload.get("product_id")
             if not product_id: return ("Missing 'product_id' for task", 400)
@@ -102,9 +116,62 @@ def handle_pubsub() -> tuple[str, int]:
                 resp = rate_limited_get(full_url, headers=headers, timeout=20)
                 resp.raise_for_status()
             except requests.exceptions.HTTPError as http_err:
-                # Gracefully handle 403/404 errors for probable odds, as they are common.
-                print(f"Could not fetch probable odds for {win_product_id} (event: {event_id}). Status: {http_err.response.status_code}. Skipping.")
-                return ("", 204) # Return success to Pub/Sub to ack the message.
+                # Gracefully handle 403/404 errors for probable odds; attempt GraphQL fallback via lines
+                code = getattr(getattr(http_err, 'response', None), 'status_code', None)
+                print(f"Could not fetch probable odds (REST) for {win_product_id} (event: {event_id}). Status: {code}. URL: {full_url}. Trying GraphQL lines fallback.")
+                try:
+                    # GraphQL fallback to fetch lines and emulate the REST payload shape expected by our view
+                    PROBABLES_BY_PRODUCT_QUERY = """
+                    query LinesForProduct($id: String!) {
+                      product(id: $id) {
+                        ... on BettingProduct {
+                          id
+                          lines {
+                            nodes {
+                              odds { decimal }
+                              legs { lineSelections { selectionId } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                    """
+                    data = client.graphql(PROBABLES_BY_PRODUCT_QUERY, {"id": win_product_id})
+                    prod = (data.get("product") or {})
+                    lines = ((prod.get("lines") or {}).get("nodes") or [])
+                    payload_obj = {
+                        "products": {
+                            "nodes": [
+                                {
+                                    "id": win_product_id,
+                                    "lines": {
+                                        "nodes": [
+                                            {
+                                                "odds": ([{"decimal": ln.get("odds")[0].get("decimal")}]
+                                                          if isinstance(ln.get("odds"), list) and ln.get("odds") else []),
+                                                "legs": [
+                                                    {"lineSelections": [
+                                                        {"selectionId": sel.get("selectionId")}
+                                                        for sel in (leg.get("lineSelections") or []) if sel.get("selectionId")
+                                                    ]}
+                                                    for leg in (ln.get("legs") or [])
+                                                ],
+                                            }
+                                            for ln in lines if isinstance(ln, dict)
+                                        ]
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                    rid = f"probable:{int(time.time()*1000)}"
+                    ts_ms = int(time.time()*1000)
+                    sink.upsert_raw_tote_probable_odds([{"raw_id": rid, "fetched_ts": ts_ms, "payload": json.dumps(payload_obj)}])
+                    print(f"Ingested probable odds via GraphQL fallback for product {win_product_id}")
+                    return ("", 204)
+                except Exception as ge:
+                    print(f"GraphQL fallback failed for {win_product_id}: {ge}")
+                    return ("", 204) # Still ack the message
 
             rid = f"probable:{int(time.time()*1000)}"
             ts_ms = int(time.time()*1000)

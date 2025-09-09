@@ -16,7 +16,14 @@ query GetEvents($since: DateTime, $until: DateTime, $first: Int, $after: String)
       scheduledStartDateTime { iso8601 }
       status
       result { status }
-      eventCompetitors { nodes { id name entryStatus details { __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } }
+      eventCompetitors {
+        nodes {
+          id
+          name
+          entryStatus
+          details { __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } }
+        }
+      }
     }
   }
 }
@@ -70,6 +77,7 @@ def ingest_tote_events(
     rows_runs: List[Dict[str, Any]] = []
     rows_horses: List[Dict[str, Any]] = []
     rows_competitors_log: List[Dict[str, Any]] = []
+    rows_status_log: List[Dict[str, Any]] = []
     ts_ms = int(time.time() * 1000)
 
     for ev in all_nodes:
@@ -93,13 +101,25 @@ def ingest_tote_events(
                     cloth_map[str(cid)] = int(num)
             except Exception:
                 pass
+        # Basic sport detection from competitor details
+        sport_val = "horse_racing"
+        try:
+            for c in competitors:
+                if (c.get("details") or {}).get("__typename") == "GreyhoundDetails":
+                    sport_val = "greyhound_racing"; break
+        except Exception:
+            pass
+
         rows_events.append({
-            "event_id": event_id, "name": ev.get("name"), "sport": "horse_racing",
+            "event_id": event_id, "name": ev.get("name"), "sport": sport_val,
             "venue": (ev.get("venue") or {}).get("name"), "country": ((ev.get("venue") or {}).get("country") or {}).get("alpha2Code"),
             "start_iso": (ev.get("scheduledStartDateTime") or {}).get("iso8601"), "status": ev.get("status"),
             "result_status": (ev.get("result") or {}).get("status"), "competitors_json": json.dumps(competitors), "source": "tote_api",
         })
         rows_competitors_log.append({"event_id": event_id, "ts_ms": ts_ms, "competitors_json": json.dumps(competitors)})
+        # Status log for visibility on event state transitions
+        if ev.get("status"):
+            rows_status_log.append({"event_id": event_id, "ts_ms": ts_ms, "status": ev.get("status")})
 
         for comp in competitors:
             horse_id = comp.get("id")
@@ -128,5 +148,6 @@ def ingest_tote_events(
     if rows_horses: db.upsert_hr_horses(list({h['horse_id']: h for h in rows_horses}.values()))
     if rows_runs: db.upsert_hr_horse_runs(rows_runs)
     if rows_competitors_log: db.upsert_tote_event_competitors_log(rows_competitors_log)
+    if rows_status_log: db.upsert_tote_event_status_log(rows_status_log)
     print(f"Successfully ingested {len(rows_events)} events, {len(rows_runs)} results, and {len(rows_competitors_log)} competitor logs.")
     return len(rows_events)
