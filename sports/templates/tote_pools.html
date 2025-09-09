@@ -1,24 +1,101 @@
 {% extends 'base.html' %}
 {% block content %}
 <div class="container mt-3">
-  <h3>Tote Pools</h3>
-  <table class="table table-sm table-striped">
-    <thead><tr><th>Product</th><th>Bet Type</th><th>Event</th><th>Venue</th><th>Start</th><th>Status</th><th>Net</th><th>Divs</th></tr></thead>
-    <tbody>
-      {% for p in products %}
-      <tr>
-        <td>{{ p.product_id }}</td>
-        <td>{{ p.bet_type }}</td>
-        <td>{{ p.event_name }}</td>
-        <td>{{ p.venue }}</td>
-        <td>{{ p.start_iso }}</td>
-        <td>{{ p.status }}</td>
-        <td>{{ p.total_net }}</td>
-        <td>{{ p.dividend_count }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <h3 class="mb-3">Tote Pools</h3>
+
+  <div class="card mb-3">
+    <div class="card-header">Filters</div>
+    <div class="card-body">
+      <form method="get" class="row g-2 align-items-end">
+        <div class="col-sm-3 col-md-2">
+          <label class="form-label small">Bet Type</label>
+          <select class="form-select form-select-sm" name="bet_type">
+            <option value="">All</option>
+            {% for t in bet_type_options %}<option value="{{ t }}" {% if filters.bet_type==t %}selected{% endif %}>{{ t }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-sm-3 col-md-2">
+          <label class="form-label small">Country</label>
+          <select class="form-select form-select-sm" name="country">
+            <option value="">All</option>
+            {% for c in country_options %}<option value="{{ c }}" {% if filters.country==c %}selected{% endif %}>{{ c }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-sm-3 col-md-3">
+          <label class="form-label small">Venue</label>
+          <select class="form-select form-select-sm" name="venue">
+            <option value="">All</option>
+            {% for v in venue_options %}<option value="{{ v }}" {% if filters.venue==v %}selected{% endif %}>{{ v }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-sm-3 col-md-2">
+          <label class="form-label small">Status</label>
+          <select class="form-select form-select-sm" name="status">
+            <option value="">Any</option>
+            {% for s in ['OPEN','CLOSED','SETTLED'] %}<option value="{{ s }}" {% if filters.status==s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-sm-4 col-md-2">
+          <label class="form-label small">Date</label>
+          <input type="date" class="form-control form-control-sm" name="date" value="{{ filters.date }}">
+        </div>
+        <div class="col-sm-8 col-md-1 d-grid">
+          <button class="btn btn-sm btn-primary" type="submit">Apply</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="table-responsive" style="max-height: 65vh;">
+    <table class="table table-sm table-striped align-middle">
+      <thead class="table-light" style="position: sticky; top: 0; z-index: 1;">
+        <tr>
+          <th title="Local start time of the event">Start</th>
+          <th title="Pool type (e.g., WIN, EXACTA, SUPERFECTA)">Bet</th>
+          <th title="Product identifier">Product</th>
+          <th title="Event name (click for details)">Event</th>
+          <th>Venue</th>
+          <th>Country</th>
+          <th>Status</th>
+          <th class="text-end" title="Total pool before takeout">Gross</th>
+          <th class="text-end" title="Pool after takeout">Net</th>
+          <th class="text-end" title="Funds carried in">Rollover</th>
+          <th class="text-end" title="Operator fee">Takeout</th>
+          <th class="text-end" title="Reported dividend rows">Divs</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in products %}
+        <tr>
+          <td><span class="text-nowrap">{{ p.start_iso[:10] }} {{ p.start_iso[11:16] }}</span></td>
+          <td>{{ p.bet_type }}</td>
+          <td><a href="{{ url_for('tote_superfecta_detail', product_id=p.product_id) }}">{{ p.product_id }}</a></td>
+          <td><a href="{{ url_for('event_detail', event_id=p.event_id) }}">{{ p.event_name }}</a></td>
+          <td>{{ p.venue }}</td>
+          <td>{{ p.country }}</td>
+          <td>{{ p.status }}</td>
+          <td class="text-end">{{ '%.0f'|format(p.total_gross or 0) }}</td>
+          <td class="text-end">{{ '%.0f'|format(p.total_net or 0) }}</td>
+          <td class="text-end">{{ '%.0f'|format(p.rollover or 0) }}</td>
+          <td class="text-end">{{ p.deduction_rate is not none and ('%.1f%%' % (p.deduction_rate*100.0)) or '—' }}</td>
+          <td class="text-end">{{ p.dividend_count }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="text-center text-muted">No pools found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="d-flex justify-content-between mt-2">
+    <div class="text-muted small">Showing {{ filters.page }} page(s). Total: {{ totals.total }} items</div>
+    <div>
+      {% set prevp = (filters.page-1) if filters.page>1 else 1 %}
+      {% set nextp = (filters.page+1) %}
+      <a class="btn btn-sm btn-outline-secondary" href="?page={{ prevp }}&limit={{ filters.limit }}&bet_type={{ filters.bet_type }}&country={{ filters.country }}&venue={{ filters.venue }}&status={{ filters.status }}&date={{ filters.date }}">Prev</a>
+      <a class="btn btn-sm btn-outline-secondary" href="?page={{ nextp }}&limit={{ filters.limit }}&bet_type={{ filters.bet_type }}&country={{ filters.country }}&venue={{ filters.venue }}&status={{ filters.status }}&date={{ filters.date }}">Next</a>
+    </div>
+  </div>
+
 </div>
 {% endblock %}
-

@@ -1,0 +1,17 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    id: build-fetcher
+    args: ["build", "-f", "autobet/sports/Dockerfile.fetcher", "-t", "$_IMAGE_FETCHER", "."]
+  - name: gcr.io/cloud-builders/docker
+    id: push-fetcher
+    args: ["push", "$_IMAGE_FETCHER"]
+  - name: gcr.io/cloud-builders/docker
+    id: build-orchestrator
+    args: ["build", "-f", "autobet/sports/Dockerfile.orchestrator", "-t", "$_IMAGE_ORCHESTRATOR", "."]
+  - name: gcr.io/cloud-builders/docker
+    id: push-orchestrator
+    args: ["push", "$_IMAGE_ORCHESTRATOR"]
+substitutions:
+  _IMAGE_FETCHER: ""
+  _IMAGE_ORCHESTRATOR: ""
+timeout: "1800s"

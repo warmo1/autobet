@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block content %}
 <div class="container mt-3">
-  <h3>Superfecta Viability Calculator</h3>
+  <h3>Pari‑Mutuel Viability Calculator</h3>
   <p class="text-muted">
     Use the filters to find Superfecta products. Click 'Calculate' on a product to run the viability analysis using the parameters below.
     This provides a baseline analysis assuming random line coverage.
@@ -31,6 +31,14 @@
               <label class="form-label small">Date</label>
               <input type="date" class="form-control form-control-sm" name="date" value="{{ filters.date }}">
             </div>
+            <div class="col-md-4 mt-2">
+              <label class="form-label small">Bet Type</label>
+              <select name="bet_type" class="form-select form-select-sm">
+                {% for bt in ['WIN','EXACTA','TRIFECTA','SUPERFECTA','SWINGER'] %}
+                <option value="{{ bt }}" {% if filters.bet_type==bt %}selected{% endif %}>{{ bt }}</option>
+                {% endfor %}
+              </select>
+            </div>
             <div class="col-12">
               <button class="btn btn-sm btn-secondary" type="submit">Filter Products</button>
             </div>
@@ -49,7 +57,7 @@
                   <td>{{ p.n_runners }}</td>
                   <td>{{ '%.0f'|format(p.total_gross or 0) }}</td>
                   <td>
-                    <a href="{{ url_for('tote_viability_page', product_id=p.product_id, country=filters.country, venue=filters.venue, date=filters.date) }}" class="btn btn-sm btn-primary">Calculate</a>
+                    <a href="{{ url_for('tote_viability_page', product_id=p.product_id, country=filters.country, venue=filters.venue, date=filters.date, bet_type=filters.bet_type, calc_mode=filters.get('calc_mode','single')) }}" class="btn btn-sm btn-primary">Calculate</a>
                   </td>
                 </tr>
                 {% else %}
@@ -73,6 +81,8 @@
             <input type="hidden" name="venue" value="{{ filters.venue }}">
             <input type="hidden" name="date" value="{{ filters.date }}">
             <input type="hidden" name="product_id" value="{{ product_id }}">
+            <input type="hidden" name="bet_type" value="{{ filters.bet_type }}">
+            <input type="hidden" name="calc_mode" value="{{ filters.get('calc_mode','single') }}">
 
             <div class="mb-2">
               <label class="form-label small">Stake per line (£)</label>
@@ -105,10 +115,41 @@
                 <option value="0" {% if request.values.get('inc','1') in ['0','false'] %}selected{% endif %}>No</option>
               </select>
             </div>
+            <div class="mb-2">
+              <label class="form-label small">Calculator Mode</label>
+              <select name="calc_mode" class="form-select form-select-sm">
+                <option value="single" {% if filters.get('calc_mode','single')=='single' %}selected{% endif %}>Single race (WIN/EXACTA/TRIFECTA/SUPERFECTA/SWINGER)</option>
+                <option value="multileg" {% if filters.get('calc_mode','single')=='multileg' %}selected{% endif %}>Multi‑leg (Placepot/Quadpot/Jackpot)</option>
+              </select>
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Multi‑leg: lines per leg (leave blank to skip)</label>
+              <div class="row g-1">
+                {% for i in range(1,7) %}
+                <div class="col-4">
+                  <input class="form-control form-control-sm" placeholder="Leg {{ i }}" name="leg{{ i }}" value="{{ request.values.get('leg' ~ i, '') }}">
+                </div>
+                {% endfor %}
+              </div>
+            </div>
             <button class="btn btn-sm btn-success w-100" type="submit" {% if not product_id %}disabled{% endif %}>Re-calculate</button>
           </form>
         </div>
       </div>
+    </div>
+  </div>
+  <div class="card mb-3">
+    <div class="card-header">How this calculator works (plain English)</div>
+    <div class="card-body">
+      <ul>
+        <li><strong>Total lines</strong>: number of unique tickets for your bet type (WIN=N, EXACTA=P(N,2), TRIFECTA=P(N,3), SUPERFECTA=P(N,4)).</li>
+        <li><strong>Coverage</strong>: fraction of total lines you buy. If you buy 10% of all possible tickets, your random hit chance is ~10%.</li>
+        <li><strong>Takeout (t)</strong>: the operator’s cut (e.g., 0.30 = 30%). We value your ticket against the <em>net</em> pool: Net = m × [(1−t)×(others’ gross + your stake if included) + rollover]. A higher takeout reduces expected value.</li>
+        <li><strong>Net pool</strong>: money paid out after takeout, including rollover and (optionally) your stake; scaled by any dividend multiplier <code>m</code>.</li>
+        <li><strong>f‑share (baseline)</strong>: your share of winning units if you hit, assuming others spread uniformly: f = l / (l + O/C) where l is stake per line, O is others’ gross, C is total lines. You can override f if you have an edge.</li>
+        <li><strong>Expected profit</strong>: coverage × f‑share × net pool − your stake.</li>
+      </ul>
+      <p class="mb-0 text-muted small">This is a baseline “random coverage” model. You can plug in your weighting later; the page will still show how EV moves with pool growth and coverage.</p>
     </div>
   </div>
 
@@ -122,22 +163,44 @@
         <div class="card-body">
           <div class="row">
             <div class="col-md-6">
+              <div class="alert alert-info py-2" id="live-snap" style="display:none;">
+                <div class="d-flex justify-content-between align-items-center">
+                  <div>
+                    <strong>Live Pool Gross:</strong> £<span id="live_pool">0</span>
+                    <span class="ms-3"><strong>Exp. Return:</strong> £<span id="live_return">0</span></span>
+                    <span class="ms-3"><strong>Exp. Profit:</strong> £<span id="live_profit">0</span></span>
+                  </div>
+                  <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="autoRefreshToggle" checked>
+                    <label class="form-check-label" for="autoRefreshToggle">Auto-refresh</label>
+                  </div>
+                </div>
+              </div>
               <h5>Single Scenario Analysis</h5>
               <p class="text-muted">Based on {{ request.values.get('alpha','60') }}% coverage.</p>
               <table class="table table-sm">
+                <tr class="table-light"><th colspan="2">Pool Inputs</th></tr>
+                <tr><th>Gross (others)</th><td>£{{ calc.pool_gross is not none and ('%.2f'|format(calc.pool_gross)) or '—' }}</td></tr>
+                <tr><th>Rollover</th><td>£{{ calc.net_rollover is not none and ('%.2f'|format(calc.net_rollover)) or '—' }}</td></tr>
+                <tr><th>Takeout</th><td>{{ calc.take_rate is not none and ('%.1f%%' % (calc.take_rate*100.0)) or '—' }}</td></tr>
+                <tr><th>Include my stake in pool?</th><td>{{ calc.inc_self and 'Yes' or 'No' }}</td></tr>
+                <tr><th>Dividend Multiplier</th><td>{{ calc.div_mult is not none and ('%.2f' % calc.div_mult) or '—' }}</td></tr>
+                {% if calc.f_fix is not none %}<tr><th>f-share (override)</th><td>{{ '%.4f'|format(calc.f_fix) }}</td></tr>{% endif %}
+                <tr class="table-light"><th colspan="2">Scenario Result</th></tr>
                 <tr><th>Total Possible Lines</th><td>{{ viab.total_lines }}</td></tr>
                 <tr><th>Lines Covered</th><td>{{ viab.lines_covered }} ({{ '%.1f'|format(100*viab.coverage_frac) }}%)</td></tr>
-                <tr><th>Total Stake (S)</th><td>£{{ '%.2f'|format(viab.stake_total or 0) }}</td></tr>
-                <tr><th>Net Pool (if bet)</th><td>£{{ '%.2f'|format(viab.net_pool_if_bet or 0) }}</td></tr>
-                <tr><th>f-share Used</th><td>{{ '%.4f'|format(viab.f_share_used or 0) }}</td></tr>
-                <tr><th>Expected Return</th><td>£{{ '%.2f'|format(viab.expected_return or 0) }}</td></tr>
+                <tr><th>Total Stake (S)</th><td>£<span id="ss_stake">{{ '%.2f'|format(viab.stake_total or 0) }}</span></td></tr>
+                <tr><th>Net Pool (if bet)</th><td>£<span id="ss_netpool">{{ '%.2f'|format(viab.net_pool_if_bet or 0) }}</span></td></tr>
+                <tr><th>f-share Used</th><td><span id="ss_f">{{ '%.4f'|format(viab.f_share_used or 0) }}</span></td></tr>
+                <tr><th>Expected Return</th><td>£<span id="ss_return">{{ '%.2f'|format(viab.expected_return or 0) }}</span></td></tr>
                 <tr class="{{ 'table-success' if viab.is_positive_ev else 'table-danger' }}">
                   <th>Expected Profit</th>
-                  <td><strong>£{{ '%.2f'|format(viab.expected_profit or 0) }}</strong></td>
+                  <td><strong>£<span id="ss_profit">{{ '%.2f'|format(viab.expected_profit or 0) }}</span></strong></td>
                 </tr>
               </table>
 
               <h5>Cover-All Analysis</h5>
+              <p class="text-muted">“Cover All” means buying every possible line. It’s a sanity check: if covering all lines is +EV, then smaller coverages will include +EV regions.</p>
               <table class="table table-sm">
                 <tr><th>Stake to Cover All</th><td>£{{ '%.2f'|format(viab.cover_all_stake or 0) }}</td></tr>
                 <tr class="{{ 'table-success' if viab.cover_all_is_positive else 'table-danger' }}">
@@ -152,6 +215,14 @@
             </div>
             <div class="col-md-6">
               <h5>Coverage vs. EV Grid</h5>
+              {% if best %}
+              <div class="alert alert-secondary py-2">
+                <strong>Best Coverage:</strong>
+                {{ '%.0f'|format(100*(best.coverage_frac or 0)) }}% lines ({{ best.lines_covered }}),
+                Stake £{{ '%.2f'|format(best.stake_total or 0) }},
+                Exp. Profit £{{ '%.2f'|format(best.expected_profit or 0) }}
+              </div>
+              {% endif %}
               <div class="table-responsive" style="max-height: 500px;">
                 <table class="table table-sm table-striped">
                   <thead><tr><th>Coverage %</th><th>Lines</th><th>Stake (£)</th><th>Exp. Profit (£)</th><th>+EV?</th></tr></thead>
@@ -179,4 +250,69 @@
   {% endif %}
 
 </div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+(function(){
+  const pid = "{{ product_id }}";
+  const viab = {
+    C: {{ viab.total_lines or 0 }},
+    M: {{ viab.lines_covered or 0 }},
+    alpha: {{ '%.6f'|format(viab.coverage_frac or 0) }},
+    f: {{ '%.8f'|format(viab.f_share_used or 0) }}
+  };
+  const els = {
+    pool: document.getElementById('live_pool'),
+    ret: document.getElementById('live_return'),
+    prof: document.getElementById('live_profit'),
+    stake: document.getElementById('ss_stake'),
+    netpool: document.getElementById('ss_netpool'),
+    f: document.getElementById('ss_f'),
+    ret2: document.getElementById('ss_return'),
+    prof2: document.getElementById('ss_profit'),
+    snap: document.getElementById('live-snap'),
+    toggle: document.getElementById('autoRefreshToggle')
+  };
+  function num(v){ try{ return parseFloat(v)||0; }catch(e){ return 0; } }
+  function fmtMoney(x){ return (Math.round(x*100)/100).toFixed(2); }
+  async function refresh(){
+    if(!pid) return;
+    try{
+      const res = await fetch(`{{ url_for('api_tote_pool_snapshot', product_id='__PID__') }}`.replace('__PID__', pid));
+      if(!res.ok) return;
+      const js = await res.json();
+      const O = num(js.total_gross || 0);
+      els.snap.style.display = '';
+      els.pool.textContent = Math.round(O).toString();
+      // Recompute using current form inputs
+      const l = num(document.querySelector('[name=stake_per_line]')?.value || '0');
+      const t = num(document.querySelector('[name=take]')?.value || '0.3');
+      const R = num(document.querySelector('[name=rollover]')?.value || '0');
+      const m = num(document.querySelector('[name=mult]')?.value || '1');
+      const inc = (document.querySelector('[name=inc]')?.value||'1') in {'1':1,'true':1};
+      const S = viab.M * l;
+      const S_inc = inc ? S : 0;
+      const f_used = num(document.querySelector('[name=f]')?.value || '') || viab.f;
+      const NetPool = m * ((1.0 - t) * (O + S_inc) + R);
+      const ExpReturn = viab.alpha * f_used * NetPool;
+      const Profit = ExpReturn - S;
+      // Update UI
+      els.netpool.textContent = fmtMoney(NetPool);
+      els.ret.textContent = fmtMoney(ExpReturn);
+      els.prof.textContent = fmtMoney(Profit);
+      els.ret2.textContent = fmtMoney(ExpReturn);
+      els.prof2.textContent = fmtMoney(Profit);
+      els.f.textContent = (Math.round(f_used*10000)/10000).toFixed(4);
+      els.stake.textContent = fmtMoney(S);
+    }catch(e){ /* silent */ }
+  }
+  let timer = null;
+  function start(){ if(timer) return; refresh(); timer = setInterval(refresh, 30000); }
+  function stop(){ if(timer){ clearInterval(timer); timer = null; } }
+  if(els.toggle){ els.toggle.addEventListener('change', ()=>{ if(els.toggle.checked) start(); else stop(); }); }
+  if(pid){ start(); }
+})();
+</script>
 {% endblock %}

@@ -3,7 +3,7 @@ import argparse
 import subprocess
 import json
 from dotenv import load_dotenv
-from sports.db import connect
+from sports.db import connect, get_db, init_db
 from sports.schema import init_schema
 
 # Core application components
@@ -144,6 +144,41 @@ def main(argv=None):
         print(f"[Tote Events] Ingested {n} event(s)")
     sp_tote_events.set_defaults(func=_cmd_tote_events)
 
+    # --- Tote API: Events via GraphQL (date range) ---
+    sp_tote_events_range = sub.add_parser("tote-events-range", help="Fetch Tote events (GraphQL) for a date range directly into BigQuery")
+    sp_tote_events_range.add_argument("--from", dest="date_from", required=True, help="Start date YYYY-MM-DD (inclusive)")
+    sp_tote_events_range.add_argument("--to", dest="date_to", required=True, help="End date YYYY-MM-DD (inclusive)")
+    sp_tote_events_range.add_argument("--first", type=int, default=500, help="Number of events to fetch per day")
+    def _cmd_tote_events_range(args):
+        from datetime import datetime, timedelta
+        from tqdm import tqdm
+        d0 = datetime.fromisoformat(args.date_from).date()
+        d1 = datetime.fromisoformat(args.date_to).date()
+        if d1 < d0:
+            raise SystemExit("--to must be >= --from")
+        
+        db = get_db()
+        init_db(db) # Ensures tables exist in BigQuery
+        client = ToteClient()
+        cur = d0
+        total_events = 0
+        
+        day_count = (d1 - d0).days + 1
+        for _ in tqdm(range(day_count), desc="Ingesting Events"):
+            ds = cur.isoformat()
+            since_iso = f"{ds}T00:00:00Z"
+            until_iso = f"{ds}T23:59:59Z"
+            tqdm.write(f"[Tote Events Range] Fetching events for {ds}...")
+            try:
+                n = ingest_tote_events(db, client, first=args.first, since_iso=since_iso, until_iso=until_iso)
+                tqdm.write(f"[Tote Events Range] Ingested {n} event(s) for {ds}")
+                total_events += n
+            except Exception as e:
+                tqdm.write(f"[Tote Events Range] ERROR for date {ds}: {e}")
+            cur += timedelta(days=1)
+        print(f"[Tote Events Range] Total events ingested: {total_events}")
+    sp_tote_events_range.set_defaults(func=_cmd_tote_events_range)
+
     # --- Tote API: GraphQL SDL probe ---
     sp_tote_sdl = sub.add_parser("tote-graphql-sdl", help="Fetch the GraphQL SDL to verify access")
     def _cmd_tote_sdl(args):
@@ -166,25 +201,18 @@ def main(argv=None):
     sp_tote_super.set_defaults(func=_cmd_tote_super)
 
     # --- Tote API: Generic products (pool values) ---
-    sp_tote_prods = sub.add_parser("tote-products", help="Fetch products across bet types and store pool values")
+    sp_tote_prods = sub.add_parser("tote-products", help="Fetch products across bet types and store directly in BigQuery")
     sp_tote_prods.add_argument("--date", help="ISO date for products (YYYY-MM-DD)")
     sp_tote_prods.add_argument("--status", choices=["OPEN","CLOSED","UNKNOWN"], default="OPEN")
     sp_tote_prods.add_argument("--first", type=int, default=500)
     sp_tote_prods.add_argument("--types", help="Comma-separated bet types, e.g. WIN,PLACE,EXACTA,TRIFECTA,SUPERFECTA")
-    sp_tote_prods.add_argument("--export-bq", action="store_true")
     def _cmd_tote_prods(args):
         bt = [s.strip().upper() for s in (args.types or '').split(',') if s.strip()]
-        conn = connect(db_url); init_schema(conn)
+        db = get_db()
+        init_db(db)
         client = ToteClient()
-        n = ingest_products(conn, client, date_iso=args.date, status=args.status, first=args.first, bet_types=(bt or None))
-        if args.export_bq:
-            try:
-                res = export_sqlite_to_bq(conn, ["tote_products","tote_product_selections"])  # type: ignore
-                print(f"[Tote Products] Exported to BQ: products={res.get('tote_products',0)} selections={res.get('tote_product_selections',0)}")
-            except Exception as e:
-                print(f"[Tote Products] BQ export ERROR: {e}")
-        conn.close()
-        print(f"[Tote Products] Ingested {n} product(s)")
+        n = ingest_products(db, client, date_iso=args.date, status=args.status, first=args.first, bet_types=(bt or None))
+        print(f"[Tote Products] Ingested {n} product(s) into BigQuery")
     sp_tote_prods.set_defaults(func=_cmd_tote_prods)
 
     # --- Convenience: Today GB snapshot (events + products) ---

@@ -66,6 +66,51 @@ Key pages:
 - `/audit/bets` – audit bets via Tote API (read-only in BQ mode)
 - `/imports` – latest import stats (raw + structured)
 
+### Historical Tote backfill
+
+Two options to ingest past Tote data directly into BigQuery:
+
+- Range ingest (OPEN then CLOSED) by date:
+
+```
+python autobet/scripts/ingest_tote_range.py --from 2023-01-01 --to 2023-12-31 \
+  --bet-types WIN,PLACE,EXACTA,TRIFECTA,SUPERFECTA --first 400
+```
+
+- CLOSED‑only backfill loop:
+
+```
+python -m autobet.sports.backfill --start 2023-01-01 --end 2023-12-31 --types SUPERFECTA,TRIFECTA
+```
+
+These populate:
+- `tote_products`, `tote_product_selections`, `tote_events`, and `tote_product_dividends`.
+After backfill, use `/tote-pools` and `/event/<id>` to browse by date.
+
+- Events range ingest (Event API):
+
+```
+python autobet/scripts/ingest_events_range.py --from 2024-01-01 --to 2024-12-31 --first 500 --sleep 1.0
+```
+
+This writes explicit Event rows (incl. status and competitors list when available). Note that finishing order is not always exposed on the Event object; dividends/subscriptions will still enrich results.
+
+### BigQuery temp-table cleanup
+
+Temporary staging tables named `_tmp_*` are created during upserts and removed after merges. If jobs fail mid-flight, leftover tables can accumulate.
+
+- One-off cleanup:
+
+```
+python - <<'PY'
+from autobet.sports.bq import get_bq_sink
+sink = get_bq_sink(); print('deleted:', sink.cleanup_temp_tables(older_than_days=1))
+PY
+```
+
+- Scheduled cleanup (deployed via Terraform):
+  Cloud Scheduler job `bq-tmp-cleanup` publishes `{ "task": "cleanup_bq_temps", "older_than_days": 1 }` to the ingest topic. The Cloud Run fetcher handles it and logs how many tables were deleted.
+
 ### 7) Live (optional, Betfair - disabled by default)
 ```bash
 python -m sports.run live --symbol 'Home vs Away (Match Odds)' --side back --odds 2.2 --stake 5 --confirm BET
@@ -121,6 +166,15 @@ Notes:
 - The included query requests BettingProduct fields as per `docs/tote_queries.graphql`.
 - You can materialize structured tables directly from the webapp/ingestors (below), or transform `raw_tote` via scheduled jobs/BigQuery SQL.
 
+Troubleshooting GraphQL endpoints:
+- Ensure you are editing the inner env file: `autobet/.env` (this repo contains an inner `autobet/` folder).
+- Verify values: `python - <<'PY'\nfrom autobet.sports.config import cfg\nprint(cfg.tote_graphql_url)\nprint(bool(cfg.tote_api_key))\nPY`
+- Some partners disable introspection and/or expose a reduced Query. If `products`/`discover` fail:
+  - Ensure `TOTE_GRAPHQL_URL` points to the gateway endpoint: `https://hub.production.racing.tote.co.uk/partner/gateway/graphql`
+  - Keep subscriptions at: `wss://hub.production.racing.tote.co.uk/partner/connections/graphql/`
+  - Confirm your API key has access to the product subgraph; otherwise `products` will not be present on `Query`.
+  - Run the probe: `python autobet/scripts/probe_tote_graphql.py` — it prints the effective endpoint and fetches SDL via `?sdl` if introspection is disabled.
+
 ### Tote probable odds
 
 Fetch probable odds payloads via Pub/Sub and store in GCS + BigQuery raw:
@@ -142,16 +196,11 @@ Parsed view (created by `init_db`): `vw_tote_probable_odds` exposes product_id, 
 
 ### Direct Tote → BigQuery (structured)
 
-To load products (with events and selections) directly into BigQuery from your laptop:
+To load products (with events and selections) for a specific day directly into BigQuery from your laptop, use the `tote-products` command:
 
 ```bash
-python - <<'PY'
-from autobet.sports.db import get_db
-from autobet.sports.providers.tote_api import ToteClient
-from autobet.sports.ingest.tote_products import ingest_products
-db = get_db(); c = ToteClient()
-print(ingest_products(db, c, date_iso='2025-09-05', status='OPEN', first=400, bet_types=['WIN','PLACE','EXACTA','TRIFECTA','SUPERFECTA']))
-PY
+python -m sports.run tote-products --date 2024-09-05 --status OPEN \
+  --types WIN,PLACE,EXACTA,TRIFECTA,SUPERFECTA
 ```
 
 This populates:
@@ -160,11 +209,33 @@ This populates:
 - `tote_product_selections` (leg/selection map including cloth/trap numbers)
 - `tote_product_dividends` (latest known dividends per selection)
 
-Range ingest (multi-year):
 
+### A Note on Code Modernization
+
+While reviewing the code, I noticed that many other commands in `sports/run.py` still use the legacy SQLite-first pattern. For better consistency and to fully embrace the BigQuery-native strategy outlined in your documentation, these could also be updated over time. This would be a great next step to modernize the project's command-line tools.
+
+Let me know if you'd like me to proceed with refactoring another command, or if you have any other questions!
+
+<!--
+[PROMPT_SUGGESTION]Can you refactor the `tote-products` command to also write directly to BigQuery?[/PROMPT_SUGGESTION]
+[PROMPT_SUGGESTION]Create a new command to backfill a range of dates for products, results, and weather, writing directly to BigQuery.[/PROMPT_SUGGESTION]
+-->
+
+### A Note on Code Modernization
+
+While reviewing the code, I noticed that many other commands in `sports/run.py` still use the legacy SQLite-first pattern. For better consistency and to fully embrace the BigQuery-native strategy outlined in your documentation, these could also be updated over time. This would be a great next step to modernize the project's command-line tools.
+
+Let me know if you'd like me to proceed with refactoring another command, or if you have any other questions!
+
+<!--
+[PROMPT_SUGGESTION]Can you refactor the `tote-products` command to also write directly to BigQuery?[/PROMPT_SUGGESTION]
+[PROMPT_SUGGESTION]Create a new command to backfill a range of dates for products, results, and weather, writing directly to BigQuery.[/PROMPT_SUGGESTION]
+-->
+**Range Ingest (Events)**
+
+To ingest a year's worth of historical events directly into BigQuery:
 ```bash
-python autobet/scripts/ingest_tote_range.py --from 2022-01-01 --to 2025-09-05 \
-  --bet-types WIN,PLACE,EXACTA,TRIFECTA,SUPERFECTA --first 400
+python -m sports.run tote-events-range --from 2023-01-01 --to 2023-12-31
 ```
 
 ### BigQuery temp-table cleanup
@@ -185,3 +256,17 @@ sink = get_bq_sink(); print(sink.cleanup_temp_tables(older_than_days=3))
 ### Subscriptions (optional)
 
 Set `SUBSCRIBE_POOLS=1` and configure `TOTE_SUBSCRIPTIONS_URL` and `TOTE_API_KEY` to enable the background pool subscription (writes pool snapshots to BigQuery if your subscriber is adapted).
+### Fetch schema SDL
+
+Some partner deployments disable GraphQL introspection. You can still download the SDL via the gateway endpoint using auth:
+
+```bash
+python autobet/scripts/fetch_tote_schema.py --out autobet/docs/tote_schema.graphqls
+```
+
+Make sure `TOTE_GRAPHQL_URL` is set to the gateway path in `autobet/.env`:
+
+```
+TOTE_GRAPHQL_URL=https://hub.production.racing.tote.co.uk/partner/gateway/graphql
+TOTE_SUBSCRIPTIONS_URL=wss://hub.production.racing.tote.co.uk/partner/connections/graphql/
+```

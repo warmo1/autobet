@@ -27,11 +27,9 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
     """
     assert websockets is not None, "websockets package not installed"
 
-    # GraphQL WS handshake
-    headers = {
-        "Authorization": f"Api-Key {cfg.tote_api_key}",
-    }
-    subprotocols = ["graphql-ws"]
+    # GraphQL WS handshake (try modern then legacy)
+    headers = {"Authorization": f"Api-Key {cfg.tote_api_key}"}
+    subprotocols = ["graphql-transport-ws", "graphql-ws"]
     query = (
         """
 subscription {
@@ -96,34 +94,53 @@ subscription {
 }
 """
     )
-    start_msg = {
-        "id": "1",
-        "type": "start",
-        "payload": {"query": query},
-    }
-    init_msg = {
-        "type": "connection_init",
-        "payload": {"useragent": "autobet-subscriber", "authorization": f"Api-Key {cfg.tote_api_key}"},
-    }
-    ctx = ssl.SSLContext()
     started = time.time()
-    async with websockets.connect(url, subprotocols=subprotocols, extra_headers=headers, ssl=ssl.SSLContext(), ping_interval=20) as ws:  # type: ignore
-        # init and start
-        await ws.send(json.dumps(init_msg))
-        await ws.send(json.dumps(start_msg))
-        while True:
-            if duration and (time.time() - started) > duration:
-                break
-            try:
-                msg = await ws.recv()
-            except Exception:
-                await asyncio.sleep(1)
-                continue
-            ts = _now_ms()
-            try:
-                payload = json.loads(msg)
-            except Exception:
-                payload = {"raw": msg}
+    backoff = 1.0
+    while True:
+        if duration and (time.time() - started) > duration:
+            break
+        try:
+            async with websockets.connect(
+                url,
+                subprotocols=subprotocols,
+                extra_headers=headers,
+                ssl=ssl.create_default_context(),
+                ping_interval=20,
+            ) as ws:  # type: ignore
+                proto = getattr(ws, "subprotocol", None) or ""
+                # Send connection init based on negotiated protocol
+                if proto == "graphql-transport-ws":
+                    await ws.send(json.dumps({"type": "connection_init", "payload": {}}))
+                    # wait for ack or keep-alive
+                    while True:
+                        m = json.loads(await ws.recv())
+                        if m.get("type") in ("connection_ack", "ka"):
+                            break
+                    await ws.send(json.dumps({"id": "1", "type": "subscribe", "payload": {"query": query}}))
+                else:
+                    await ws.send(json.dumps({"type": "connection_init", "payload": {"authorization": f"Api-Key {cfg.tote_api_key}"}}))
+                    await ws.send(json.dumps({"id": "1", "type": "start", "payload": {"query": query}}))
+
+                backoff = 1.0
+                while True:
+                    if duration and (time.time() - started) > duration:
+                        return
+                    try:
+                        raw = await ws.recv()
+                    except Exception:
+                        raise
+                    ts = _now_ms()
+                    try:
+                        msg = json.loads(raw)
+                    except Exception:
+                        msg = {"type": "raw", "raw": raw}
+                    # Normalize to a common shape
+                    if msg.get("type") in ("next", "data"):
+                        payload = (msg.get("payload") or {}).get("data") or {}
+                    elif msg.get("type") in ("ka", "connection_ack", "complete"):
+                        continue
+                    else:
+                        payload = (msg.get("payload") or {}).get("data") or {}
             # Store raw (SQLite only; skip for BQ)
             if not _is_bq_sink(conn):
                 try:
@@ -292,8 +309,13 @@ subscription {
                                 ])
                             except Exception:
                                 pass
+        except Exception:
+            # Reconnect with backoff
+            try:
+                await asyncio.sleep(min(30.0, backoff))
             except Exception:
                 pass
+            backoff = min(30.0, backoff * 2.0)
 
 
 def run_subscriber(conn, *, audit: bool = False, duration: Optional[int] = None):

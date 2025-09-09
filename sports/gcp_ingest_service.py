@@ -9,17 +9,25 @@ from __future__ import annotations
 
 import os
 import requests
-from flask import Flask, request
-import json
 import time
+import json
+import traceback
+from flask import Flask, request
+from google.cloud import bigquery
 
 from .gcp import parse_pubsub_envelope, upload_text_to_bucket
 from .config import cfg
-from .providers.tote_api import ToteClient, ToteError
+from .providers.tote_api import ToteClient, ToteError, rate_limited_get
 from .bq import get_bq_sink
+import uuid
+from .ingest.tote_events import ingest_tote_events
+from .ingest.tote_products import ingest_products
 
 app = Flask(__name__)
 
+@app.get("/")
+def health() -> tuple[str, int]:
+    return ("ok", 200)
 
 @app.post("/")
 def handle_pubsub() -> tuple[str, int]:
@@ -29,137 +37,121 @@ def handle_pubsub() -> tuple[str, int]:
     except ValueError:
         return ("Bad Request", 400)
 
-    url = payload.get("url")
-    bucket = payload.get("bucket")
-    name = payload.get("name")
+    task = payload.get("task")
+    if not task:
+        return ("Missing 'task' in payload", 400)
 
-    # Support Tote-aware fetch when provider/op is specified, otherwise fallback to URL fetch
-    provider = (payload.get("provider") or "").lower()
-    op = (payload.get("op") or "").lower()
-
-    if not (bucket and name):
-        return ("Missing bucket/name", 204)
-
+    job_id = f"ingest-{uuid.uuid4().hex}"
+    started_ms = int(time.time() * 1000)
+    status = "OK"; err = None; metrics = {}
     try:
-        if provider == "tote" and op:
-            client = ToteClient()
-            # For now support only GraphQL operations via 'graphql' with provided query/variables,
-            # or simple REST path passthrough via 'path'.
-            if op == "graphql":
-                query = payload.get("query")
-                variables = payload.get("variables") or {}
-                if not query:
-                    return ("Missing GraphQL query", 204)
-                data = client.graphql(query, variables)
-                txt = json.dumps(data)
-                upload_text_to_bucket(bucket, name, txt)
-                # Optional: write raw into BigQuery
-                bq = (payload.get("bq") or {}).copy() if isinstance(payload.get("bq"), dict) else {}
-                if bq.get("table") == "raw_tote":
-                    sink = get_bq_sink()
-                    if sink and sink.enabled:
-                        try:
-                            raw = {
-                                "raw_id": f"graphql:{int(time.time()*1000)}",
-                                "endpoint": "graphql",
-                                "entity_id": str(bq.get("entity_id") or ""),
-                                "sport": str(bq.get("sport") or "horse_racing"),
-                                "fetched_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                                "payload": txt,
-                            }
-                            sink.upsert_raw_tote([raw])
-                        except Exception:
-                            # Swallow BQ errors to avoid Pub/Sub retries
-                            pass
-            elif op in ("probable", "probable_odds"):
-                # Expected: path to Tote probable odds endpoint for a product or meeting
-                path = payload.get("path") or "/"
-                base = cfg.tote_graphql_url or ""
-                if path.startswith("http://") or path.startswith("https://"):
-                    full_url = path
-                else:
-                    base_root = base.split("/partner/")[0].rstrip("/") if base else ""
-                    full_url = f"{base_root}{path}"
-                headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
-                resp = requests.get(full_url, headers=headers, timeout=20)
-                resp.raise_for_status()
-                upload_text_to_bucket(bucket, name, resp.text)
-                # Also upsert to raw_tote_probable_odds if BQ enabled
-                sink = get_bq_sink()
-                if sink and sink.enabled:
-                    try:
-                        rid = f"probable:{int(time.time()*1000)}"
-                        ts_ms = int(time.time()*1000)
-                        sink.upsert_raw_tote_probable_odds([
-                            {"raw_id": rid, "fetched_ts": ts_ms, "payload": resp.text}
-                        ])
-                    except Exception:
-                        pass
-            else:
-                # REST path passthrough using requests with Tote auth header
-                path = payload.get("path") or "/"
-                base = cfg.tote_graphql_url or ""
-                # Convert GraphQL base to REST base if needed by trimming trailing path
-                # If caller passes full URL, use it directly
-                if path.startswith("http://") or path.startswith("https://"):
-                    full_url = path
-                else:
-                    base_root = base.split("/partner/")[0].rstrip("/") if base else ""
-                    full_url = f"{base_root}{path}"
-                headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
-                resp = requests.get(full_url, headers=headers, timeout=20)
-                resp.raise_for_status()
-                upload_text_to_bucket(bucket, name, resp.text)
-                # Optional: write raw into BigQuery (REST)
-                bq = (payload.get("bq") or {}).copy() if isinstance(payload.get("bq"), dict) else {}
-                if bq.get("table") == "raw_tote":
-                    sink = get_bq_sink()
-                    if sink and sink.enabled:
-                        try:
-                            raw = {
-                                "raw_id": f"rest:{int(time.time()*1000)}",
-                                "endpoint": path,
-                                "entity_id": str(bq.get("entity_id") or ""),
-                                "sport": str(bq.get("sport") or "horse_racing"),
-                                "fetched_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                                "payload": resp.text,
-                            }
-                            sink.upsert_raw_tote([raw])
-                        except Exception:
-                            pass
-        elif url:
-            resp = requests.get(url, timeout=20)
+        sink = get_bq_sink()
+        client = ToteClient()
+        if not sink or not client:
+            return ("Service not configured (BQ/Tote)", 500)
+
+        print(f"Executing task: {task} with payload: {json.dumps(payload)} (job_id={job_id})")
+
+        if task == "ingest_products_for_day":
+            date_iso = payload.get("date", time.strftime("%Y-%m-%d"))
+            if date_iso == "today": date_iso = time.strftime("%Y-%m-%d")
+            # status=None fetches all statuses (OPEN, CLOSED, etc.)
+            status_filter = payload.get("status")
+            bet_types = payload.get("bet_types")
+            ingest_products(sink, client, date_iso=date_iso, status=status_filter, first=1000, bet_types=bet_types)
+
+        elif task == "ingest_single_product":
+            product_id = payload.get("product_id")
+            if not product_id: return ("Missing 'product_id' for task", 400)
+            ingest_products(sink, client, date_iso=None, status=None, first=1, bet_types=None, product_ids=[product_id])
+
+        elif task == "ingest_probable_odds":
+            event_id = payload.get("event_id")
+            if not event_id: return ("Missing 'event_id' for task", 400)
+            
+            win_prod_df = sink.query(
+                "SELECT product_id FROM tote_products WHERE event_id = @eid AND bet_type = 'WIN' AND status = 'OPEN' LIMIT 1",
+                job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("eid", "STRING", event_id)])
+            ).to_dataframe()
+            if win_prod_df.empty:
+                print(f"No open WIN product found for event {event_id}")
+                return ("", 204)
+            
+            win_product_id = win_prod_df.iloc[0]["product_id"]
+            path = f"/v1/products/{win_product_id}/probable-odds"
+            base = cfg.tote_graphql_url or ""
+            base_root = base.split("/partner/")[0].rstrip("/") if "/partner/" in base else ""
+            full_url = f"{base_root}{path}"
+            headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
+            resp = rate_limited_get(full_url, headers=headers, timeout=20)
             resp.raise_for_status()
-            upload_text_to_bucket(bucket, name, resp.text)
-            # Optional: write raw into BigQuery (generic URL)
-            bq = (payload.get("bq") or {}).copy() if isinstance(payload.get("bq"), dict) else {}
-            if bq.get("table") == "raw_tote":
-                sink = get_bq_sink()
-                if sink and sink.enabled:
-                    try:
-                        raw = {
-                            "raw_id": f"url:{int(time.time()*1000)}",
-                            "endpoint": url,
-                            "entity_id": str(bq.get("entity_id") or ""),
-                            "sport": str(bq.get("sport") or "horse_racing"),
-                            "fetched_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                            "payload": resp.text,
-                        }
-                        sink.upsert_raw_tote([raw])
-                    except Exception:
-                        pass
+
+            rid = f"probable:{int(time.time()*1000)}"
+            ts_ms = int(time.time()*1000)
+            sink.upsert_raw_tote_probable_odds([{"raw_id": rid, "fetched_ts": ts_ms, "payload": resp.text}])
+            metrics = {"probable_for_product": win_product_id}
+            print(f"Ingested probable odds for product {win_product_id}")
+
+        elif task == "ingest_event_results":
+            event_id = payload.get("event_id")
+            if not event_id: return ("Missing 'event_id' for task", 400)
+            
+            event_details_df = sink.query(
+                "SELECT start_iso FROM tote_events WHERE event_id = @eid LIMIT 1",
+                job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("eid", "STRING", event_id)])
+            ).to_dataframe()
+            if event_details_df.empty:
+                return (f"Event {event_id} not found in DB", 204)
+            
+            start_iso = event_details_df.iloc[0]['start_iso']
+            date_iso = start_iso.split('T')[0]
+            ingest_tote_events(sink, client, since_iso=f"{date_iso}T00:00:00Z", until_iso=f"{date_iso}T23:59:59Z", first=1000)
+            metrics = {"refreshed_event_results_for_date": date_iso, "event_id": event_id}
+            print(f"Refreshed events for date {date_iso} to get results for event {event_id}")
+
+        elif task == "cleanup_bq_temps":
+            try:
+                older = payload.get("older_than_days") or payload.get("older_days") or 7
+                deleted = sink.cleanup_temp_tables(prefix="_tmp_", older_than_days=int(older))
+                metrics = {"deleted_tmp_tables": int(deleted)}
+                print(f"Temp table cleanup: deleted={deleted} older_than_days={older}")
+            except Exception as e:
+                raise
+
         else:
-            return ("Missing url/provider", 204)
+            return (f"Unknown task: {task}", 400)
+
     except ToteError as te:
-        # Do not trigger Pub/Sub retry storms; log via response body
-        return (f"Tote error: {str(te)[:500]}", 204)
+        status = "ERROR"; err = f"Tote error: {str(te)[:500]}"; print(err)
+        return (err, 204)
     except requests.exceptions.Timeout:
+        status = "ERROR"; err = "Timeout"; print(err)
         return ("Timeout", 204)
     except Exception as e:
-        return (f"Error: {str(e)[:500]}", 204)
+        status = "ERROR"; err = str(e)[:500]
+        traceback.print_exc()
+        return (f"Error: {err}", 500)
+    finally:
+        try:
+            sink = get_bq_sink()
+            ended_ms = int(time.time() * 1000)
+            payload_json = json.dumps(payload) if payload else None
+            metrics_json = json.dumps(metrics) if metrics else None
+            sink.upsert_ingest_job_runs([
+                {
+                    "job_id": job_id,
+                    "component": "ingest",
+                    "task": task or "",
+                    "status": status,
+                    "started_ts": started_ms,
+                    "ended_ts": ended_ms,
+                    "duration_ms": max(0, ended_ms - started_ms),
+                    "payload_json": payload_json,
+                    "error": err,
+                    "metrics_json": metrics_json,
+                }
+            ])
+        except Exception:
+            pass
 
     return ("", 204)
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))

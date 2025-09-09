@@ -88,17 +88,20 @@ USING (
     SELECT edge
     FROM `{ds}.raw_tote` r, UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.edges')) AS edge
     WHERE DATE(r.fetched_ts) = d
+  ), leg_nodes AS (
+    SELECT edge, leg
+    FROM edges, UNNEST(JSON_EXTRACT_ARRAY(edge, '$.node.legs.nodes')) AS leg
   ), items AS (
     SELECT
-      JSON_EXTRACT_SCALAR(edge, '$.node.event.id') AS event_id,
-      JSON_EXTRACT_SCALAR(edge, '$.node.event.name') AS name,
+      JSON_EXTRACT_SCALAR(leg, '$.event.id') AS event_id,
+      JSON_EXTRACT_SCALAR(leg, '$.event.name') AS name,
       'horse_racing' AS sport,
-      JSON_EXTRACT_SCALAR(edge, '$.node.event.venue') AS venue,
-      JSON_EXTRACT_SCALAR(edge, '$.node.event.country') AS country,
-      JSON_EXTRACT_SCALAR(edge, '$.node.event.start') AS start_iso,
-      JSON_EXTRACT_SCALAR(edge, '$.node.status') AS status,
+      JSON_EXTRACT_SCALAR(leg, '$.event.venue.name') AS venue,
+      JSON_EXTRACT_SCALAR(edge, '$.node.country.alpha2Code') AS country,
+      JSON_EXTRACT_SCALAR(leg, '$.event.scheduledStartDateTime.iso8601') AS start_iso,
+      JSON_EXTRACT_SCALAR(edge, '$.node.selling.status') AS status,
       'tote_graphql' AS source
-    FROM edges
+    FROM leg_nodes
     GROUP BY event_id, name, venue, country, start_iso, status
   )
   SELECT * FROM items WHERE event_id IS NOT NULL
@@ -120,30 +123,48 @@ USING (
     SELECT edge
     FROM `{ds}.raw_tote` r, UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.edges')) AS edge
     WHERE DATE(r.fetched_ts) = d
+  ), leg_nodes AS (
+    SELECT edge, leg
+    FROM edges, UNNEST(JSON_EXTRACT_ARRAY(edge, '$.node.legs.nodes')) AS leg
   ), items AS (
     SELECT
       JSON_EXTRACT_SCALAR(edge, '$.node.id') AS product_id,
-      UPPER(JSON_EXTRACT_SCALAR(edge, '$.node.betType')) AS bet_type,
-      JSON_EXTRACT_SCALAR(edge, '$.node.status') AS status,
-      JSON_EXTRACT_SCALAR(edge, '$.node.currency') AS currency,
-      SAFE_CAST(JSON_EXTRACT_SCALAR(edge, '$.node.totalGross') AS FLOAT64) AS total_gross,
-      SAFE_CAST(JSON_EXTRACT_SCALAR(edge, '$.node.totalNet') AS FLOAT64) AS total_net,
-      JSON_EXTRACT_SCALAR(edge, '$.node.event.id') AS event_id,
-      JSON_EXTRACT_SCALAR(edge, '$.node.event.name') AS event_name,
-      JSON_EXTRACT_SCALAR(edge, '$.node.event.venue') AS venue,
-      JSON_EXTRACT_SCALAR(edge, '$.node.event.start') AS start_iso,
+      UPPER(JSON_EXTRACT_SCALAR(edge, '$.node.betType.code')) AS bet_type,
+      JSON_EXTRACT_SCALAR(edge, '$.node.selling.status') AS status,
+      JSON_EXTRACT_SCALAR(edge, '$.node.country.alpha2Code') AS currency,
+      COALESCE(
+        SAFE_CAST(JSON_EXTRACT_SCALAR(edge, '$.node.pool.total.grossAmount.decimalAmount') AS FLOAT64),
+        (SELECT SUM(SAFE_CAST(JSON_EXTRACT_SCALAR(f, '$.total.grossAmount.decimalAmount') AS FLOAT64))
+         FROM UNNEST(JSON_EXTRACT_ARRAY(edge, '$.node.pool.funds')) AS f)
+      ) AS total_gross,
+      COALESCE(
+        SAFE_CAST(JSON_EXTRACT_SCALAR(edge, '$.node.pool.total.netAmount.decimalAmount') AS FLOAT64),
+        (SELECT SUM(SAFE_CAST(JSON_EXTRACT_SCALAR(f, '$.total.netAmount.decimalAmount') AS FLOAT64))
+         FROM UNNEST(JSON_EXTRACT_ARRAY(edge, '$.node.pool.funds')) AS f)
+      ) AS total_net,
+      COALESCE(
+        SAFE_CAST(JSON_EXTRACT_SCALAR(edge, '$.node.pool.carryIn.grossAmount.decimalAmount') AS FLOAT64),
+        (SELECT SUM(SAFE_CAST(JSON_EXTRACT_SCALAR(f, '$.carryIn.grossAmount.decimalAmount') AS FLOAT64))
+         FROM UNNEST(JSON_EXTRACT_ARRAY(edge, '$.node.pool.funds')) AS f)
+      ) AS rollover,
+      SAFE_CAST(JSON_EXTRACT_SCALAR(edge, '$.node.pool.takeout.percentage') AS FLOAT64) AS deduction_rate,
+      JSON_EXTRACT_SCALAR(leg, '$.event.id') AS event_id,
+      JSON_EXTRACT_SCALAR(leg, '$.event.name') AS event_name,
+      JSON_EXTRACT_SCALAR(leg, '$.event.venue.name') AS venue,
+      JSON_EXTRACT_SCALAR(leg, '$.event.scheduledStartDateTime.iso8601') AS start_iso,
       'tote_graphql' AS source
-    FROM edges
+    FROM leg_nodes
   )
   SELECT * FROM items WHERE product_id IS NOT NULL
 ) S
 ON T.product_id = S.product_id
 WHEN MATCHED THEN UPDATE SET
   T.bet_type=S.bet_type, T.status=S.status, T.currency=S.currency, T.total_gross=S.total_gross,
-  T.total_net=S.total_net, T.event_id=S.event_id, T.event_name=S.event_name, T.venue=S.venue,
+  T.total_net=S.total_net, T.rollover=S.rollover, T.deduction_rate=S.deduction_rate,
+  T.event_id=S.event_id, T.event_name=S.event_name, T.venue=S.venue,
   T.start_iso=S.start_iso, T.source=S.source
-WHEN NOT MATCHED THEN INSERT (product_id,bet_type,status,currency,total_gross,total_net,event_id,event_name,venue,start_iso,source)
-VALUES (S.product_id,S.bet_type,S.status,S.currency,S.total_gross,S.total_net,S.event_id,S.event_name,S.venue,S.start_iso,S.source);
+WHEN NOT MATCHED THEN INSERT (product_id,bet_type,status,currency,total_gross,total_net,rollover,deduction_rate,event_id,event_name,venue,start_iso,source)
+VALUES (S.product_id,S.bet_type,S.status,S.currency,S.total_gross,S.total_net,S.rollover,S.deduction_rate,S.event_id,S.event_name,S.venue,S.start_iso,S.source);
 """
 
 
@@ -155,18 +176,27 @@ USING (
     SELECT edge
     FROM `{ds}.raw_tote` r, UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.edges')) AS edge
     WHERE DATE(r.fetched_ts) = d
+  ), leg_nodes AS (
+    SELECT edge, leg
+    FROM edges, UNNEST(JSON_EXTRACT_ARRAY(edge, '$.node.legs.nodes')) AS leg
+  ), sel_nodes AS (
+    SELECT edge, leg, sel
+    FROM leg_nodes, UNNEST(JSON_EXTRACT_ARRAY(leg, '$.selections.nodes')) AS sel
   ), items AS (
     SELECT
       JSON_EXTRACT_SCALAR(edge, '$.node.id') AS product_id,
-      SAFE_CAST(JSON_EXTRACT_SCALAR(sel, '$.legIndex') AS INT64) AS leg_index,
-      JSON_EXTRACT_SCALAR(sel, '$.selection.id') AS selection_id,
-      JSON_EXTRACT_SCALAR(sel, '$.selection.name') AS competitor,
-      SAFE_CAST(JSON_EXTRACT_SCALAR(sel, '$.selection.number') AS INT64) AS number,
-      JSON_EXTRACT_SCALAR(edge, '$.node.event.id') AS leg_event_id,
-      JSON_EXTRACT_SCALAR(edge, '$.node.event.name') AS leg_event_name,
-      JSON_EXTRACT_SCALAR(edge, '$.node.event.venue') AS leg_venue,
-      JSON_EXTRACT_SCALAR(edge, '$.node.event.start') AS leg_start_iso
-    FROM edges, UNNEST(JSON_EXTRACT_ARRAY(edge, '$.node.selections')) AS sel
+      1 AS leg_index,
+      JSON_EXTRACT_SCALAR(sel, '$.id') AS selection_id,
+      JSON_EXTRACT_SCALAR(sel, '$.competitor.name') AS competitor,
+      COALESCE(
+        SAFE_CAST(JSON_EXTRACT_SCALAR(sel, '$.competitor.details.clothNumber') AS INT64),
+        SAFE_CAST(JSON_EXTRACT_SCALAR(sel, '$.competitor.details.trapNumber') AS INT64)
+      ) AS number,
+      JSON_EXTRACT_SCALAR(leg, '$.event.id') AS leg_event_id,
+      JSON_EXTRACT_SCALAR(leg, '$.event.name') AS leg_event_name,
+      JSON_EXTRACT_SCALAR(leg, '$.event.venue.name') AS leg_venue,
+      JSON_EXTRACT_SCALAR(leg, '$.event.scheduledStartDateTime.iso8601') AS leg_start_iso
+    FROM sel_nodes
   )
   SELECT * FROM items WHERE product_id IS NOT NULL AND selection_id IS NOT NULL
 ) S

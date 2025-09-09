@@ -1,26 +1,39 @@
-# Products by date/status/bet types with legs, selections, pool, dividends
-query GetProducts($date: Date, $status: BettingProductSellingStatus, $first: Int, $betTypes: [BetTypeCode!]) {
-  products(date: $date, betTypes: $betTypes, sellingStatus: $status, first: $first) {
-    nodes {
-      id
-      name
-      ... on BettingProduct {
-        country { alpha2Code }
-        betType { code }
-        selling { status }
-        pool { total { grossAmount { decimalAmount } netAmount { decimalAmount } } }
-        legs {
-          nodes {
-            event { id name venue { name } scheduledStartDateTime { iso8601 } }
-            selections { nodes { id competitor { name details { __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } }
+# Products by date/status/bet types with pagination, legs, selections, pool, dividends
+query GetProducts($date: Date, $status: BettingProductSellingStatus, $first: Int, $betTypes: [BetTypeCode!], $after: String) {
+  products(date: $date, betTypes: $betTypes, sellingStatus: $status, first: $first, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    edges {
+      cursor
+      node {
+        id
+        name
+        ... on BettingProduct {
+          country { alpha2Code }
+          betType { code }
+          selling { status }
+          pool {
+            total { grossAmount { decimalAmount } netAmount { decimalAmount } }
+            carryIn { grossAmount { decimalAmount } netAmount { decimalAmount } }
+            takeout { percentage }
+            funds {
+              total { grossAmount { decimalAmount } netAmount { decimalAmount } }
+              carryIn { grossAmount { decimalAmount } netAmount { decimalAmount } }
+            }
           }
-        }
-        result {
-          status
-          dividends {
+          legs {
             nodes {
-              dividend { amount { decimalAmount } }
-              dividendLegs { nodes { dividendSelections { nodes { id finishingPosition } } } }
+              productLegId
+              event { id name venue { name } scheduledStartDateTime { iso8601 } }
+              selections { nodes { id competitor { name details { __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } }
+            }
+          }
+          result {
+            status
+            dividends {
+              nodes {
+                dividend { amount { decimalAmount } }
+                dividendLegs { nodes { dividendSelections { nodes { id finishingPosition } } } }
+              }
             }
           }
         }

@@ -19,47 +19,56 @@
       {% endif %}
     </div>
 
-    {% if event.sport == 'horse_racing' %}
-      <div class="mb-3">
-        <strong>Runners</strong>
-        <div class="small text-muted">{{ runners|length }} runners</div>
-        <div class="table-responsive">
-          <table class="table table-sm">
-            <thead><tr><th>Horse</th></tr></thead>
-            <tbody>
-              {% for r in runners %}
-                <tr><td>{{ r.name }}</td></tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    {% elif event.sport == 'football' %}
+    {% if event.sport == 'football' %}
       <div class="mb-3">
         <strong>Match</strong>
         <div>{{ event.home or 'Home' }} vs {{ event.away or 'Away' }}</div>
       </div>
     {% else %}
-      {% if competitors %}
-        <div class="mb-3">
-          <strong>Competitors</strong>
-          <div class="small text-muted">{{ competitors|length }} entries</div>
-          <div class="small">{{ competitors | map(attribute='name') | join(', ') }}</div>
+      <div class="mb-3">
+        <div class="d-flex justify-content-between align-items-center">
+          <strong>Runners</strong>
+          <small class="text-muted">Shows latest Probable Odds when available</small>
         </div>
-      {% endif %}
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead><tr><th>#</th><th>Horse</th><th>Probable (dec)</th><th>Updated</th></tr></thead>
+            <tbody>
+            {% set rows = runners_prob if runners_prob is defined and runners_prob else [] %}
+            {% if not rows and runners %}
+              {% for r in runners %}
+              <tr><td>{{ r.cloth }}</td><td>{{ r.name }}</td><td>—</td><td>—</td></tr>
+              {% endfor %}
+            {% else %}
+              {% for r in rows %}
+              <tr>
+                <td>{{ r.cloth_number if r.cloth_number is not none else '—' }}</td>
+                <td>{{ r.horse or r.selection_id }}</td>
+                <td>{{ r.decimal_odds is not none and ('%.2f' % r.decimal_odds) or '—' }}</td>
+                <td>{{ r.odds_ts or '' }}</td>
+              </tr>
+              {% endfor %}
+            {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
     {% endif %}
 
     {% if products %}
-      <div class="mb-2"><strong>Pools</strong></div>
+      <div class="mb-2"><strong>Pools</strong> <span class="small text-muted">Gross: total funds • Net: after takeout • Rollover: carried in • Takeout: operator fee</span></div>
       <div class="table-responsive">
-        <table class="table table-sm">
-          <thead><tr><th>Bet</th><th>Status</th><th>Total Net</th><th>Product</th></tr></thead>
+        <table class="table table-sm align-middle">
+          <thead><tr><th>Bet</th><th>Status</th><th class="text-end">Gross</th><th class="text-end">Net</th><th class="text-end">Rollover</th><th class="text-end">Takeout</th><th>Product</th></tr></thead>
           <tbody>
             {% for p in products %}
               <tr>
                 <td>{{ p.bet_type }}</td>
                 <td>{{ p.status }}</td>
-                <td>{{ '%.2f'|format(p.total_net or 0) }}</td>
+                <td class="text-end">{{ '%.2f'|format(p.total_gross or 0) }}</td>
+                <td class="text-end">{{ '%.2f'|format(p.total_net or 0) }}</td>
+                <td class="text-end">{{ '%.2f'|format(p.rollover or 0) }}</td>
+                <td class="text-end">{{ p.takeout is not none and ('%.1f%%' % (p.takeout*100.0)) or '—' }}</td>
                 <td class="text-truncate" style="max-width:320px;">{{ p.product_id }}</td>
               </tr>
             {% endfor %}

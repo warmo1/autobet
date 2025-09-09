@@ -40,6 +40,7 @@ def main() -> None:
     ap.add_argument("--page-size", type=int, default=400)
     ap.add_argument("--bet-types", default="WIN,PLACE,EXACTA,TRIFECTA,SUPERFECTA")
     ap.add_argument("--products-query", default=str(Path(__file__).resolve().parents[1] / "sql" / "tote_products.graphql"))
+    ap.add_argument("--paginate", action="store_true", help="Enable server-side pagination in Cloud Run (uses pageInfo)")
     args = ap.parse_args()
 
     bet_types = [s.strip().upper() for s in (args.bet_types or '').split(',') if s.strip()]
@@ -55,6 +56,7 @@ def main() -> None:
             "bucket": args.bucket,
             "name": name,
             "bq": {"table": "raw_tote", "sport": "horse_racing", "entity_id": status},
+            "paginate": bool(args.paginate),
         }
         msg_id = publish_pubsub_message(args.project, args.topic, payload)
         print(f"Published {status} products -> {name}: {msg_id}")

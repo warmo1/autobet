@@ -2,21 +2,78 @@
 {% block content %}
 <div class="container mt-3">
   <h3>Tote Events</h3>
-  <table class="table table-sm table-striped">
-    <thead><tr><th>Event</th><th>Venue</th><th>Country</th><th>Start</th><th>Status</th><th></th></tr></thead>
-    <tbody>
-      {% for e in events %}
-      <tr>
-        <td>{{ e.name }}</td>
-        <td>{{ e.venue }}</td>
-        <td>{{ e.country }}</td>
-        <td>{{ e.start_iso }}</td>
-        <td>{{ e.status }}</td>
-        <td><a class="btn btn-sm btn-outline-primary" href="{{ url_for('event_detail', event_id=e.event_id) }}">View</a></td>
-      </tr>
+
+  <form method="get" action="{{ url_for('tote_events_page') }}" class="mb-4 p-3 border rounded bg-light">
+    <div class="row g-3">
+      <div class="col-md-3">
+        <label for="country" class="form-label">Country</label>
+        <select name="country" id="country" class="form-select">
+          <option value="">All Countries</option>
+          {% for c in country_options %}
+          <option value="{{ c }}" {% if c == filters.country %}selected{% endif %}>{{ c }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label for="venue" class="form-label">Venue</label>
+        <select name="venue" id="venue" class="form-select">
+          <option value="">All Venues</option>
+          {% for v in venue_options %}
+          <option value="{{ v }}" {% if v == filters.venue %}selected{% endif %}>{{ v }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label for="from" class="form-label">From</label>
+        <input type="date" name="from" id="from" value="{{ filters.date_from }}" class="form-control">
+      </div>
+      <div class="col-md-3">
+        <label for="to" class="form-label">To</label>
+        <input type="date" name="to" id="to" value="{{ filters.date_to }}" class="form-control">
+      </div>
+      <div class="col-md-6">
+        <label for="name" class="form-label">Event Name</label>
+        <input type="text" name="name" id="name" value="{{ filters.name }}" class="form-control">
+      </div>
+      <div class="col-md-6 d-flex align-items-end">
+        <button type="submit" class="btn btn-primary me-2">Filter</button>
+        <a href="{{ url_for('tote_events_page') }}" class="btn btn-secondary">Clear</a>
+      </div>
+    </div>
+  </form>
+
+  <div class="table-responsive">
+    <table class="table table-sm table-striped">
+      <thead><tr><th>Event</th><th>Venue</th><th>Country</th><th>Start</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+        {% for e in events %}
+        <tr>
+          <td>{{ e.name }}</td>
+          <td>{{ e.venue }}</td>
+          <td>{{ e.country }}</td>
+          <td class="time-iso" data-iso="{{ e.start_iso }}">{{ e.start_iso }}</td>
+          <td>{{ e.status }}</td>
+          <td><a class="btn btn-sm btn-outline-primary" href="{{ url_for('event_detail', event_id=e.event_id) }}">View</a></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="text-center">No events found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if filters.total > filters.limit %}
+  <nav aria-label="Page navigation">
+    <ul class="pagination">
+      {% set pages = (filters.total / filters.limit)|round(0, 'ceil')|int %}
+      {% for p in range(1, pages + 1) %}
+      <li class="page-item {% if p == filters.page %}active{% endif %}">
+        <a class="page-link" href="{{ url_for('tote_events_page', page=p, **request.args) }}">{{ p }}</a>
+      </li>
       {% endfor %}
-    </tbody>
-  </table>
+    </ul>
+  </nav>
+  {% endif %}
+
 </div>
 {% endblock %}
-

@@ -1,0 +1,65 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="container mt-3">
+  <h3>Ingestion Status</h3>
+  <div class="row g-3 mt-1">
+    <div class="col-md-3">
+      <div class="card"><div class="card-body">
+        <div class="text-muted small">Products Today</div>
+        <ul class="mb-0">
+          {% for r in prod_by_type %}
+          <li>{{ r.bet_type }}: {{ r.n }}</li>
+          {% else %}<li>none</li>{% endfor %}
+        </ul>
+      </div></div>
+    </div>
+    <div class="col-md-3">
+      <div class="card"><div class="card-body">
+        <div class="text-muted small">Superfecta Today</div>
+        <div>Products: {{ sf_stats.n_products or 0 }}</div>
+        <div>Selections: {{ sf_stats.total_selections or 0 }}</div>
+      </div></div>
+    </div>
+    <div class="col-md-3">
+      <div class="card"><div class="card-body">
+        <div class="text-muted small">Probable Odds</div>
+        <div>Rows Today: {{ probable_today.n_rows or 0 }}</div>
+        <div>Last Ingest: {{ probable_last.last_ts }}</div>
+      </div></div>
+    </div>
+    <div class="col-md-3">
+      <div class="card"><div class="card-body">
+        <div class="text-muted small">Pool Snapshots</div>
+        <div>Rows Today: {{ snap_today.n_rows or 0 }}</div>
+        <div>Last Snapshot: {{ snap_last.last_ts }}</div>
+      </div></div>
+    </div>
+  </div>
+
+  <div class="card mt-3">
+    <div class="card-header">Recent Superfecta (today)</div>
+    <div class="card-body p-0">
+      <div class="table-responsive" style="max-height: 50vh;">
+        <table class="table table-sm table-striped mb-0">
+          <thead class="table-light"><tr><th>Start</th><th>Event</th><th>Venue</th><th>Status</th><th class="text-end">Gross</th><th class="text-end">Net</th><th class="text-end">Runners</th></tr></thead>
+          <tbody>
+            {% for p in recent_sf %}
+            <tr>
+              <td>{{ p.start_iso[:10] }} {{ p.start_iso[11:16] }}</td>
+              <td>{{ p.event_name }}</td>
+              <td>{{ p.venue }}</td>
+              <td>{{ p.status }}</td>
+              <td class="text-end">{{ '%.0f'|format(p.total_gross or 0) }}</td>
+              <td class="text-end">{{ '%.0f'|format(p.total_net or 0) }}</td>
+              <td class="text-end">{{ p.n_runners }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" class="text-center text-muted">No data for today.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

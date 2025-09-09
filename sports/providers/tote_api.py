@@ -5,6 +5,7 @@ import time
 from typing import Any, Dict, Optional
 
 import requests
+import threading
 
 from ..config import cfg
 
@@ -26,12 +27,24 @@ class ToteClient:
             raise ToteError("TOTE_GRAPHQL_URL is not configured")
         if not cfg.tote_api_key:
             raise ToteError("TOTE_API_KEY is not configured")
-        self.base_url = cfg.tote_graphql_url.rstrip("/")
+        # Normalize base URL. Some deployments expose HTTP GraphQL at /partner/graphql/
+        # while WebSocket subscriptions live at /partner/connections/graphql/.
+        base = (cfg.tote_graphql_url or "").rstrip("/")
+        if "/connections/graphql" in base:
+            try:
+                # Rewrite WS connections URL to HTTP gateway GraphQL endpoint
+                base = base.replace("/connections/graphql", "/gateway/graphql")
+            except Exception:
+                pass
+        self.base_url = base
         self.timeout = timeout
         self.max_retries = max(0, int(max_retries))
         self.session = requests.Session()
         self.headers = {
             "Authorization": f"Api-Key {cfg.tote_api_key}",
+            "x-api-key": cfg.tote_api_key,
+            "X-API-Key": cfg.tote_api_key,
+            "x-partner-api-key": cfg.tote_api_key,
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "autobet/0.1 (+tote)"
@@ -41,6 +54,7 @@ class ToteClient:
         last_err: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
+                _rate_limiter.acquire()
                 resp = self.session.post(url, headers=self.headers, json=payload, timeout=self.timeout)
                 resp.raise_for_status()
                 return resp.json()
@@ -65,12 +79,175 @@ class ToteClient:
         return self.graphql(query, variables)
 
     def graphql_sdl(self) -> str:
-        query = """
-        query IntrospectionQuery { __schema { types { name } } }
+        """Return schema SDL. Tries introspection; falls back to GET ?sdl on gateway.
+
+        Many partner endpoints disable introspection; in that case we fetch
+        SDL from the documented gateway endpoint `...?sdl` using auth headers.
         """
-        data = self.graphql(query, {})
-        # return a compact view to confirm access
-        return json.dumps(data)[:4000]
+        introspection_query = """
+        query IntrospectionQuery {
+          __schema {
+            queryType { name }
+            mutationType { name }
+            subscriptionType { name }
+            types {
+              ...FullType
+            }
+            directives {
+              name
+              description
+              locations
+              args {
+                ...InputValue
+              }
+            }
+          }
+        }
+
+        fragment FullType on __Type {
+          kind
+          name
+          description
+          fields(includeDeprecated: true) {
+            name
+            description
+            args {
+              ...InputValue
+            }
+            type {
+              ...TypeRef
+            }
+            isDeprecated
+            deprecationReason
+          }
+          inputFields {
+            ...InputValue
+          }
+          interfaces {
+            ...TypeRef
+          }
+          enumValues(includeDeprecated: true) {
+            name
+            description
+            isDeprecated
+            deprecationReason
+          }
+          possibleTypes {
+            ...TypeRef
+          }
+        }
+
+        fragment InputValue on __InputValue {
+          name
+          description
+          type { ...TypeRef }
+          defaultValue
+        }
+
+        fragment TypeRef on __Type {
+          kind
+          name
+          ofType {
+            kind
+            name
+            ofType {
+              kind
+              name
+              ofType {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                  ofType {
+                    kind
+                    name
+                    ofType {
+                      kind
+                      name
+                      ofType {
+                        kind
+                        name
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        try:
+            data = self.graphql(introspection_query, {})
+            import json
+            return json.dumps(data, indent=2)
+        except Exception:
+            # Fallback to GET ?sdl
+            sdl_url = self.base_url
+            # Ensure we are targeting the gateway endpoint
+            if "/gateway/graphql" not in sdl_url:
+                try:
+                    sdl_url = sdl_url.replace("/graphql", "/gateway/graphql")
+                except Exception:
+                    pass
+            if "?" in sdl_url:
+                sdl_url = sdl_url + "&sdl"
+            else:
+                sdl_url = sdl_url + "?sdl"
+            resp = self.session.get(sdl_url, headers={
+                "Authorization": f"Api-Key {cfg.tote_api_key}",
+                "Accept": "text/plain, text/graphql, */*",
+            }, timeout=self.timeout)
+            resp.raise_for_status()
+            return resp.text
+
+
+class _RateLimiter:
+    """Simple token-bucket rate limiter shared across Tote requests.
+
+    Controlled via env vars:
+      TOTE_RPS   – average requests per second (default 5)
+      TOTE_BURST – bucket size (default 10)
+    """
+    def __init__(self) -> None:
+        try:
+            rps = float(os.getenv("TOTE_RPS", "5"))
+            burst = int(os.getenv("TOTE_BURST", "10"))
+        except Exception:
+            rps, burst = 5.0, 10
+        self.capacity = max(1, burst)
+        self.refill_per_sec = max(0.1, rps)
+        self.tokens = float(self.capacity)
+        self.last = time.time()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.time()
+            dt = now - self.last
+            if dt > 0:
+                self.tokens = min(self.capacity, self.tokens + dt * self.refill_per_sec)
+                self.last = now
+            if self.tokens >= 1.0:
+                self.tokens -= 1.0
+                return
+            # need to wait
+            need = 1.0 - self.tokens
+            wait = need / self.refill_per_sec
+        if wait > 0:
+            time.sleep(wait)
+        # After sleeping, try to deduct token
+        with self._lock:
+            self.tokens = max(0.0, self.tokens - 1.0)
+
+
+_rate_limiter = _RateLimiter()
+
+
+def rate_limited_get(url: str, *, headers: Dict[str, Any] | None = None, timeout: float = 15.0) -> requests.Response:
+    _rate_limiter.acquire()
+    resp = requests.get(url, headers=headers or {}, timeout=timeout)
+    return resp
 
 
 def store_raw(conn, *, endpoint: str, entity_id: Optional[str], sport: Optional[str], payload: Dict[str, Any]) -> str:
