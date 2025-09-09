@@ -158,23 +158,21 @@ subscription {
                     conn.commit()
                 except Exception:
                     pass
-            # Parse message data
-            try:
-                if payload.get("type") == "data":
-                    data = (payload.get("payload") or {}).get("data") or {}
-                    
-                    # onPoolTotalChanged → snapshots
-                    if "onPoolTotalChanged" in data:
-                        node = data["onPoolTotalChanged"]
-                        if node and isinstance(node, dict):
-                            pid = node.get("productId")
-                            net_list = ((node.get("total") or {}).get("netAmounts") or [])
-                            gross_list = ((node.get("total") or {}).get("grossAmounts") or [])
-                            net = float(net_list[0].get("decimalAmount")) if net_list else None
-                            gross = float(gross_list[0].get("decimalAmount")) if gross_list else None
-                            if pid:
-                                if _is_bq_sink(conn):
-                                    try:
+                    # Parse message data (payload is already the GraphQL data object)
+                    try:
+                        data = payload if isinstance(payload, dict) else {}
+                        # onPoolTotalChanged → snapshots
+                        if "onPoolTotalChanged" in data:
+                            node = data["onPoolTotalChanged"]
+                            if node and isinstance(node, dict):
+                                pid = node.get("productId")
+                                net_list = ((node.get("total") or {}).get("netAmounts") or [])
+                                gross_list = ((node.get("total") or {}).get("grossAmounts") or [])
+                                net = float(net_list[0].get("decimalAmount")) if net_list else None
+                                gross = float(gross_list[0].get("decimalAmount")) if gross_list else None
+                                if pid:
+                                    if _is_bq_sink(conn):
+                                        try:
                                         # Minimal join context: rely on existing product context in BQ at query time
                                         conn.upsert_tote_pool_snapshots([
                                             {
@@ -206,38 +204,38 @@ subscription {
                                     )
                                     conn.commit()
 
-                    # onEventStatusChanged → update tote_events.status
-                    if "onEventStatusChanged" in data:
-                        node = data["onEventStatusChanged"]
-                        if node and isinstance(node, dict):
-                            eid = node.get("eventId") or node.get("EventId")
-                            status = node.get("status") or node.get("Status")
-                            if eid and status:
-                                if _is_bq_sink(conn):
-                                    try:
-                                        conn.upsert_tote_event_status_log([
-                                            {"event_id": str(eid), "ts_ms": ts, "status": str(status)}
-                                        ])
-                                    except Exception:
-                                        pass
-                                else:
-                                    try:
-                                        conn.execute("UPDATE tote_events SET status=? WHERE event_id=?", (status, eid))
-                                        conn.commit()
-                                    except Exception:
-                                        pass
+                        # onEventStatusChanged → update tote_events.status
+                        if "onEventStatusChanged" in data:
+                            node = data["onEventStatusChanged"]
+                            if node and isinstance(node, dict):
+                                eid = node.get("eventId") or node.get("EventId")
+                                status = node.get("status") or node.get("Status")
+                                if eid and status:
+                                    if _is_bq_sink(conn):
+                                        try:
+                                            conn.upsert_tote_event_status_log([
+                                                {"event_id": str(eid), "ts_ms": ts, "status": str(status)}
+                                            ])
+                                        except Exception:
+                                            pass
+                                    else:
+                                        try:
+                                            conn.execute("UPDATE tote_events SET status=? WHERE event_id=?", (status, eid))
+                                            conn.commit()
+                                        except Exception:
+                                            pass
 
-                    # onEventResultChanged → per-competitor finishing positions
-                    if "onEventResultChanged" in data:
-                        node = data["onEventResultChanged"]
-                        if node and isinstance(node, dict):
-                            eid = node.get("eventId") or node.get("EventId")
-                            comps = (node.get("competitorResults") or [])
-                            if eid:
-                                if _is_bq_sink(conn):
-                                    try:
-                                        rows = []
-                                        for c in comps:
+                        # onEventResultChanged → per-competitor finishing positions
+                        if "onEventResultChanged" in data:
+                            node = data["onEventResultChanged"]
+                            if node and isinstance(node, dict):
+                                eid = node.get("eventId") or node.get("EventId")
+                                comps = (node.get("competitorResults") or [])
+                                if eid:
+                                    if _is_bq_sink(conn):
+                                        try:
+                                            rows = []
+                                            for c in comps:
                                             cid = str(c.get("competitorId") or "")
                                             fp = c.get("finishingPosition")
                                             st = c.get("status")
@@ -259,56 +257,56 @@ subscription {
                                     except Exception:
                                         pass
 
-                    # onPoolDividendChanged → append dividend updates per selection
-                    if "onPoolDividendChanged" in data:
-                        node = data["onPoolDividendChanged"]
-                        if node and isinstance(node, dict):
-                            pid = node.get("productId")
-                            dvs = (node.get("dividends") or [])
-                            if pid and dvs and _is_bq_sink(conn):
+                        # onPoolDividendChanged → append dividend updates per selection
+                        if "onPoolDividendChanged" in data:
+                            node = data["onPoolDividendChanged"]
+                            if node and isinstance(node, dict):
+                                pid = node.get("productId")
+                                dvs = (node.get("dividends") or [])
+                                if pid and dvs and _is_bq_sink(conn):
+                                    try:
+                                        rows = []
+                                        for d in dvs:
+                                            legs = (d.get("legs") or [])
+                                            amt_nodes = (((d.get("dividend") or {}).get("amounts")) or [])
+                                            amount = None
+                                            if amt_nodes:
+                                                try:
+                                                    amount = float(amt_nodes[0].get("decimalAmount"))
+                                                except Exception:
+                                                    amount = None
+                                            for lg in legs:
+                                                sels = (lg.get("selections") or [])
+                                                for s in sels:
+                                                    sel_id = s.get("id")
+                                                    if sel_id and amount is not None:
+                                                        rows.append({
+                                                            "product_id": str(pid),
+                                                            "selection": str(sel_id),
+                                                            "dividend": float(amount),
+                                                            "ts": str(ts),
+                                                        })
+                                        if rows:
+                                            conn.upsert_tote_product_dividends(rows)
+                                    except Exception:
+                                        pass
+
+                        # Other updates: log raw payloads for future processing
+                        for key in ("onEventUpdated","onLinesChanged","onProductStatusChanged","onSelectionStatusChanged"):
+                            if key in data and _is_bq_sink(conn):
                                 try:
-                                    rows = []
-                                    for d in dvs:
-                                        legs = (d.get("legs") or [])
-                                        amt_nodes = (((d.get("dividend") or {}).get("amounts")) or [])
-                                        amount = None
-                                        if amt_nodes:
-                                            try:
-                                                amount = float(amt_nodes[0].get("decimalAmount"))
-                                            except Exception:
-                                                amount = None
-                                        for lg in legs:
-                                            sels = (lg.get("selections") or [])
-                                            for s in sels:
-                                                sel_id = s.get("id")
-                                                if sel_id and amount is not None:
-                                                    rows.append({
-                                                        "product_id": str(pid),
-                                                        "selection": str(sel_id),
-                                                        "dividend": float(amount),
-                                                        "ts": str(ts),
-                                                    })
-                                    if rows:
-                                        conn.upsert_tote_product_dividends(rows)
+                                    conn.upsert_raw_tote([
+                                        {
+                                            "raw_id": f"sub:{key}:{ts}",
+                                            "endpoint": key,
+                                            "entity_id": str((data.get(key) or {}).get("productId") or (data.get(key) or {}).get("eventId") or ""),
+                                            "sport": "horse_racing",
+                                            "fetched_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts/1000.0)),
+                                            "payload": json.dumps({key: data.get(key)}, ensure_ascii=False),
+                                        }
+                                    ])
                                 except Exception:
                                     pass
-
-                    # Other updates: log raw payloads for future processing
-                    for key in ("onEventUpdated","onLinesChanged","onProductStatusChanged","onSelectionStatusChanged"):
-                        if key in data and _is_bq_sink(conn):
-                            try:
-                                conn.upsert_raw_tote([
-                                    {
-                                        "raw_id": f"sub:{key}:{ts}",
-                                        "endpoint": key,
-                                        "entity_id": str((data.get(key) or {}).get("productId") or (data.get(key) or {}).get("eventId") or ""),
-                                        "sport": "horse_racing",
-                                        "fetched_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts/1000.0)),
-                                        "payload": json.dumps({key: data.get(key)}, ensure_ascii=False),
-                                    }
-                                ])
-                            except Exception:
-                                pass
         except Exception:
             # Reconnect with backoff
             try:

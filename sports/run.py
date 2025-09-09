@@ -158,7 +158,7 @@ def main(argv=None):
             raise SystemExit("--to must be >= --from")
         
         db = get_db()
-        init_db(db) # Ensures tables exist in BigQuery
+        init_db() # Ensures tables exist in BigQuery
         client = ToteClient()
         cur = d0
         total_events = 0
@@ -209,7 +209,7 @@ def main(argv=None):
     def _cmd_tote_prods(args):
         bt = [s.strip().upper() for s in (args.types or '').split(',') if s.strip()]
         db = get_db()
-        init_db(db)
+        init_db()
         client = ToteClient()
         n = ingest_products(db, client, date_iso=args.date, status=args.status, first=args.first, bet_types=(bt or None))
         print(f"[Tote Products] Ingested {n} product(s) into BigQuery")

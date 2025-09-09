@@ -7,8 +7,8 @@ WORKDIR /app
 COPY autobet/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the autobet package root so imports like autobet.sports work
-COPY autobet/. .
+# Copy the autobet package under /app/autobet so imports like autobet.sports work
+COPY autobet/ ./autobet/
 
 ENV FLASK_APP=autobet.sports.gcp_orchestrator:app
 CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "autobet.sports.gcp_orchestrator:app"]

@@ -79,8 +79,23 @@ def handle_pubsub() -> tuple[str, int]:
             
             win_product_id = win_prod_df.iloc[0]["product_id"]
             path = f"/v1/products/{win_product_id}/probable-odds"
+            # Derive API base root robustly from configured GraphQL URL; fallback to production hub
             base = cfg.tote_graphql_url or ""
-            base_root = base.split("/partner/")[0].rstrip("/") if "/partner/" in base else ""
+            base_root = ""
+            try:
+                # Prefer stripping at /partner/... if present
+                if "/partner/" in base:
+                    base_root = base.split("/partner/")[0].rstrip("/")
+                else:
+                    # Parse scheme+host as a safe default
+                    from urllib.parse import urlparse
+                    u = urlparse(base)
+                    if u.scheme and u.netloc:
+                        base_root = f"{u.scheme}://{u.netloc}"
+            except Exception:
+                base_root = ""
+            if not base_root:
+                base_root = "https://hub.production.racing.tote.co.uk"
             full_url = f"{base_root}{path}"
             try:
                 headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}

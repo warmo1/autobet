@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import time
 import pandas as pd
@@ -543,6 +544,12 @@ def tote_superfecta_page():
 
 def create_app():
     """Factory for Flask app; also starts background subscribers if configured."""
+    try:
+        # Ensure required BQ tables and views exist so status page and queries don't error
+        init_db()
+    except Exception:
+        # Don't block app if BQ is not fully configured; status endpoints will report errors
+        pass
     try:
         _maybe_start_pool_thread()
     except Exception:

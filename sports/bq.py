@@ -691,6 +691,11 @@ class BigQuerySink:
           total_gross FLOAT64,
           total_net FLOAT64
         );
+        CREATE TABLE IF NOT EXISTS `{ds}.raw_tote_probable_odds`(
+          raw_id STRING,
+          fetched_ts INT64,
+          payload STRING
+        );
         CREATE TABLE IF NOT EXISTS `{ds}.tote_event_results_log`(
           event_id STRING,
           ts_ms INT64,
