@@ -82,9 +82,14 @@ def handle_pubsub() -> tuple[str, int]:
             base = cfg.tote_graphql_url or ""
             base_root = base.split("/partner/")[0].rstrip("/") if "/partner/" in base else ""
             full_url = f"{base_root}{path}"
-            headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
-            resp = rate_limited_get(full_url, headers=headers, timeout=20)
-            resp.raise_for_status()
+            try:
+                headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
+                resp = rate_limited_get(full_url, headers=headers, timeout=20)
+                resp.raise_for_status()
+            except requests.exceptions.HTTPError as http_err:
+                # Gracefully handle 403/404 errors for probable odds, as they are common.
+                print(f"Could not fetch probable odds for {win_product_id} (event: {event_id}). Status: {http_err.response.status_code}. Skipping.")
+                return ("", 204) # Return success to Pub/Sub to ack the message.
 
             rid = f"probable:{int(time.time()*1000)}"
             ts_ms = int(time.time()*1000)

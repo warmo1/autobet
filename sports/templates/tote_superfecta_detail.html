@@ -68,148 +68,54 @@
         {% endif %}
       </div>
       <div class="col-lg-5">
-        <!-- Paper bet form removed in BQ-only build -->
-        <!--
-        <form method="post" action="{{ url_for('tote_superfecta_page') }}" class="row g-2 mb-3">
-          <input type="hidden" name="product_id" value="{{ product.product_id }}" />
-          <div class="col-12"><label class="form-label">Position 1</label>
-            <select class="form-select form-select-sm" name="pos1">
-              {% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }} - {{ r.name }}</option>{% endfor %}
-            </select>
-          </div>
-          <div class="col-12"><label class="form-label">Position 2</label>
-            <select class="form-select form-select-sm" name="pos2">
-              {% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }} - {{ r.name }}</option>{% endfor %}
-            </select>
-          </div>
-          <div class="col-12"><label class="form-label">Position 3</label>
-            <select class="form-select form-select-sm" name="pos3">
-              {% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }} - {{ r.name }}</option>{% endfor %}
-            </select>
-          </div>
-          <div class="col-12"><label class="form-label">Position 4</label>
-            <select class="form-select form-select-sm" name="pos4">
-              {% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }} - {{ r.name }}</option>{% endfor %}
-            </select>
-          </div>
-          <div class="col-8">
-            <label class="form-label">Stake</label>
-            <input class="form-control form-control-sm" type="number" step="0.01" name="stake" placeholder="Stake" />
-          </div>
-          <div class="col-4 d-grid align-items-end">
-            <button class="btn btn-sm btn-secondary" style="margin-top:24px;">Place Paper Bet</button>
-          </div>
-        </form>
-        -->
-        <!-- Audit bet forms removed in BQ-only build -->
-        <!--
-        <form method="post" action="{{ url_for('tote_audit_superfecta_post') }}" class="row g-2">
-          <input type="hidden" name="product_id" value="{{ product.product_id }}" />
-          <input type="hidden" name="selection" id="auditSel" />
-          <input type="hidden" name="post" value="on" />
-          <div class="col-8">
-            <label class="form-label">Stake</label>
-            <input class="form-control form-control-sm" type="number" step="0.01" name="stake" placeholder="Stake" />
-          </div>
-          <div class="col-4 d-grid align-items-end">
-            <button class="btn btn-sm btn-primary" style="margin-top:24px;" onclick="buildAuditSel(event)">Audit Bet</button>
-          </div>
-        </form>
-        <div class="mt-2">
-          <details open>
-            <summary>Multiple selections builder</summary>
-            <div id="multi-builder">
-              <div class="row g-2 align-items-center mt-1 selection-row">
-                <div class="col-2"><select class="form-select form-select-sm pos-1">{% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }}</option>{% endfor %}</select></div>
-                <div class="col-2"><select class="form-select form-select-sm pos-2">{% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }}</option>{% endfor %}</select></div>
-                <div class="col-2"><select class="form-select form-select-sm pos-3">{% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }}</option>{% endfor %}</select></div>
-                <div class="col-2"><select class="form-select form-select-sm pos-4">{% for r in runners %}<option value="{{ r.cloth }}">{{ r.cloth }}</option>{% endfor %}</select></div>
-                <div class="col-2"><button class="btn btn-sm btn-danger btn-remove">X</button></div>
-              </div>
-            </div>
-            <button class="btn btn-sm btn-outline-primary mt-2" id="add-selection">Add Selection</button>
-            <form method="post" action="{{ url_for('tote_audit_superfecta_post') }}" class="row g-2 mt-2">
+        <div class="card">
+          <div class="card-header">Audit Bet Placement</div>
+          <div class="card-body">
+            <form method="post" action="{{ url_for('tote_audit_superfecta_post') }}">
               <input type="hidden" name="product_id" value="{{ product.product_id }}" />
               <input type="hidden" name="post" value="on" />
-              <div class="col-12">
-                <label class="form-label">Selections (one per line)</label>
-                <textarea class="form-control" name="selections" id="selections-output" rows="3" placeholder="3-7-1-5\n2-3-1-6"></textarea>
+              <input type="hidden" name="stake_type" value="line" />
+              <div class="mb-3">
+                <label for="selections_text" class="form-label">Selections (one per line)</label>
+                <textarea class="form-control" name="selections_text" id="selections_text" rows="5" placeholder="e.g.&#10;3-7-1-5&#10;2-3-1-6"></textarea>
+                <div class="form-text">Enter each superfecta combination on a new line.</div>
               </div>
-              <div class="col-8">
-                <label class="form-label">Stake/line (GBP)</label>
-                <input class="form-control" type="number" step="0.01" min="0" name="stake" placeholder="0.10" />
+              <div class="mb-3">
+                <label for="stake" class="form-label">Stake per line (£)</label>
+                <input class="form-control" type="number" step="0.01" min="0.01" name="stake" id="stake" value="0.10" />
               </div>
-              <div class="col-4 d-grid align-items-end">
-                <button class="btn btn-primary" style="margin-top:24px;" onclick="return confirm('Audit mode: submit multiple lines?')">Audit Multiple</button>
-              </div>
+              <button type="submit" class="btn btn-primary w-100" onclick="return confirm('Audit mode: submit multiple lines?')">Submit Audit Bet</button>
             </form>
-          </details>
+          </div>
         </div>
-        -->
+
         <div id="pool-info" class="mt-3"></div>
         <script>
-          function buildAuditSel(ev){
-            try{
-              const p1 = document.querySelector('select[name="pos1"]').value;
-              const p2 = document.querySelector('select[name="pos2"]').value;
-              const p3 = document.querySelector('select[name="pos3"]').value;
-              const p4 = document.querySelector('select[name="pos4"]').value;
-              const sel = [p1,p2,p3,p4].join('-');
-              document.getElementById('auditSel').value = sel;
-            }catch(e){}
-          }
-
-          const multiBuilder = document.getElementById('multi-builder');
-          const addSelectionBtn = document.getElementById('add-selection');
-          const selectionsOutput = document.getElementById('selections-output');
-
-          function updateSelectionsOutput() {
-            const rows = multiBuilder.querySelectorAll('.selection-row');
-            const selections = [];
-            rows.forEach(row => {
-              const p1 = row.querySelector('.pos-1').value;
-              const p2 = row.querySelector('.pos-2').value;
-              const p3 = row.querySelector('.pos-3').value;
-              const p4 = row.querySelector('.pos-4').value;
-              selections.push([p1, p2, p3, p4].join('-'));
-            });
-            selectionsOutput.value = selections.join('\n');
-          }
-
-          addSelectionBtn.addEventListener('click', () => {
-            const newRow = multiBuilder.querySelector('.selection-row').cloneNode(true);
-            newRow.querySelector('.btn-remove').addEventListener('click', () => {
-              newRow.remove();
-              updateSelectionsOutput();
-            });
-            multiBuilder.appendChild(newRow);
-            updateSelectionsOutput();
-          });
-
-          multiBuilder.querySelectorAll('.btn-remove').forEach(btn => {
-            btn.addEventListener('click', () => {
-              btn.closest('.selection-row').remove();
-              updateSelectionsOutput();
-            });
-          });
-          multiBuilder.addEventListener('change', updateSelectionsOutput);
-          updateSelectionsOutput();
-
           async function fetchPoolInfo() {
             const poolInfoDiv = document.getElementById('pool-info');
             try {
               const response = await fetch(`/api/tote/pool_snapshot/{{ product.product_id }}`);
+              if (!response.ok) {
+                  poolInfoDiv.innerHTML = `<div class="alert alert-warning small">Could not fetch live pool info (Status: ${response.status}).</div>`;
+                  return;
+              }
               const data = await response.json();
-              if (data.total_gross) {
+              if (data && data.total_gross !== null) {
                 poolInfoDiv.innerHTML = `
-                  <h5>Live Pool Info</h5>
-                  <p>Total Pool: £${data.total_gross.toFixed(2)}</p>
-                  <p>Net Pool: £${data.total_net.toFixed(2)}</p>
-                  <p>Rollover: £${data.rollover ? data.rollover.toFixed(2) : '0.00'}</p>
+                  <div class="card">
+                    <div class="card-header">Live Pool Info</div>
+                    <ul class="list-group list-group-flush">
+                      <li class="list-group-item d-flex justify-content-between"><span>Gross Pool</span> <strong>£${(data.total_gross || 0).toFixed(2)}</strong></li>
+                      <li class="list-group-item d-flex justify-content-between"><span>Net Pool</span> <strong>£${(data.total_net || 0).toFixed(2)}</strong></li>
+                      <li class="list-group-item d-flex justify-content-between"><span>Rollover</span> <strong>£${(data.rollover || 0).toFixed(2)}</strong></li>
+                    </ul>
+                  </div>
                 `;
+              } else {
+                  poolInfoDiv.innerHTML = '<div class="alert alert-secondary small">No live pool data available yet.</div>';
               }
             } catch (error) {
-              poolInfoDiv.innerHTML = '<p class="text-danger">Error fetching pool info.</p>';
+              poolInfoDiv.innerHTML = '<div class="alert alert-danger small">Error fetching pool info.</div>';
             }
           }
 

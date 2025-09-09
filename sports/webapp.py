@@ -463,10 +463,10 @@ def tote_superfecta_page():
     # UI Improvement: Default country to GB and add a venue filter.
     country = (request.args.get("country") or os.getenv("DEFAULT_COUNTRY", "GB")).strip().upper()
     venue = (request.args.get("venue") or "").strip()
-    status = (request.args.get("status") or "OPEN").strip().upper()
+    status = (request.args.get("status") or "").strip().upper()
     date_from = request.args.get("from") or _today_iso()
     date_to = request.args.get("to") or _today_iso()
-    limit = int(request.args.get("limit", "500") or 500)
+    limit = int(request.args.get("limit", "200") or 200)
     upcoming_flag = (request.args.get("upcoming") or "").lower() in ("1","true","yes","on")
 
     where = ["UPPER(p.bet_type)='SUPERFECTA'"]
@@ -488,7 +488,7 @@ def tote_superfecta_page():
 
     sql = (
         "SELECT p.product_id, p.event_id, p.event_name, COALESCE(e.venue, p.venue) AS venue, e.country, p.start_iso, "
-        "COALESCE(p.status,'') AS status, p.currency, p.total_gross, p.total_net, "
+        "COALESCE(p.status,'') AS status, p.currency, p.total_gross, p.total_net, p.rollover, "
         # UI Improvement: The product_id column can be de-emphasized in the template in favor of more user-friendly info.
         "(SELECT COUNT(1) FROM tote_product_selections s WHERE s.product_id = p.product_id) AS n_runners "
         "FROM tote_products p LEFT JOIN tote_events e USING(event_id) "
@@ -647,7 +647,7 @@ def tote_pools_page():
     # Aggregate totals
     total_net = sum((p.get('total_net') or 0) for p in prods)
     group_totals = gt.to_dict("records") if not gt.empty else []
-    return render_template(
+    return render_template( # noqa: E501
         "tote_pools.html",
         products=prods,
         totals={"total_net": total_net, "count": len(prods), "total": int(total), "page": page, "limit": limit},
@@ -1345,11 +1345,19 @@ def api_tote_pool_snapshot(product_id: str):
 
 @app.route("/tote/audit/superfecta", methods=["POST"])
 def tote_audit_superfecta_post():
-    # Disabled in BQ-only mode (no local audit storage). This can be re-enabled
-    # by persisting audit data in BigQuery. The _get_db_conn() call below will cause a 500.
-    flash("Audit placement disabled in this build.", "warning")
-    return redirect(request.referrer or url_for('tote_superfecta_page'))
+    """Handle audit bet placement for Superfecta, writing to BigQuery."""
+    if not _use_bq():
+        flash("Audit placement requires BigQuery to be configured.", "error")
+        return redirect(request.referrer or url_for('tote_superfecta_page'))
+
     pid = (request.form.get("product_id") or "").strip()
+    # This is the new field for the audit bet form
+    selections_text = (request.form.get("selections_text") or "").strip()
+    if not selections_text:
+        flash("Selections text box cannot be empty.", "error")
+        return redirect(request.referrer or url_for('tote_superfecta_detail', product_id=pid))
+
+    # Legacy fields, kept for potential compatibility
     sel = (request.form.get("selection") or "").strip()
     sels_raw = (request.form.get("selections") or "").strip()
     stake = (request.form.get("stake") or "").strip()
@@ -1364,15 +1372,22 @@ def tote_audit_superfecta_post():
     except Exception:
         flash("Stake must be > 0", "error")
         return redirect(request.referrer or url_for('tote_superfecta_page'))
-    post_flag = (request.form.get("post") or "").lower() in ("1","true","yes","on") # This line is unreachable due to early return
+
+    post_flag = (request.form.get("post") or "").lower() in ("1","true","yes","on")
     stake_type = (request.form.get("stake_type") or "total").strip().lower()
-    conn = _get_db_conn(); init_schema(conn)
+
+    # Use the new text area for selections
     selections = None
-    if sels_raw:
+    if selections_text:
         # Split by newline or comma
+        parts = [p.strip() for p in (selections_text.replace("\r","\n").replace(",","\n").split("\n"))]
+        selections = [p for p in parts if p]
+    elif sels_raw: # Fallback to hidden field
         parts = [p.strip() for p in (sels_raw.replace("\r","\n").replace(",","\n").split("\n"))]
         selections = [p for p in parts if p]
+
     # Preflight checks: product status OPEN and selection IDs valid/active
+    # This part remains largely the same, as it queries the live Tote API
     try:
         from .providers.tote_api import ToteClient
         client = ToteClient()
@@ -1393,7 +1408,6 @@ def tote_audit_superfecta_post():
         pstatus = (selling.get("status") or "").upper()
         if pstatus and pstatus != "OPEN":
             flash(f"Preflight: product not OPEN (status={pstatus}).", "error")
-            conn.close()
             return redirect(request.referrer or url_for('tote_superfecta_page'))
         # Build number->(selection_id,status)
         legs = ((bp.get("legs") or {}).get("nodes")) or []
@@ -1420,15 +1434,15 @@ def tote_audit_superfecta_post():
                 pass
             if len(nums) < 4:
                 flash(f"Preflight: invalid selection line '{line}'.", "error")
-                conn.close(); return redirect(request.referrer or url_for('tote_superfecta_page'))
+                return redirect(request.referrer or url_for('tote_superfecta_page'))
             missing = [str(n) for n in nums[:4] if n not in selmap]
             if missing:
                 flash(f"Preflight: unknown numbers {{{','.join(missing)}}}.", "error")
-                conn.close(); return redirect(request.referrer or url_for('tote_superfecta_page'))
+                return redirect(request.referrer or url_for('tote_superfecta_page'))
             inactive = [str(n) for n in nums[:4] if selmap.get(n,(None,None))[1] not in ("ACTIVE","OPEN","AVAILABLE","VALID")]
             if inactive:
                 flash(f"Preflight: selection(s) not active: {{{','.join(inactive)}}}.", "error")
-                conn.close(); return redirect(request.referrer or url_for('tote_superfecta_page'))
+                return redirect(request.referrer or url_for('tote_superfecta_page'))
     except Exception as e:
         # Non-fatal; continue to attempt placement but surface info
         flash(f"Preflight warning: {e}", "warning")
@@ -1437,9 +1451,13 @@ def tote_audit_superfecta_post():
     try:
         from .providers.tote_api import ToteClient
         client = ToteClient()
-        row = conn.execute("SELECT event_id, substr(start_iso,1,10) FROM tote_products WHERE product_id=?", (pid,)).fetchone()
-        event_id = row[0] if row else None
-        day = row[1] if row else None
+        # Use BQ to get event_id and date
+        prod_info_df = sql_df("SELECT event_id, substr(start_iso,1,10) as day FROM tote_products WHERE product_id=?", params=(pid,))
+        event_id = None
+        day = None
+        if not prod_info_df.empty:
+            event_id = prod_info_df.iloc[0]['event_id']
+            day = prod_info_df.iloc[0]['day']
         if event_id and day:
             q2 = """
             query Products($date: Date, $betTypes: [BetTypeCode!], $status: BettingProductSellingStatus, $first: Int){
@@ -1459,8 +1477,10 @@ def tote_audit_superfecta_post():
             placement_pid = f"SUPERFECTA:{event_id}"
     except Exception:
         placement_pid = pid
-    res = place_audit_superfecta(conn, product_id=pid, selection=(sel or None), selections=selections, stake=sk, currency=currency, post=post_flag, stake_type=stake_type, placement_product_id=placement_pid)
-    conn.commit(); conn.close()
+
+    # Use the BigQuery-aware audit function
+    db = get_db()
+    res = place_audit_superfecta(db, product_id=pid, selection=(sel or None), selections=selections, stake=sk, currency=currency, post=post_flag, stake_type=stake_type, placement_product_id=placement_pid)
     st = res.get("placement_status")
     if res.get("error"):
         flash(f"Audit bet error: {res.get('error')}", "error")
@@ -1886,9 +1906,9 @@ def event_detail(event_id: str):
             LEFT JOIN vw_tote_probable_odds o ON o.product_id = s.product_id AND o.selection_id = s.selection_id
             WHERE p.event_id = ?
             GROUP BY s.selection_id, s.number, s.competitor, o.decimal_odds, o.ts_ms
-            ORDER BY CAST(s.number AS INT64)
+            ORDER BY CAST(s.number AS INT64) NULLS LAST
             """,
-            params=(event_id,)
+            params=(p.get('event_id'),)
         )
         runners_prob = rprob.to_dict("records") if not rprob.empty else []
     except Exception:
@@ -1909,6 +1929,31 @@ def event_detail(event_id: str):
         runners_prob=runners_prob,
         competitors=competitors,
     )
+
+@app.route("/horse/<horse_id>")
+def horse_detail(horse_id: str):
+    """Displays historical form for a single horse."""
+    # Fetch horse details
+    horse_df = sql_df("SELECT * FROM hr_horses WHERE horse_id=?", params=(horse_id,))
+    if horse_df.empty:
+        flash("Horse not found", "error")
+        return redirect(url_for("index"))
+    horse = horse_df.to_dict("records")[0]
+
+    # Fetch last 10 runs with conditions
+    runs_df = sql_df(
+        """
+        SELECT r.*, e.name as event_name, e.venue, c.going, c.weather_desc
+        FROM hr_horse_runs r
+        LEFT JOIN tote_events e ON e.event_id = r.event_id
+        LEFT JOIN race_conditions c ON c.event_id = r.event_id
+        WHERE r.horse_id = ?
+        ORDER BY e.start_iso DESC
+        LIMIT 10
+        """, params=(horse_id,)
+    )
+    runs = [] if runs_df.empty else runs_df.to_dict("records")
+    return render_template("horse_detail.html", horse=horse, runs=runs)
 
 @app.route("/tote-superfecta/<product_id>")
 def tote_superfecta_detail(product_id: str):
@@ -1982,9 +2027,9 @@ def tote_superfecta_detail(product_id: str):
             LEFT JOIN vw_tote_probable_odds o ON o.product_id = s.product_id AND o.selection_id = s.selection_id
             WHERE p.event_id = ?
             GROUP BY s.selection_id, s.number, s.competitor, o.decimal_odds, o.ts_ms
-            ORDER BY CAST(s.number AS INT64)
+            ORDER BY CAST(s.number AS INT64) NULLS LAST
             """,
-            params=(event_id,)
+            params=(p.get('event_id'),)
         )
         runners2 = r2.to_dict("records") if not r2.empty else []
     except Exception:

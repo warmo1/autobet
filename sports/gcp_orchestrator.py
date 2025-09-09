@@ -261,15 +261,23 @@ def handle_scheduler() -> tuple[str, int]:
     try:
         # Scheduler can send a simple JSON body
         payload = request.get_json()
+        if not payload:
+            return ("No payload received", 400)
         job_name = payload.get("job_name")
     except (ValueError, AttributeError):
         return ("Bad Request or invalid payload", 400)
 
-    if job_name == "pre-race-scanner":
-        return scan_and_publish_pre_race_jobs()
-    elif job_name == "post-race-results-scanner":
-        return scan_and_publish_results_jobs()
-    elif job_name == "probable-odds-sweep":
-        return scan_and_publish_probable_sweep()
-    else:
-        return (f"Unknown job_name: {job_name}", 400)
+    try:
+        if job_name == "pre-race-scanner":
+            return scan_and_publish_pre_race_jobs()
+        elif job_name == "post-race-results-scanner":
+            return scan_and_publish_results_jobs()
+        elif job_name == "probable-odds-sweep":
+            return scan_and_publish_probable_sweep()
+        else:
+            return (f"Unknown job_name: {job_name}", 400)
+    except Exception as e:
+        print(f"Orchestrator error for job '{job_name}': {e}")
+        # Return 200 to prevent Cloud Scheduler from retrying a failed job logic.
+        # The error is logged for debugging.
+        return (f"Internal error processing job: {job_name}", 200)

@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+{% extends "base.html" %} {# This is now the main dashboard #}
 
 {% block title %}Ingestion Status{% endblock %}
 
@@ -9,7 +9,7 @@
 {% endblock %}
 
 {% block content %}
-<h1>Ingestion Status Dashboard</h1>
+<h1>Autobet Dashboard</h1>
 
 <div id="status-grid" class="status-grid">
 
@@ -41,8 +41,9 @@
 
     <div class="status-card">
         <h2>Upcoming Races (Next 60 mins)</h2>
-        <div id="upcoming-races-list">
+        <div id="upcoming-races-list" style="max-height: 200px; overflow-y: auto;">
             <!-- Populated by JS -->
+            <div class="small text-muted p-2">Loading...</div>
         </div>
     </div>
 
@@ -54,17 +55,17 @@
                 <button class="btn" data-action="products_today_open">Ingest Products Today (OPEN)</button>
             </div>
             <div class="qa-row">
-                <input type="date" id="qa-date" class="qa-input" />
+                <input type="date" id="qa-date" class="qa-input" value="{{ now_iso_date }}" />
                 <button class="btn" data-action="events_for_date" data-src="#qa-date">Ingest Events (date)</button>
                 <button class="btn" data-action="products_for_date_open" data-src="#qa-date">Ingest Products (date, OPEN)</button>
             </div>
             <div class="qa-row">
                 <input type="text" id="qa-event-id" placeholder="Event ID" class="qa-input" />
-                <button class="btn" data-action="probable_odds_event" data-src="#qa-event-id">Fetch Probable Odds</button>
+                <button class="btn" data-action="probable_odds_event" data-src="#qa-event-id">Probable Odds</button>
             </div>
             <div class="qa-row">
                 <input type="text" id="qa-product-id" placeholder="Product ID" class="qa-input" />
-                <button class="btn" data-action="single_product" data-src="#qa-product-id">Refresh Product</button>
+                <button class="btn" data-action="single_product" data-src="#qa-product-id">Product Pool</button>
             </div>
             <div class="qa-note small text-muted" id="qa-result"></div>
         </div>
@@ -72,7 +73,7 @@
 
     <div class="status-card" style="grid-column: 1 / -1;">
         <h2>Recent Ingestion Jobs</h2>
-        <div id="job-log-list">
+        <div id="job-log-list" style="max-height: 300px; overflow-y: auto;">
             <table class="job-log-table">
                 <thead>
                     <tr>
@@ -84,6 +85,7 @@
                 </thead>
                 <tbody id="job-log-body">
                     <!-- Populated by JS -->
+                    <tr><td colspan="4" class="text-center text-muted small">Loading...</td></tr>
                 </tbody>
             </table>
         </div>
