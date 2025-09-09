@@ -2256,12 +2256,22 @@ def manual_calculator_page():
             target_profit = calc_params['bankroll'] * (calc_params['desired_profit_pct'] / 100.0)
             target_profit_scenario = None
             if target_profit > 0 and optimal_ev_scenario:
+                # Build a consistent scenario object (with same keys as max-EV) for the first case meeting target
                 for scenario in ev_grid:
                     if scenario['expected_profit'] >= target_profit:
-                        # Found the first (fewest lines) scenario that meets the target.
-                        # Create a full scenario object for it, copying from the max EV one.
-                        target_profit_scenario = optimal_ev_scenario.copy()
-                        target_profit_scenario.update(scenario) # Overwrite with the target profit data
+                        hr = scenario['hit_rate']
+                        exp_ret = scenario['expected_profit'] + S
+                        # Recover f-share used for this scenario to keep fields consistent
+                        fshare = (exp_ret / (hr * optimal_ev_scenario['net_pool_if_bet'])) if hr > 0 else 0.0
+                        target_profit_scenario = {
+                            "lines_covered": scenario['lines_covered'],
+                            "hit_rate": hr,
+                            "expected_profit": scenario['expected_profit'],
+                            "expected_return": exp_ret,
+                            "f_share_used": fshare,
+                            "net_pool_if_bet": optimal_ev_scenario['net_pool_if_bet'],
+                            "total_stake": S,
+                        }
                         break
             
             # The base for our adjustments is the target profit scenario, or the max EV scenario as a fallback.
@@ -2377,8 +2387,9 @@ def manual_calculator_page():
                 staking_plan = final_covered_lines
             
             results["pl_model"] = {
-                "best_scenario": display_scenario,
-                "optimal_ev_scenario": base_scenario, # Pass the determined base scenario
+                "best_scenario": display_scenario,           # final scenario after concentration slider
+                "base_scenario": base_scenario,               # chosen base (target-profit or max-EV)
+                "optimal_ev_scenario": optimal_ev_scenario,   # true max-EV across m
                 "staking_plan": staking_plan,
                 "ev_grid": ev_grid,
                 "total_possible_lines": C,

@@ -294,6 +294,16 @@ document.addEventListener('DOMContentLoaded', function() {
     const numRunnersInput = document.getElementById('num_runners');
     const runnersGrid = document.getElementById('runners-grid');
     const existingRunners = {{ calc_params.runners | tojson }};
+    const keyMultInput = document.getElementById('key_horse_mult');
+    const poorMultInput = document.getElementById('poor_horse_mult');
+
+    function computeAdjustedStrength(odds, isKey, isPoor){
+        if (!odds || odds <= 1) return 0.0;
+        const base = 1.0 / odds;
+        const keyM = parseFloat(keyMultInput?.value || '1') || 1.0;
+        const poorM = parseFloat(poorMultInput?.value || '1') || 1.0;
+        return base * (isKey ? keyM : 1.0) * (isPoor ? poorM : 1.0);
+    }
 
     function updateRunnersGrid() {
         const numRunners = parseInt(numRunnersInput.value, 10) || 0;
@@ -306,7 +316,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         <th style="width: 15%;">Odds</th>
                         <th style="width: 10%;">Key Horse</th>
                         <th style="width: 10%;">Poor Form</th>
-                        <th style="width: 15%;">Implied Strength</th>
+                        <th style="width: 15%;">Adj. Strength</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -314,7 +324,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         for (let i = 0; i < numRunners; i++) {
             const runner = existingRunners[i] || { name: `Runner ${i+1}`, odds: 10.0, is_key: false, is_poor: false };
-            const strength = (1 / (parseFloat(runner.odds) || 10.0)).toFixed(4);
+            const strength = computeAdjustedStrength(parseFloat(runner.odds) || 10.0, !!runner.is_key, !!runner.is_poor).toFixed(4);
             tableHtml += `
                 <tr>
                     <td>${i + 1}</td>
@@ -330,22 +340,51 @@ document.addEventListener('DOMContentLoaded', function() {
         tableHtml += '</tbody></table>';
         runnersGrid.innerHTML = tableHtml;
 
-        // Add event listeners to update strength display
+        // Add event listeners to update adjusted strength display
+        const updateRowStrength = (el) => {
+            const row = el.closest('tr');
+            const odds = parseFloat(row.querySelector('.runner-odds')?.value);
+            const isKey = row.querySelector('input[name^="runner_key_"]')?.checked;
+            const isPoor = row.querySelector('input[name^="runner_poor_"]')?.checked;
+            const strengthCell = row.querySelector('.strength-display');
+            const v = computeAdjustedStrength(odds, isKey, isPoor);
+            strengthCell.textContent = v.toFixed(4);
+        };
         runnersGrid.querySelectorAll('.runner-odds').forEach(input => {
-            input.addEventListener('input', function() {
-                const odds = parseFloat(this.value);
-                const strengthCell = this.closest('tr').querySelector('.strength-display');
-                if (odds && odds > 1) {
-                    strengthCell.textContent = (1 / odds).toFixed(4);
-                } else {
-                    strengthCell.textContent = '0.0000';
-                }
-            });
+            input.addEventListener('input', function() { updateRowStrength(this); });
         });
+        runnersGrid.querySelectorAll('input[name^="runner_key_"], input[name^="runner_poor_"]').forEach(input => {
+            input.addEventListener('change', function() { updateRowStrength(this); });
+        });
+        // Initial recompute of all rows after render
+        runnersGrid.querySelectorAll('.runner-odds').forEach(input => updateRowStrength(input));
     }
 
     if (numRunnersInput) {
         numRunnersInput.addEventListener('change', updateRunnersGrid);
+        // Recompute row strengths whenever multipliers change
+        keyMultInput?.addEventListener('input', () => {
+            runnersGrid.querySelectorAll('.runner-odds').forEach(input => {
+                const row = input.closest('tr');
+                if (row) {
+                    const odds = parseFloat(input.value);
+                    const isKey = row.querySelector('input[name^="runner_key_"]')?.checked;
+                    const isPoor = row.querySelector('input[name^="runner_poor_"]')?.checked;
+                    row.querySelector('.strength-display').textContent = computeAdjustedStrength(odds, isKey, isPoor).toFixed(4);
+                }
+            });
+        });
+        poorMultInput?.addEventListener('input', () => {
+            runnersGrid.querySelectorAll('.runner-odds').forEach(input => {
+                const row = input.closest('tr');
+                if (row) {
+                    const odds = parseFloat(input.value);
+                    const isKey = row.querySelector('input[name^="runner_key_"]')?.checked;
+                    const isPoor = row.querySelector('input[name^="runner_poor_"]')?.checked;
+                    row.querySelector('.strength-display').textContent = computeAdjustedStrength(odds, isKey, isPoor).toFixed(4);
+                }
+            });
+        });
         updateRunnersGrid(); // Initial call
     }
 
