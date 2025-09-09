@@ -3,10 +3,12 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+# When building from the repo root as context, requirements.txt lives under autobet/
+COPY autobet/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Copy the autobet package root so imports like autobet.sports work
+COPY autobet/. .
 
 ENV FLASK_APP=autobet.sports.gcp_orchestrator:app
 CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "autobet.sports.gcp_orchestrator:app"]

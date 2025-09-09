@@ -21,7 +21,8 @@ help:
 	@echo "  terraform-init            Init Terraform in sports/"
 	@echo "  terraform-plan            Plan Terraform with project/region vars"
 	@echo "  terraform-apply           Apply Terraform with project/region vars"
-	@echo "  set-images                Update Cloud Run services to the new images (pin by digest if available)"
+	@echo "  set-images                Update Cloud Run services to the new images (uses TAG/.last_tag)"
+	@echo "  set-images-latest         Update Cloud Run services to the latest pushed digests in Artifact Registry"
 	@echo "  deploy                    Full flow: enable-apis, create-repo, build, terraform apply, set-images"
 
 .PHONY: enable-apis
@@ -53,7 +54,7 @@ build-and-push-gcb:
 	# This keeps Dockerfile paths like autobet/sports/Dockerfile.* valid and preserves
 	# the autobet.sports.* import path inside the container.
 	gcloud builds submit .. \
-	  --config autobet/sports/cloudbuild.yaml \
+	  --config sports/cloudbuild.yaml \
 	  --substitutions _IMAGE_FETCHER="$(IMAGE_FETCHER)",_IMAGE_ORCHESTRATOR="$(IMAGE_ORCH)" \
 	  --project "$(PROJECT)"
 	@echo "$(TAG)" > .last_tag
@@ -102,3 +103,18 @@ deploy: enable-apis create-repo build-and-push-gcb terraform-init terraform-appl
 .PHONY: secrets-push
 secrets-push:
 	python scripts/push_secrets_from_env.py --project "$(PROJECT)" --secrets TOTE_API_KEY TOTE_GRAPHQL_URL
+
+.PHONY: set-images-latest
+set-images-latest:
+	@echo "Finding latest pushed digests in Artifact Registry and updating services..."
+	# Fetch latest digests by UPDATE_TIME for each image path
+	@FETCHER_DIGEST=$$(gcloud artifacts docker images list "$(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_FETCHER)" --include-tags --format='csv[no-heading](DIGEST,UPDATE_TIME)' | sort -t, -k2,2r | head -n1 | cut -d, -f1); \
+	if [ -z "$$FETCHER_DIGEST" ]; then echo "No images found for $(SRV_FETCHER). Did you push?" >&2; exit 2; fi; \
+	ORCH_DIGEST=$$(gcloud artifacts docker images list "$(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_ORCH)" --include-tags --format='csv[no-heading](DIGEST,UPDATE_TIME)' | sort -t, -k2,2r | head -n1 | cut -d, -f1); \
+	if [ -z "$$ORCH_DIGEST" ]; then echo "No images found for $(SRV_ORCH). Did you push?" >&2; exit 2; fi; \
+	FETCHER_IMAGE="$(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_FETCHER)@$$FETCHER_DIGEST"; \
+	ORCH_IMAGE="$(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_ORCH)@$$ORCH_DIGEST"; \
+	echo "Updating $(SRV_FETCHER) -> $$FETCHER_IMAGE"; \
+	gcloud run services update "$(SRV_FETCHER)" --region "$(REGION)" --project "$(PROJECT)" --image "$$FETCHER_IMAGE"; \
+	echo "Updating $(SRV_ORCH) -> $$ORCH_IMAGE"; \
+	gcloud run services update "$(SRV_ORCH)" --region "$(REGION)" --project "$(PROJECT)" --image "$$ORCH_IMAGE"
