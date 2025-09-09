@@ -116,6 +116,7 @@ def handle_pubsub() -> tuple[str, int]:
                 resp = rate_limited_get(full_url, headers=headers, timeout=20)
                 resp.raise_for_status()
             except requests.exceptions.HTTPError as http_err:
+<<<<<<< HEAD
                 # Gracefully handle 403/404 errors for probable odds; attempt GraphQL fallback via lines
                 code = getattr(getattr(http_err, 'response', None), 'status_code', None)
                 print(f"Could not fetch probable odds (REST) for {win_product_id} (event: {event_id}). Status: {code}. URL: {full_url}. Trying GraphQL lines fallback.")
@@ -172,6 +173,11 @@ def handle_pubsub() -> tuple[str, int]:
                 except Exception as ge:
                     print(f"GraphQL fallback failed for {win_product_id}: {ge}")
                     return ("", 204) # Still ack the message
+=======
+                # Gracefully handle 403/404 errors for probable odds, as they are common.
+                print(f"Could not fetch probable odds for {win_product_id} (event: {event_id}). Status: {http_err.response.status_code}. Skipping.")
+                return ("", 204) # Return success to Pub/Sub to ack the message.
+>>>>>>> b716d43 (sssss)
 
             rid = f"probable:{int(time.time()*1000)}"
             ts_ms = int(time.time()*1000)
