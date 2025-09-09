@@ -2078,6 +2078,8 @@ def manual_calculator_page():
         "bankroll": 100.0,
         "key_horse_mult": 2.0,
         "poor_horse_mult": 0.5,
+        "concentration": 0.0,
+        "market_inefficiency": 0.10,
         "take_rate": 0.30,
         "net_rollover": 0.0,
         "inc_self": True,
@@ -2098,6 +2100,8 @@ def manual_calculator_page():
             # New weighting multipliers
             calc_params["key_horse_mult"] = float(request.form.get("key_horse_mult", calc_params["key_horse_mult"]))
             calc_params["poor_horse_mult"] = float(request.form.get("poor_horse_mult", calc_params["poor_horse_mult"]))
+            calc_params["concentration"] = float(request.form.get("concentration", calc_params["concentration"]))
+            calc_params["market_inefficiency"] = float(request.form.get("market_inefficiency", calc_params["market_inefficiency"]))
             calc_params["take_rate"] = float(request.form.get("take_rate", calc_params["take_rate"]))
             calc_params["net_rollover"] = float(request.form.get("net_rollover", calc_params["net_rollover"]))
             calc_params["inc_self"] = request.form.get("inc_self") == "1"
@@ -2187,8 +2191,8 @@ def manual_calculator_page():
 
             # --- EV Optimization Loop ---
             ev_grid = []
-            best_scenario = None
-            max_ev = -float('inf')
+            optimal_ev_scenario = None
+            max_ev = -float("inf")
             C = len(pl_permutations)
 
             for m in range(1, C + 1):
@@ -2202,24 +2206,27 @@ def manual_calculator_page():
                 R = calc_params['net_rollover']
                 mult = calc_params['div_mult']
                 
-                # f_share is your stake vs the total pool. A simple approximation is your total stake vs total pool.
-                f_auto = S / (S + O) if (S + O) > 0 else 0.0
+                # Apply market inefficiency to O for f-share calculation
+                O_effective = O * (1.0 - calc_params['market_inefficiency'])
+
+                # Enhanced f-share calculation. Assumes others' money 'O' is spread according to PL probabilities.
+                # Our f-share on any of our covered lines is our effective stake density vs the market's.
+                if hit_rate > 0:
+                    stake_density = S / hit_rate
+                    f_auto = stake_density / (stake_density + O_effective)
+                else:
+                    f_auto = 0.0
                 f_used = float(calc_params['f_fix']) if (calc_params['f_fix'] is not None) else f_auto
                 
                 net_pool_if_bet = mult * (((1.0 - t) * (O + S_inc)) + R)
                 expected_return = hit_rate * f_used * net_pool_if_bet
                 expected_profit = expected_return - S
                 
-                current_scenario = {
-                    "lines_covered": m,
-                    "hit_rate": hit_rate,
-                    "expected_profit": expected_profit,
-                }
-                ev_grid.append(current_scenario)
+                ev_grid.append({"lines_covered": m, "hit_rate": hit_rate, "expected_profit": expected_profit})
                 
                 if expected_profit > max_ev:
                     max_ev = expected_profit
-                    best_scenario = {
+                    optimal_ev_scenario = {
                         "lines_covered": m,
                         "hit_rate": hit_rate,
                         "expected_profit": expected_profit,
@@ -2229,17 +2236,61 @@ def manual_calculator_page():
                         "total_stake": S,
                     }
 
-            # Calculate the weighted staking plan for the best scenario
+            # --- Strategy Adjustment & Final Calculation ---
+            display_scenario = None
             staking_plan = []
-            if best_scenario:
-                optimal_lines = pl_permutations[:best_scenario['lines_covered']]
-                prob_sum_optimal = sum(p['probability'] for p in optimal_lines)
-                for line in optimal_lines:
-                    line['stake'] = (line['probability'] / prob_sum_optimal) * calc_params['bankroll'] if prob_sum_optimal > 0 else 0
-                staking_plan = optimal_lines
+            if optimal_ev_scenario:
+                concentration = calc_params["concentration"]
+                max_ev_lines = optimal_ev_scenario['lines_covered']
+                
+                # Calculate the final number of lines to cover based on concentration slider
+                final_lines_to_cover = max(1, int(round(max_ev_lines * (1.0 - concentration) + 1.0 * concentration)))
+
+                # Build the scenario that will actually be displayed and used for staking
+                final_covered_lines = pl_permutations[:final_lines_to_cover]
+                final_hit_rate = sum(p['probability'] for p in final_covered_lines)
+                
+                S = calc_params['bankroll']
+                S_inc = S if calc_params['inc_self'] else 0.0
+                O = calc_params['pool_gross_other']
+                t = calc_params['take_rate']
+                R = calc_params['net_rollover']
+                mult = calc_params['div_mult']
+                
+                # Apply market inefficiency to O for f-share calculation
+                O_effective = O * (1.0 - calc_params['market_inefficiency'])
+
+                # Enhanced f-share calculation for the final displayed scenario.
+                if final_hit_rate > 0:
+                    stake_density = S / final_hit_rate
+                    f_auto = stake_density / (stake_density + O_effective)
+                else:
+                    f_auto = 0.0
+                f_used = float(calc_params['f_fix']) if (calc_params['f_fix'] is not None) else f_auto
+                
+                net_pool_if_bet = mult * (((1.0 - t) * (O + S_inc)) + R)
+                expected_return = final_hit_rate * f_used * net_pool_if_bet
+                expected_profit = expected_return - S
+                
+                display_scenario = {
+                    "lines_covered": final_lines_to_cover,
+                    "hit_rate": final_hit_rate,
+                    "expected_profit": expected_profit,
+                    "expected_return": expected_return,
+                    "f_share_used": f_used,
+                    "net_pool_if_bet": net_pool_if_bet,
+                    "total_stake": S,
+                }
+
+                # Calculate the weighted staking plan for the final scenario
+                prob_sum_final = sum(p['probability'] for p in final_covered_lines)
+                for line in final_covered_lines:
+                    line['stake'] = (line['probability'] / prob_sum_final) * calc_params['bankroll'] if prob_sum_final > 0 else 0
+                staking_plan = final_covered_lines
             
             results["pl_model"] = {
-                "best_scenario": best_scenario,
+                "best_scenario": display_scenario,
+                "optimal_ev_scenario": optimal_ev_scenario,
                 "staking_plan": staking_plan,
                 "ev_grid": ev_grid,
                 "total_possible_lines": C,
