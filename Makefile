@@ -56,6 +56,8 @@ build-and-push-gcb:
 	  --config autobet/sports/cloudbuild.yaml \
 	  --substitutions _IMAGE_FETCHER="$(IMAGE_FETCHER)",_IMAGE_ORCHESTRATOR="$(IMAGE_ORCH)" \
 	  --project "$(PROJECT)"
+	@echo "$(TAG)" > .last_tag
+	@echo "Saved tag to .last_tag: $(TAG)"
 
 .PHONY: terraform-init
 terraform-init:
@@ -72,17 +74,21 @@ terraform-apply:
 .PHONY: set-images
 set-images:
 	@echo "Resolving digests and updating Cloud Run services..."
-	@FETCHER_DIGEST=$$(gcloud artifacts docker images describe "$(IMAGE_FETCHER)" --format='value(image_summary.digest)' 2>/dev/null || true); \
+	# Determine effective TAG: prefer env TAG, else .last_tag, else current computed TAG
+	@TAG_EFF=$${TAG:-$$(cat .last_tag 2>/dev/null || echo "$(TAG)")}; \
+	FETCHER_TAGGED="$(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_FETCHER):$$TAG_EFF"; \
+	ORCH_TAGGED="$(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_ORCH):$$TAG_EFF"; \
+	FETCHER_DIGEST=$$(gcloud artifacts docker images describe "$$FETCHER_TAGGED" --format='value(image_summary.digest)' 2>/dev/null || true); \
 	if [ -n "$$FETCHER_DIGEST" ]; then \
 	  FETCHER_IMAGE="$(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_FETCHER)@$$FETCHER_DIGEST"; \
 	else \
-	  FETCHER_IMAGE="$(IMAGE_FETCHER)"; \
+	  FETCHER_IMAGE="$$FETCHER_TAGGED"; \
 	fi; \
-	ORCH_DIGEST=$$(gcloud artifacts docker images describe "$(IMAGE_ORCH)" --format='value(image_summary.digest)' 2>/dev/null || true); \
+	ORCH_DIGEST=$$(gcloud artifacts docker images describe "$$ORCH_TAGGED" --format='value(image_summary.digest)' 2>/dev/null || true); \
 	if [ -n "$$ORCH_DIGEST" ]; then \
 	  ORCH_IMAGE="$(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_ORCH)@$$ORCH_DIGEST"; \
 	else \
-	  ORCH_IMAGE="$(IMAGE_ORCH)"; \
+	  ORCH_IMAGE="$$ORCH_TAGGED"; \
 	fi; \
 	echo "Updating $(SRV_FETCHER) -> $$FETCHER_IMAGE"; \
 	gcloud run services update "$(SRV_FETCHER)" --region "$(REGION)" --project "$(PROJECT)" --image "$$FETCHER_IMAGE"; \
