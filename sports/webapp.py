@@ -1924,6 +1924,7 @@ def event_detail(event_id: str):
             ORDER BY CAST(s.number AS INT64) NULLS LAST
             """,
             params=(p.get('event_id'),)
+            params=(event_id,)
         )
         runners_prob = rprob.to_dict("records") if not rprob.empty else []
     except Exception:
@@ -2080,6 +2081,7 @@ def manual_calculator_page():
         "poor_horse_mult": 0.5,
         "concentration": 0.0,
         "market_inefficiency": 0.10,
+        "desired_profit_pct": 5.0,
         "take_rate": 0.30,
         "net_rollover": 0.0,
         "inc_self": True,
@@ -2091,8 +2093,11 @@ def manual_calculator_page():
     results = {}
     errors = []
 
+    manual_override_active = False
+
     if request.method == "POST":
         # Parse inputs from form
+        manual_override_active = request.form.get("manual_override_active") == "1"
         try:
             calc_params["num_runners"] = int(request.form.get("num_runners", calc_params["num_runners"]))
             calc_params["bet_type"] = request.form.get("bet_type", calc_params["bet_type"]).upper()
@@ -2102,6 +2107,7 @@ def manual_calculator_page():
             calc_params["poor_horse_mult"] = float(request.form.get("poor_horse_mult", calc_params["poor_horse_mult"]))
             calc_params["concentration"] = float(request.form.get("concentration", calc_params["concentration"]))
             calc_params["market_inefficiency"] = float(request.form.get("market_inefficiency", calc_params["market_inefficiency"]))
+            calc_params["desired_profit_pct"] = float(request.form.get("desired_profit_pct", calc_params["desired_profit_pct"]))
             calc_params["take_rate"] = float(request.form.get("take_rate", calc_params["take_rate"]))
             calc_params["net_rollover"] = float(request.form.get("net_rollover", calc_params["net_rollover"]))
             calc_params["inc_self"] = request.form.get("inc_self") == "1"
@@ -2236,16 +2242,89 @@ def manual_calculator_page():
                         "total_stake": S,
                     }
 
+            # --- Determine Base Strategy ---
+            # Find the scenario that meets the user's desired profit with the fewest lines
+            target_profit = calc_params['bankroll'] * (calc_params['desired_profit_pct'] / 100.0)
+            target_profit_scenario = None
+            if target_profit > 0 and optimal_ev_scenario:
+                for scenario in ev_grid:
+                    if scenario['expected_profit'] >= target_profit:
+                        # Found the first (fewest lines) scenario that meets the target.
+                        # Create a full scenario object for it, copying from the max EV one.
+                        target_profit_scenario = optimal_ev_scenario.copy()
+                        target_profit_scenario.update(scenario) # Overwrite with the target profit data
+                        break
+            
+            # The base for our adjustments is the target profit scenario, or the max EV scenario as a fallback.
+            base_scenario = target_profit_scenario if target_profit_scenario else optimal_ev_scenario
+
             # --- Strategy Adjustment & Final Calculation ---
             display_scenario = None
             staking_plan = []
-            if optimal_ev_scenario:
+            
+            if base_scenario:
+                # If the chosen base strategy is not profitable, try to find and apply an automatic adjustment.
+                if base_scenario['expected_profit'] <= 0 and not manual_override_active:
+                    S = calc_params['bankroll']
+                    S_inc = S if calc_params['inc_self'] else 0.0
+                    O = calc_params['pool_gross_other']
+                    t = calc_params['take_rate']
+                    R = calc_params['net_rollover']
+                    mult = calc_params['div_mult']
+                    net_pool_if_bet = mult * (((1.0 - t) * (O + S_inc)) + R)
+                    max_ev_lines = base_scenario['lines_covered']
+
+                    mi_orig = calc_params['market_inefficiency']
+                    possible_solutions = []
+
+                    # Find the required MI for every possible concentration level
+                    for i in range(21): # 0.0, 0.05, ..., 1.0
+                        concentration_level = i / 20.0
+                        lines_to_cover = max(1, int(round(max_ev_lines * (1.0 - concentration_level) + 1.0 * concentration_level)))
+                        if lines_to_cover > len(pl_permutations): continue
+
+                        hit_rate = sum(p['probability'] for p in pl_permutations[:lines_to_cover])
+                        if hit_rate <= 0 or O <= 0: continue
+
+                        stake_density = S / hit_rate
+                        if net_pool_if_bet <= stake_density: continue
+
+                        # Calculate MI to break even, then add a small buffer to target a slightly positive profit.
+                        required_mi = (1.0 - (net_pool_if_bet - stake_density) / O) + 0.005
+
+                        if required_mi > mi_orig and required_mi < 0.9:
+                            possible_solutions.append({
+                                "concentration": concentration_level,
+                                "market_inefficiency": required_mi
+                            })
+
+                    best_suggestion = None
+                    if possible_solutions:
+                        sol_min_mi = min(possible_solutions, key=lambda x: x['market_inefficiency'])
+                        solutions_with_conc = [s for s in possible_solutions if s['concentration'] >= 0.1]
+                        
+                        if solutions_with_conc:
+                            sol_alt = min(solutions_with_conc, key=lambda x: x['market_inefficiency'])
+                            if sol_alt['market_inefficiency'] < sol_min_mi['market_inefficiency'] + 0.05:
+                                best_suggestion = sol_alt
+                            else:
+                                best_suggestion = sol_min_mi
+                        else:
+                            best_suggestion = sol_min_mi
+                    
+                    # If a better strategy was found, apply it automatically
+                    if best_suggestion:
+                        flash(f"Original settings were -EV. Parameters auto-adjusted to find a profitable strategy: Bet Concentration set to {best_suggestion['concentration']*100:.0f}% and Market Inefficiency to {best_suggestion['market_inefficiency']*100:.1f}%. You can modify these and recalculate.", "info")
+                        calc_params['concentration'] = best_suggestion['concentration']
+                        calc_params['market_inefficiency'] = best_suggestion['market_inefficiency']
+                        manual_override_active = True
+
+                # The rest of the calculation uses either the original or the auto-adjusted calc_params
                 concentration = calc_params["concentration"]
-                max_ev_lines = optimal_ev_scenario['lines_covered']
+                base_lines_to_cover = base_scenario['lines_covered']
                 
                 # Calculate the final number of lines to cover based on concentration slider
-                final_lines_to_cover = max(1, int(round(max_ev_lines * (1.0 - concentration) + 1.0 * concentration)))
-
+                final_lines_to_cover = max(1, int(round(base_lines_to_cover * (1.0 - concentration) + 1.0 * concentration)))
                 # Build the scenario that will actually be displayed and used for staking
                 final_covered_lines = pl_permutations[:final_lines_to_cover]
                 final_hit_rate = sum(p['probability'] for p in final_covered_lines)
@@ -2290,7 +2369,7 @@ def manual_calculator_page():
             
             results["pl_model"] = {
                 "best_scenario": display_scenario,
-                "optimal_ev_scenario": optimal_ev_scenario,
+                "optimal_ev_scenario": base_scenario, # Pass the determined base scenario
                 "staking_plan": staking_plan,
                 "ev_grid": ev_grid,
                 "total_possible_lines": C,
@@ -2301,7 +2380,8 @@ def manual_calculator_page():
         calc_params=calc_params,
         results=results,
         errors=errors,
-        bet_types=["WIN", "EXACTA", "TRIFECTA", "SUPERFECTA"]
+        bet_types=["WIN", "EXACTA", "TRIFECTA", "SUPERFECTA"],
+        manual_override_active=manual_override_active,
     )
 
 @app.route("/api/tote/bet_status")

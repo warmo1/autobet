@@ -11,6 +11,17 @@
     <h1>Manual Betting Calculator</h1>
     <p class="text-muted">Model a race by inputting runner odds and find the optimal number of combinations to bet on to maximize Expected Value (EV).</p>
 
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
     {% if errors %}
         <div class="alert alert-danger">
             <strong>Errors:</strong>
@@ -29,6 +40,9 @@
         </div>
         <div class="card-body">
             <form method="POST">
+                {% if manual_override_active %}
+                    <input type="hidden" name="manual_override_active" value="1">
+                {% endif %}
                 <div class="row g-3">
                     <div class="col-md-4">
                         <label for="num_runners" class="form-label">Number of Runners (N)</label>
@@ -72,31 +86,39 @@
 
                 <hr class="my-4">
 
-                <h5>Strategy & Risk Adjustment</h5>
+                <h5>Strategy Adjustments</h5>
                 <div class="row g-3">
-                    <div class="col-md-6">
+                    <div class="col-md-4">
                         <label for="concentration" class="form-label">Bet Concentration</label>
                         <div class="d-flex align-items-center">
                             <span class="small text-muted me-2">Max Coverage (EV)</span>
                             <input type="range" class="form-range" id="concentration" name="concentration" min="0" max="1" step="0.01" value="{{ calc_params.concentration }}">
                             <span class="small text-muted ms-2">Max Concentration</span>
                         </div>
-                        <div class="form-text">Adjust the trade-off between covering more lines (Max EV) and concentrating your stake on fewer, higher-probability lines (Max Concentration).</div>
+                        <div class="form-text">Adjusts between covering more lines (for max EV/target profit) and concentrating on fewer, higher-probability lines.</div>
                     </div>
-                    <div class="col-md-6">
+                    <div class="col-md-4">
                         <label for="market_inefficiency" class="form-label">Market Inefficiency Assumption</label>
                         <div class="d-flex align-items-center">
                             <span class="small text-muted me-2">0%</span>
                             <input type="range" class="form-range" id="market_inefficiency" name="market_inefficiency" min="0" max="0.9" step="0.01" value="{{ calc_params.market_inefficiency }}">
                             <span class="small text-muted ms-2">90%</span>
                         </div>
-                        <div class="form-text">Assume a percentage of others' money is "wasted" on very low-probability bets, increasing your potential f-share.</div>
+                        <div class="form-text">Assumes a % of others' money is on poor bets, increasing your potential dividend share.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label for="desired_profit_pct" class="form-label">Desired Profit Target</label>
+                        <div class="input-group">
+                            <input type="number" step="1" class="form-control" id="desired_profit_pct" name="desired_profit_pct" value="{{ calc_params.desired_profit_pct }}" min="0">
+                            <span class="input-group-text">%</span>
+                        </div>
+                        <div class="form-text">The calculator will aim for this profit % of your bankroll as its base strategy.</div>
                     </div>
                 </div>
 
                 <hr class="my-4">
 
-                <h5>Financial Parameters</h5>
+                <h5>Pool & Financial Parameters</h5>
                 <div class="row g-3">
                     <div class="col-md-3">
                         <label for="take_rate" class="form-label">Takeout Rate (t)</label>
@@ -150,19 +172,6 @@
                                 <strong>No Optimal Strategy Found.</strong> The model could not find a profitable betting strategy with the given parameters. This could be due to a high takeout rate, low pool size, or unfavorable odds. It may also occur if there are not enough runners for the selected bet type.
                             </div>
                         {% else %}
-                        {% with suggestion = pl_res.suggestion %}
-                            {% if suggestion %}
-                                <div class="alert alert-primary" role="alert">
-                                    <h5 class="alert-heading">💡 EV+ Suggestion</h5>
-                                    <p>Your current settings result in a negative expected profit. To find a potentially profitable strategy, the model suggests the following adjustment:</p>
-                                    <ul>
-                                        <li>Keep coverage at <strong>{{ suggestion.lines_covered }}</strong> lines (the point of maximum EV efficiency).</li>
-                                        <li>Increase <strong>Market Inefficiency</strong> to at least <strong>{{ "%.1f"|format(suggestion.market_inefficiency * 100) }}%</strong>.</li>
-                                    </ul>
-                                    <p class="mb-0 small">This assumes that a larger portion of the public's money is on very poor bets, which increases your potential dividend share. You can apply this setting using the slider above and recalculate.</p>
-                                </div>
-                            {% endif %}
-                        {% endwith %}
                         {% with optimal_ev = pl_res.optimal_ev_scenario %}
                             {% if optimal_ev and optimal_ev.lines_covered != best.lines_covered %}
                                 <div class="alert alert-info small" role="alert">
@@ -178,18 +187,18 @@
                                         Total Bankroll to Stake:
                                         <strong>£{{ "%.2f"|format(calc_params.bankroll) }}</strong>
                                     </li>
-                                    <li class="list-group-item d-flex justify-content-between align-items-center">
-                                        Optimal Lines to Cover:
-                                        <span class="badge bg-success rounded-pill">{{ best.lines_covered | int }} / {{ pl_res.total_possible_lines | int }}</span>
+                                     <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Lines to Cover:
+                                        <span class="badge bg-primary rounded-pill">{{ best.lines_covered | int }} / {{ pl_res.total_possible_lines | int }}</span>
                                     </li>
                                     <li class="list-group-item d-flex justify-content-between align-items-center">
-                                        Coverage of Total Permutations:
-                                        <strong>{{ "%.2f"|format(100 * best.lines_covered / pl_res.total_possible_lines if pl_res.total_possible_lines > 0 else 0) }}%</strong>
+                                        Probability of Win (Hit Rate):
+                                        <strong>{{ "%.2f"|format(best.hit_rate * 100) }}%</strong>
                                     </li>
                                 </ul>
                                 
                                 <h5>Viability of Optimal Strategy</h5>
-                                <p class="small text-muted">This EV calculation is for the optimal scenario, where you cover <strong>{{ best.lines_covered | int }}</strong> lines with a total stake of <strong>£{{ "%.2f"|format(best.total_stake) }}</strong>. This strategy has a combined "hit rate" of <strong>{{ "%.2f"|format(best.hit_rate * 100) }}%</strong>.</p>
+                                <p class="small text-muted">This EV calculation is for the current scenario, covering <strong>{{ best.lines_covered | int }}</strong> lines with a total stake of <strong>£{{ "%.2f"|format(best.total_stake) }}</strong>.</p>
                                 
                                 <ul class="list-group">
                                     <li class="list-group-item d-flex justify-content-between"><span>Total Stake (S)</span> <strong>£{{ "%.2f"|format(best.total_stake or 0) }}</strong></li>
