@@ -150,6 +150,19 @@
                                 <strong>No Optimal Strategy Found.</strong> The model could not find a profitable betting strategy with the given parameters. This could be due to a high takeout rate, low pool size, or unfavorable odds. It may also occur if there are not enough runners for the selected bet type.
                             </div>
                         {% else %}
+                        {% with suggestion = pl_res.suggestion %}
+                            {% if suggestion %}
+                                <div class="alert alert-primary" role="alert">
+                                    <h5 class="alert-heading">💡 EV+ Suggestion</h5>
+                                    <p>Your current settings result in a negative expected profit. To find a potentially profitable strategy, the model suggests the following adjustment:</p>
+                                    <ul>
+                                        <li>Keep coverage at <strong>{{ suggestion.lines_covered }}</strong> lines (the point of maximum EV efficiency).</li>
+                                        <li>Increase <strong>Market Inefficiency</strong> to at least <strong>{{ "%.1f"|format(suggestion.market_inefficiency * 100) }}%</strong>.</li>
+                                    </ul>
+                                    <p class="mb-0 small">This assumes that a larger portion of the public's money is on very poor bets, which increases your potential dividend share. You can apply this setting using the slider above and recalculate.</p>
+                                </div>
+                            {% endif %}
+                        {% endwith %}
                         {% with optimal_ev = pl_res.optimal_ev_scenario %}
                             {% if optimal_ev and optimal_ev.lines_covered != best.lines_covered %}
                                 <div class="alert alert-info small" role="alert">
