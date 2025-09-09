@@ -48,6 +48,20 @@ resource "google_cloud_scheduler_job" "daily_full_ingest" {
   }
 }
 
+# Allow Pub/Sub service agent to mint OIDC tokens as the fetcher service account
+resource "google_service_account_iam_member" "pubsub_can_act_as_fetcher_sa" {
+  service_account_id = google_service_account.fetcher_sa.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
+# Allow Cloud Scheduler service agent to mint OIDC tokens as the scheduler service account
+resource "google_service_account_iam_member" "scheduler_can_act_as_scheduler_sa" {
+  service_account_id = google_service_account.scheduler_sa.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-cloudscheduler.iam.gserviceaccount.com"
+}
+
 # Allow Cloud Scheduler service agent to publish to Pub/Sub topic
 resource "google_pubsub_topic_iam_member" "scheduler_publisher" {
   topic  = google_pubsub_topic.ingest_jobs_topic.name
