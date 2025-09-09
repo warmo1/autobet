@@ -142,12 +142,8 @@ class BigQuerySink:
         client = self._client_obj(); self._ensure_dataset()
         dest_fq = f"{self.project}.{self.dataset}.{dest}"
         # Ensure destination table exists first with temp schema (no rows)
-        # Avoid issuing DDL on every upsert to reduce BigQuery table update rate limits.
-        try:
-            client.get_table(dest_fq)
-        except Exception:
-            sql_ctas = f"CREATE TABLE IF NOT EXISTS `{dest_fq}` AS SELECT * FROM `{temp}` WHERE 1=0;"
-            client.query(sql_ctas).result()
+        sql_ctas = f"CREATE TABLE IF NOT EXISTS `{dest_fq}` AS SELECT * FROM `{temp}` WHERE 1=0;"
+        client.query(sql_ctas).result()
 
         # Fetch schemas to build robust INSERT column list
         dest_tbl = client.get_table(dest_fq)
@@ -342,9 +338,12 @@ class BigQuerySink:
             "ts_ms": "INT64",
             "total_gross": "FLOAT64",
             "total_net": "FLOAT64",
+            "rollover": "FLOAT64",
+            "deduction_rate": "FLOAT64",
         })
         if not temp:
             return
+        self._ensure_columns("tote_pool_snapshots", {"rollover": "FLOAT64", "deduction_rate": "FLOAT64"})
         self._merge(
             "tote_pool_snapshots",
             temp,
@@ -357,6 +356,8 @@ class BigQuerySink:
                 "start_iso=S.start_iso",
                 "total_gross=S.total_gross",
                 "total_net=S.total_net",
+                "rollover=S.rollover",
+                "deduction_rate=S.deduction_rate",
             ]),
         )
 
@@ -598,17 +599,19 @@ class BigQuerySink:
     def upsert_raw_tote_probable_odds(self, rows: Iterable[Mapping[str, Any]]):
         """Append/merge raw probable odds payloads.
 
-        Expected row keys: raw_id (str), fetched_ts (INT64 or STRING ISO), payload (STRING)
+        Expected row keys: raw_id (str), fetched_ts (INT64 or STRING ISO), payload (STRING), product_id (STRING)
         """
         temp = self._load_to_temp(
             "raw_tote_probable_odds",
             rows,
             schema_hint={
                 "fetched_ts": "INT64",
+                "product_id": "STRING",
             },
         )
         if not temp:
             return
+        self._ensure_columns("raw_tote_probable_odds", {"product_id": "STRING"})
         self._merge(
             "raw_tote_probable_odds",
             temp,
@@ -616,6 +619,7 @@ class BigQuerySink:
             update_set=",".join([
                 "fetched_ts=S.fetched_ts",
                 "payload=S.payload",
+                "product_id=S.product_id",
             ]),
         )
 
@@ -693,12 +697,15 @@ class BigQuerySink:
           start_iso STRING,
           ts_ms INT64,
           total_gross FLOAT64,
-          total_net FLOAT64
+          total_net FLOAT64,
+          rollover FLOAT64,
+          deduction_rate FLOAT64
         );
         CREATE TABLE IF NOT EXISTS `{ds}.raw_tote_probable_odds`(
           raw_id STRING,
           fetched_ts INT64,
-          payload STRING
+          payload STRING,
+          product_id STRING
         );
         CREATE TABLE IF NOT EXISTS `{ds}.tote_event_results_log`(
           event_id STRING,
@@ -1768,36 +1775,35 @@ class BigQuerySink:
         job = client.query(sql)
         job.result()
 
-        # vw_tote_probable_odds: parse latest probable odds per selection from raw payloads
+        # vw_tote_probable_odds: parse latest probable odds per selection from raw payloads (REST API format)
         sql = f"""
-        CREATE VIEW IF NOT EXISTS `{ds}.vw_tote_probable_odds` AS
+        CREATE OR REPLACE VIEW `{ds}.vw_tote_probable_odds` AS
         WITH exploded AS (
           SELECT
+            r.product_id,
             r.fetched_ts,
-            JSON_EXTRACT_SCALAR(sel, '$.selectionId') AS selection_id,
-            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds[0].decimal') AS FLOAT64) AS decimal_odds
+            JSON_EXTRACT_SCALAR(line, '$.selectionId') AS selection_id,
+            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.decimalOdds') AS FLOAT64) AS decimal_odds
           FROM `{ds}.raw_tote_probable_odds` r,
-          UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
-          UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line,
-          UNNEST(JSON_EXTRACT_ARRAY(line, '$.legs')) AS leg,
-          UNNEST(JSON_EXTRACT_ARRAY(leg, '$.lineSelections')) AS sel
+          UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.lines')) AS line
         ), latest AS (
-          SELECT selection_id,
+          SELECT product_id,
+                 selection_id,
                  ANY_VALUE(decimal_odds) AS decimal_odds,
                  MAX(fetched_ts) AS ts_ms
           FROM exploded
           WHERE selection_id IS NOT NULL AND decimal_odds IS NOT NULL
-          GROUP BY selection_id
+          GROUP BY product_id, selection_id
         )
         SELECT
-          s.product_id,
+          l.product_id,
           s.selection_id,
           s.number AS cloth_number,
           l.decimal_odds,
           l.ts_ms
         FROM latest l
         JOIN `{ds}.tote_product_selections` s
-          ON s.selection_id = l.selection_id;
+          ON s.selection_id = l.selection_id AND s.product_id = l.product_id;
         """
         job = client.query(sql)
         job.result()

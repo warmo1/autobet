@@ -1906,28 +1906,37 @@ def event_detail(event_id: str):
 
     # Runners with latest probable odds
     runners_prob: list = []
-    try:
+    try: # noqa
         rprob = sql_df(
             """
-            SELECT s.selection_id,
-                   s.number AS cloth_number,
-                   s.competitor AS horse,
-                   ANY_VALUE(p.bet_type) AS bet_type,
-                   ANY_VALUE(p.product_id) AS product_id,
-                   o.decimal_odds,
-                   TIMESTAMP_MILLIS(o.ts_ms) AS odds_ts
-            FROM tote_product_selections s
-            JOIN tote_products p USING(product_id)
-            LEFT JOIN vw_tote_probable_odds o ON o.product_id = s.product_id AND o.selection_id = s.selection_id
-            WHERE p.event_id = ?
-            GROUP BY s.selection_id, s.number, s.competitor, o.decimal_odds, o.ts_ms
-            ORDER BY CAST(s.number AS INT64) NULLS LAST
+            WITH event_selections AS (
+                SELECT DISTINCT s.selection_id, s.number, s.competitor
+                FROM tote_product_selections s
+                JOIN tote_products p ON p.product_id = s.product_id
+                WHERE p.event_id = @event_id
+            ),
+            win_product_odds AS (
+                SELECT o.selection_id, o.decimal_odds, o.ts_ms
+                FROM vw_tote_probable_odds o
+                JOIN tote_products p ON o.product_id = p.product_id
+                WHERE p.event_id = @event_id AND UPPER(p.bet_type) = 'WIN'
+            )
+            SELECT
+                es.selection_id,
+                es.number AS cloth_number,
+                es.competitor AS horse,
+                wpo.decimal_odds,
+                TIMESTAMP_MILLIS(wpo.ts_ms) AS odds_ts
+            FROM event_selections es
+            LEFT JOIN win_product_odds wpo ON es.selection_id = wpo.selection_id
+            ORDER BY CAST(es.number AS INT64) NULLS LAST
             """,
-            params=(p.get('event_id'),)
-            params=(event_id,)
+            params={'event_id': event_id}
         )
         runners_prob = rprob.to_dict("records") if not rprob.empty else []
-    except Exception:
+    except Exception as e:
+        print(f"Error fetching probable odds for event {event_id}: {e}")
+        traceback.print_exc()
         runners_prob = []
 
     # Fetch features
