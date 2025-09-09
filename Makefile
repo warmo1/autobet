@@ -46,11 +46,14 @@ create-repo:
 
 .PHONY: build-and-push-gcb
 build-and-push-gcb:
-	@echo "Building images via Cloud Build:"
+	@echo "Building images via Cloud Build (source: parent dir):"
 	@echo "  FETCHER:     $(IMAGE_FETCHER)"
 	@echo "  ORCHESTRATOR:$(IMAGE_ORCH)"
-	gcloud builds submit \
-	  --config sports/cloudbuild.yaml \
+	# Submit the parent directory so the workspace contains the 'autobet/' folder.
+	# This keeps Dockerfile paths like autobet/sports/Dockerfile.* valid and preserves
+	# the autobet.sports.* import path inside the container.
+	gcloud builds submit .. \
+	  --config autobet/sports/cloudbuild.yaml \
 	  --substitutions _IMAGE_FETCHER="$(IMAGE_FETCHER)",_IMAGE_ORCHESTRATOR="$(IMAGE_ORCH)" \
 	  --project "$(PROJECT)"
 
@@ -69,13 +72,13 @@ terraform-apply:
 .PHONY: set-images
 set-images:
 	@echo "Resolving digests and updating Cloud Run services..."
-	@FETCHER_DIGEST=$$(gcloud artifacts docker images describe "$(IMAGE_FETCHER)" --format='value(image_digest)' 2>/dev/null || true); \
+	@FETCHER_DIGEST=$$(gcloud artifacts docker images describe "$(IMAGE_FETCHER)" --format='value(image_summary.digest)' 2>/dev/null || true); \
 	if [ -n "$$FETCHER_DIGEST" ]; then \
 	  FETCHER_IMAGE="$(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_FETCHER)@$$FETCHER_DIGEST"; \
 	else \
 	  FETCHER_IMAGE="$(IMAGE_FETCHER)"; \
 	fi; \
-	ORCH_DIGEST=$$(gcloud artifacts docker images describe "$(IMAGE_ORCH)" --format='value(image_digest)' 2>/dev/null || true); \
+	ORCH_DIGEST=$$(gcloud artifacts docker images describe "$(IMAGE_ORCH)" --format='value(image_summary.digest)' 2>/dev/null || true); \
 	if [ -n "$$ORCH_DIGEST" ]; then \
 	  ORCH_IMAGE="$(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_ORCH)@$$ORCH_DIGEST"; \
 	else \
@@ -93,4 +96,3 @@ deploy: enable-apis create-repo build-and-push-gcb terraform-init terraform-appl
 .PHONY: secrets-push
 secrets-push:
 	python scripts/push_secrets_from_env.py --project "$(PROJECT)" --secrets TOTE_API_KEY TOTE_GRAPHQL_URL
-
