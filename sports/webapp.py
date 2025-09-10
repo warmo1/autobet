@@ -753,6 +753,7 @@ def tote_calculators_page():
     div_mult = float(request.values.get("mult", "1.0") or 1.0)
     f_fix_in = request.values.get("f_share_override")
     f_fix = float(f_fix_in) if f_fix_in is not None and f_fix_in != '' else None
+    f_share = f_fix  # Use override for f_share if provided
 
     # Map bet type to permutation K and clamp top_n
     k_map = {"WIN": 1, "EXACTA": 2, "TRIFECTA": 3, "SUPERFECTA": 4, "SWINGER": 2}
@@ -814,6 +815,12 @@ def tote_calculators_page():
         prod_df = sql_df("SELECT * FROM tote_products WHERE product_id=?", params=(product_id,))
         if not prod_df.empty:
             prod = prod_df.iloc[0].to_dict()
+
+        # Define t_val for breakeven calculation, using product's deduction_rate as default
+        t_default = float(prod.get("deduction_rate") or 0.30) if prod else 0.30
+        t_val = float(take_rate_in) if take_rate_in not in (None, "") else t_default
+        # Define R_val for breakeven calculation
+        R_val = float(net_rollover_in) if net_rollover_in not in (None, "") else (float(prod.get("rollover") or 0.0) if prod else 0.0)
 
         df_sel = sql_df((
             "SELECT selection_id, competitor, number, total_units FROM tote_product_selections WHERE product_id=? AND leg_index=1 ORDER BY number"
@@ -893,7 +900,7 @@ def tote_calculators_page():
                         "coverage": coverage,
                         "stake_per_line": stake_per_line,
                         "f_share": f_share,
-                    "date": date_filter, # f_share is undefined here, will be fixed below
+                        "date": date_filter,
                     },
                     runners=runners,
                     total_lines=0,
@@ -904,7 +911,7 @@ def tote_calculators_page():
                     countries=(countries_df['country'].tolist() if not countries_df.empty else []),
                     country=country,
                     venues=(venues_df['venue'].tolist() if not venues_df.empty else []),
-                    course=course,
+                    venue=venue,
                 )
             top_df = src_df.sort_values("pct_units", ascending=False).head(top_n)
             items = [(str(r["number"] if "number" in r else r.get("selection_id")), float(r["pct_units"])) for _, r in top_df.iterrows()]
@@ -925,7 +932,7 @@ def tote_calculators_page():
                         "coverage": coverage,
                         "stake_per_line": stake_per_line,
                         "f_share": f_share,
-                    "date": date_filter, # f_share is undefined here, will be fixed below
+                        "date": date_filter,
                     },
                     runners=runners,
                     total_lines=0,
@@ -936,7 +943,7 @@ def tote_calculators_page():
                     countries=(countries_df['country'].tolist() if not countries_df.empty else []),
                     country=country,
                     venues=(venues_df['venue'].tolist() if not venues_df.empty else []),
-                    course=course,
+                    venue=venue,
                 )
             # Normalize strengths
             tot = sum(p for _, p in items) or 1.0
@@ -977,8 +984,12 @@ def tote_calculators_page():
             # Breakeven using S lines
             S = stake_per_line * float(target_lines)
             try:
-                o_min_val = (S / (f_share * (1.0 - t_val))) - S
-            except Exception: # f_share and t_val are undefined here, will be fixed below
+                # Safe calculation for O_min
+                if f_share is not None and f_share > 0 and (1.0 - t_val) > 0:
+                    o_min_val = (S / (f_share * (1.0 - t_val))) - S
+                else:
+                    o_min_val = None
+            except Exception:
                 o_min_val = None
             o_min = o_min_val
         else:
@@ -1005,7 +1016,7 @@ def tote_calculators_page():
         countries=(countries_df['country'].tolist() if not countries_df.empty else []),
         country=country,
         venues=(venues_df['venue'].tolist() if not venues_df.empty else []),
-        course=course,
+        venue=venue,
     )
 
 @app.route("/tote/viability", methods=["GET", "POST"])
@@ -1124,7 +1135,6 @@ def tote_viability_page():
                             "N": N, "K": 2, "O": pool_gross, "M": M, "l": stake_per_line, "t": take_rate,
                             "R": net_rollover, "inc": True if inc_self else False, "mult": div_mult, "f": f_fix,
                         },
-                        # params={"N": N, "K": 2, "O": pool_gross, "M": M, "l": stake_per_line, "t": take_rate, "R": net_rollover, "inc": inc_self, "mult": div_mult, "f": f_fix}, # Redundant, remove
                     )
                     if viab_df is not None and not viab_df.empty:
                         viab = viab_df.iloc[0].to_dict()
@@ -1164,7 +1174,6 @@ def tote_viability_page():
                                 "N": N, "K": k_perm, "O": pool_gross, "M": M, "l": stake_per_line, "t": take_rate,
                                 "R": net_rollover, "inc": True if inc_self else False, "mult": div_mult, "f": f_fix,
                             },
-                            # params={"N": N, "K": k_perm, "O": pool_gross, "M": M, "l": stake_per_line, "t": take_rate, "R": net_rollover, "inc": inc_self, "mult": div_mult, "f": f_fix}, # Redundant, remove
                         )
                     except Exception:
                         viab_df = None
@@ -1179,7 +1188,6 @@ def tote_viability_page():
                                     "N": N, "O": pool_gross, "M": M, "l": stake_per_line, "t": take_rate,
                                     "R": net_rollover, "inc": True if inc_self else False, "mult": div_mult, "f": f_fix,
                                 },
-                                # params={"N": N, "O": pool_gross, "M": M, "l": stake_per_line, "t": take_rate, "R": net_rollover, "inc": True if inc_self else False, "mult": div_mult, "f": f_fix}, # Redundant, remove
                             )
                             if viab_df2 is not None and not viab_df2.empty:
                                 viab = viab_df2.iloc[0].to_dict()
@@ -1195,7 +1203,6 @@ def tote_viability_page():
                                 "R": net_rollover, "inc": True if inc_self else False, "mult": div_mult, "f": f_fix,
                                 "steps": 20,
                             },
-                            # params={"N": N, "K": k_perm, "O": pool_gross, "l": stake_per_line, "t": take_rate, "R": net_rollover, "inc": True if inc_self else False, "mult": div_mult, "f": f_fix, "steps": 20}, # Redundant, remove
                         )
                     except Exception:
                         grid_df = None
@@ -1935,10 +1942,14 @@ def event_detail(event_id: str):
         rprob = sql_df(
             """
             WITH event_selections AS (
-                SELECT DISTINCT s.selection_id, s.number, s.competitor
+                SELECT
+                    s.selection_id,
+                    ANY_VALUE(s.number) AS number,
+                    ANY_VALUE(s.competitor) AS competitor
                 FROM tote_product_selections s
                 JOIN tote_products p ON p.product_id = s.product_id
                 WHERE p.event_id = @event_id
+                GROUP BY s.selection_id
             ),
             win_product_odds AS (
                 SELECT o.selection_id, o.decimal_odds, o.ts_ms
@@ -2077,27 +2088,40 @@ def tote_superfecta_detail(product_id: str):
     )
     # Runners with latest probable odds (if available)
     runners2: list = []
-    try:
-        r2 = sql_df(
+    try: # noqa
+        r2 = sql_df( # noqa
             """
-            SELECT s.selection_id,
-                   s.number AS cloth_number,
-                   s.competitor AS horse,
-                   ANY_VALUE(p.bet_type) AS bet_type,
-                   ANY_VALUE(p.product_id) AS product_id,
-                   o.decimal_odds,
-                   TIMESTAMP_MILLIS(o.ts_ms) AS odds_ts
-            FROM tote_product_selections s
-            JOIN tote_products p USING(product_id)
-            LEFT JOIN vw_tote_probable_odds o ON o.product_id = s.product_id AND o.selection_id = s.selection_id
-            WHERE p.event_id = ?
-            GROUP BY s.selection_id, s.number, s.competitor, o.decimal_odds, o.ts_ms
-            ORDER BY CAST(s.number AS INT64) NULLS LAST
+            WITH event_selections AS (
+                SELECT
+                    s.selection_id,
+                    ANY_VALUE(s.number) AS number,
+                    ANY_VALUE(s.competitor) AS competitor
+                FROM tote_product_selections s
+                JOIN tote_products p ON p.product_id = s.product_id
+                WHERE p.event_id = @event_id
+                GROUP BY s.selection_id
+            ),
+            win_product_odds AS (
+                SELECT o.selection_id, o.decimal_odds, o.ts_ms
+                FROM vw_tote_probable_odds o
+                JOIN tote_products p ON o.product_id = p.product_id
+                WHERE p.event_id = @event_id AND UPPER(p.bet_type) = 'WIN'
+            )
+            SELECT
+                es.selection_id,
+                es.number AS cloth_number,
+                es.competitor AS horse,
+                wpo.decimal_odds,
+                TIMESTAMP_MILLIS(wpo.ts_ms) AS odds_ts
+            FROM event_selections es
+            LEFT JOIN win_product_odds wpo ON es.selection_id = wpo.selection_id
+            ORDER BY CAST(es.number AS INT64) NULLS LAST
             """,
-            params=(p.get('event_id'),)
+            params={'event_id': p.get('event_id')}
         )
         runners2 = r2.to_dict("records") if not r2.empty else []
-    except Exception:
+    except Exception as e:
+        print(f"Error fetching probable odds for superfecta detail {product_id}: {e}")
         runners2 = []
 
     # No local tote_bets in BQ-only mode
