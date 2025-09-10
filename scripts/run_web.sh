@@ -9,7 +9,9 @@ HOST="${HOST:-0.0.0.0}"
 
 echo "Starting web app on http://${HOST}:${PORT} (SUBSCRIBE_POOLS=${SUBSCRIBE_POOLS:-0})"
 $PY - <<'PY'
-from autobet.sports.webapp import app
-app.run(host='0.0.0.0', port=int(__import__('os').getenv('PORT','8010')))
-PY
+import os
+from autobet.sports.webapp import create_app
 
+app = create_app()
+app.run(host=os.getenv('HOST','0.0.0.0'), port=int(os.getenv('PORT','8010')))
+PY
