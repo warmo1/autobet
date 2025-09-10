@@ -1893,13 +1893,25 @@ def event_detail(event_id: str):
     # For upcoming events where results aren't available, fall back to competitors_json.
     runners = []
     competitors = []
-    if not runner_rows and event.get("competitors_json"):
+    # Load competitor blob (if present) and normalize to expected keys for fallback display
+    if event.get("competitors_json"):
         try:
-            # This list is used if no structured runner data is found.
-            competitors = json.loads(event["competitors_json"])
-            runners = competitors if event.get("sport") == "horse_racing" else []
+            competitors = json.loads(event["competitors_json"]) or []
+            if isinstance(competitors, list):
+                runners = [
+                    {
+                        "cloth": (c.get("cloth") or c.get("cloth_number") or c.get("number")),
+                        "name": (c.get("name") or c.get("competitor") or c.get("horse") or c.get("id") or "")
+                    }
+                    for c in competitors
+                ]
+                # Sort by cloth number if available
+                try:
+                    runners.sort(key=lambda x: (x.get("cloth") is None, int(x.get("cloth") or 1)))
+                except Exception:
+                    pass
         except (json.JSONDecodeError, TypeError):
-            pass  # Ignore errors in JSON blob
+            competitors = []
 
     # Fetch products (include pool components)
     products_df = sql_df(
@@ -1967,6 +1979,21 @@ def event_detail(event_id: str):
         runners_prob=runners_prob,
         competitors=competitors,
     )
+
+@app.route("/api/tote/product_selections/<product_id>")
+def api_tote_product_selections(product_id: str):
+    """Return selections for a given product (id, number, competitor)."""
+    if not product_id:
+        return app.response_class(json.dumps({"error": "missing product_id"}), mimetype="application/json", status=400)
+    try:
+        df = sql_df(
+            "SELECT selection_id, number, competitor FROM tote_product_selections WHERE product_id=? ORDER BY CAST(number AS INT64) NULLS LAST",
+            params=(product_id,)
+        )
+        rows = df.to_dict("records") if not df.empty else []
+        return app.response_class(json.dumps({"product_id": product_id, "selections": rows}), mimetype="application/json")
+    except Exception as e:
+        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
 @app.route("/horse/<horse_id>")
 def horse_detail(horse_id: str):
