@@ -425,10 +425,11 @@ def tote_events_page():
     if name:
         where.append("UPPER(name) LIKE UPPER(?)"); params.append(f"%{name.upper()}%")
     if date_from:
-        where.append("start_iso >= ?"); params.append(date_from)
+        where.append("SUBSTR(start_iso,1,10) >= ?"); params.append(date_from)
     if date_to:
-        where.append("start_iso <= ?"); params.append(date_to)
-    base_sql = (
+        # Ensure date_to includes the entire day by checking against the start of the next day
+        where.append("SUBSTR(start_iso,1,10) <= ?"); params.append(date_to)
+    base_sql = ( # noqa
         "SELECT event_id, name, venue, country, start_iso, sport, status, competitors_json, home, away "
         "FROM tote_events"
     )
@@ -446,7 +447,7 @@ def tote_events_page():
     events = df.to_dict("records") if not df.empty else []
     for ev in events:
         comps = []
-        try:
+        try: # noqa
             arr = json.loads(ev.get("competitors_json") or "[]")
             comps = [c.get("name") for c in arr if isinstance(c, dict) and c.get("name")]
         except Exception:
@@ -592,8 +593,8 @@ def tote_pools_page():
     # Performance/UI Improvement: Major refactor of this view.
     # - The main query now joins dividend counts and race conditions to avoid slow Python-side lookups.
     # - Filtering logic is cleaned up.
-    # - Venue filter options are now dynamic based on selected date and country.
-    base_sql = (
+    # - Venue filter options are now dynamic based on selected date and country. # noqa
+    base_sql = ( # noqa
         "SELECT p.product_id, UPPER(p.bet_type) AS bet_type, COALESCE(p.status,'') AS status, "
         "COALESCE(e.venue, p.venue) AS venue, UPPER(COALESCE(e.country,p.currency)) AS country, p.start_iso, "
         "p.currency, p.total_gross, p.total_net, p.rollover, p.deduction_rate, p.event_id, COALESCE(e.name, p.event_name) AS event_name, "
@@ -606,13 +607,13 @@ def tote_pools_page():
     )
     where = ["COALESCE(p.status,'') <> ''"]
     params: list[object] = []
-    if bet_type:
+    if bet_type: # noqa
         where.append("UPPER(p.bet_type)=?"); params.append(bet_type)
-    if country:
+    if country: # noqa
         where.append("UPPER(COALESCE(e.country,p.currency))=?"); params.append(country)
-    if status:
+    if status: # noqa
         where.append("UPPER(COALESCE(p.status,''))=?"); params.append(status)
-    if venue:
+    if venue: # noqa
         where.append("UPPER(COALESCE(e.venue,p.venue)) LIKE UPPER(?)"); params.append(f"%{venue}%")
     if date_filter:
         where.append("SUBSTR(p.start_iso,1,10)=?"); params.append(date_filter)
@@ -628,8 +629,8 @@ def tote_pools_page():
     paged_params = list(params) + [limit, offset]
     df = sql_df(paged_sql, params=tuple(paged_params))
 
-    # Options for filters
-    types_df = sql_df("SELECT DISTINCT UPPER(bet_type) AS bet_type FROM tote_products WHERE bet_type IS NOT NULL AND bet_type <> '' ORDER BY bet_type")
+    # Options for filters # noqa
+    types_df = sql_df("SELECT DISTINCT TRIM(UPPER(bet_type)) AS bet_type FROM tote_products WHERE bet_type IS NOT NULL AND TRIM(bet_type) <> '' ORDER BY bet_type")
     curr_df = sql_df("SELECT DISTINCT UPPER(COALESCE(e.country,p.currency)) AS country FROM tote_products p LEFT JOIN tote_events e USING(event_id) WHERE COALESCE(e.country,p.currency) IS NOT NULL AND COALESCE(e.country,p.currency) <> '' ORDER BY country")
     venues_df_sql = (
         "SELECT DISTINCT COALESCE(e.venue,p.venue) AS venue FROM tote_products p LEFT JOIN tote_events e USING(event_id) "
@@ -645,12 +646,12 @@ def tote_pools_page():
     venues_df_sql += " ORDER BY venue"
     venues_df = sql_df(venues_df_sql, params=tuple(venues_df_params))
 
-    # Group totals per bet type (respecting filters except pagination)
+    # Group totals per bet type (respecting filters except pagination) # noqa
     gt_sql = "SELECT UPPER(bet_type) AS bet_type, COUNT(1) AS n, SUM(total_net) AS sum_net FROM (" + filtered_sql + ") AS sub GROUP BY bet_type ORDER BY bet_type"
     gt = sql_df(gt_sql, params=tuple(params))
 
     prods = df.to_dict("records") if not df.empty else []
-    for p in prods:
+    for p in prods: # noqa
         p["dividend_count"] = int(p.get("dividend_count") or 0)
         # Guard against bad data for deduction_rate (should be a fraction)
         if p.get("deduction_rate") and p.get("deduction_rate") > 1.0:
@@ -661,7 +662,11 @@ def tote_pools_page():
             p["weather_badge"] = f"{'' if pd.isnull(t) else int(round(t))}°C {'' if pd.isnull(w) else int(round(w))}kph {'' if pd.isnull(pr) else pr:.1f}mm"
         else:
             p["weather_badge"] = None
-
+        # Ensure all relevant fields are present and not NaN for display
+        p["total_gross"] = f"{p.get('total_gross', 0):.2f}"
+        p["total_net"] = f"{p.get('total_net', 0):.2f}"
+        p["rollover"] = f"{p.get('rollover', 0):.2f}"
+        p["deduction_rate_display"] = f"{p.get('deduction_rate', 0) * 100:.1f}%"
     # Aggregate totals
     total_net = sum((p.get('total_net') or 0) for p in prods)
     group_totals = gt.to_dict("records") if not gt.empty else []
@@ -1401,6 +1406,8 @@ def tote_audit_superfecta_post():
     sels_raw = (request.form.get("selections") or "").strip()
     stake = (request.form.get("stake") or "").strip()
     currency = (request.form.get("currency") or "GBP").strip() or "GBP"
+    mode = request.form.get("mode", "audit")
+    if mode != "live": mode = "audit"
     if not pid or (not sel and not sels_raw):
         flash("Missing product or selection(s)", "error")
         return redirect(request.referrer or url_for('tote_superfecta_page'))
@@ -1519,7 +1526,7 @@ def tote_audit_superfecta_post():
 
     # Use the BigQuery-aware audit function
     db = get_db()
-    res = place_audit_superfecta(db, product_id=pid, selection=(sel or None), selections=selections, stake=sk, currency=currency, post=post_flag, stake_type=stake_type, placement_product_id=placement_pid)
+    res = place_audit_superfecta(db, mode=mode, product_id=pid, selection=(sel or None), selections=selections, stake=sk, currency=currency, post=post_flag, stake_type=stake_type, placement_product_id=placement_pid)
     st = res.get("placement_status")
     if res.get("error"):
         flash(f"Audit bet error: {res.get('error')}", "error")
@@ -1586,7 +1593,7 @@ def audit_bets_page():
 
     base_sql = """
         SELECT
-          b.bet_id, b.ts_ms, b.status, b.selection, b.stake, b.currency, b.response_json,
+          b.bet_id, b.ts_ms, b.mode, b.status, b.selection, b.stake, b.currency, b.response_json,
           p.event_id,
           p.event_name,
           p.start_iso,
@@ -1604,7 +1611,8 @@ def audit_bets_page():
         count_sql += where_clause
 
     total = 0
-    bets = []
+    live_bets = []
+    audit_bets = []
     try:
         # Total count
         total_df = sql_df(count_sql, params=params)
@@ -1614,7 +1622,8 @@ def audit_bets_page():
         paged_sql = base_sql + " ORDER BY b.ts_ms DESC LIMIT @limit OFFSET @offset"
         params_paged = {**params, "limit": limit, "offset": offset}
         df = sql_df(paged_sql, params=params_paged)
-
+        
+        all_bets = []
         for _, row in df.iterrows():
             bet_data = row.to_dict()
             bet_data['created'] = bet_data.get('ts_ms')
@@ -1635,14 +1644,19 @@ def audit_bets_page():
                             bet_data['tote_bet_id'] = results[0].get('toteBetId')
             except (json.JSONDecodeError, TypeError, KeyError, IndexError):
                 pass
-            bets.append(bet_data)
+            all_bets.append(bet_data)
+
+        live_bets = [b for b in all_bets if b.get('mode') == 'live']
+        audit_bets = [b for b in all_bets if b.get('mode') != 'live']
+
     except Exception as e:
         if 'Not found: Table' in str(e):
             flash("The 'tote_audit_bets' table was not found in BigQuery. Place an audit bet to create it.", "info")
         else:
             flash(f"Error fetching audit bets from BigQuery: {e}", "error")
             traceback.print_exc()
-        bets = []
+        live_bets = []
+        audit_bets = []
 
     # Options for filters
     try:
@@ -1654,7 +1668,8 @@ def audit_bets_page():
 
     return render_template(
         "audit_bets.html",
-        bets=bets,
+        live_bets=live_bets,
+        audit_bets=audit_bets,
         filters={
             "country": country, "venue": venue, "from": date_from, "to": date_to,
             "limit": limit, "page": page, "total": total,
@@ -1945,6 +1960,7 @@ def event_detail(event_id: str):
     # Fetch event details
     event_df = sql_df("SELECT * FROM tote_events WHERE event_id=?", params=(event_id,))
     if event_df.empty:
+        # If event not found, try to get basic info from tote_products
         flash("Event not found", "error")
         return redirect(url_for("tote_events_page"))
     event = event_df.to_dict("records")[0]
@@ -1954,36 +1970,43 @@ def event_detail(event_id: str):
     conditions = None if conditions_df.empty else conditions_df.to_dict("records")[0]
 
     # Fetch historical results and runner details from hr_horse_runs.
-    # This is the primary source for runners in an event, especially for historical events.
+    # This is the primary source for runners in an event, especially for historical events with results.
     runner_rows_df = sql_df(
         """
         SELECT
           r.horse_id,
-          h.name AS horse_name,
+          COALESCE(h.name, r.horse_id) AS horse_name, -- Use horse_id if name is null
           r.finish_pos,
           r.status,
           r.cloth_number,
           r.jockey,
           r.trainer
         FROM hr_horse_runs r
-        LEFT JOIN hr_horses h ON h.horse_id = r.horse_id
+        LEFT JOIN hr_horses h ON h.horse_id = r.horse_id -- Join to get horse name
         WHERE r.event_id = ?
         ORDER BY r.finish_pos NULLS LAST, r.cloth_number ASC
         """,
         params=(event_id,)
     )
-    runner_rows = [] if runner_rows_df.empty else runner_rows_df.to_dict("records")
+    runner_rows = runner_rows_df.to_dict("records") if not runner_rows_df.empty else []
 
-    # For upcoming events where results aren't available, fall back to competitors_json.
+    # Populate 'runners' list for display. Prioritize hr_horse_runs, then competitors_json.
     runners = []
-    competitors = []
-    # Load competitor blob (if present) and normalize to expected keys for fallback display
-    if event.get("competitors_json"):
-        try:
-            competitors = json.loads(event["competitors_json"]) or []
-            if isinstance(competitors, list):
-                runners = []
-                for c in competitors:
+    if runner_rows:
+        # Use data from hr_horse_runs if available
+        for r in runner_rows:
+            runners.append({
+                "cloth": r.get("cloth_number"),
+                "name": r.get("horse_name"),
+                "finish_pos": r.get("finish_pos"),
+                "status": r.get("status"),
+            })
+    elif event.get("competitors_json"): # Fallback to competitors_json if no hr_horse_runs
+        try: # noqa
+            competitors_json_data = json.loads(event["competitors_json"]) or []
+            if isinstance(competitors_json_data, list):
+                runners = [] # Reset runners if using fallback
+                for c in competitors_json_data: # Fix: was iterating over 'competitors' which was not defined
                     cloth = c.get("cloth") or c.get("cloth_number") or c.get("number")
                     name = c.get("name") or c.get("competitor") or c.get("horse")
                     if not name:
@@ -1994,18 +2017,18 @@ def event_detail(event_id: str):
                 try:
                     runners.sort(key=lambda x: (x.get("cloth") is None, int(x.get("cloth") or 1)))
                 except Exception:
-                    pass
+                    pass # Fallback to unsorted if cloth number is not int
         except (json.JSONDecodeError, TypeError):
-            competitors = []
+            runners = [] # Ensure runners is an empty list on error
 
     # Fetch products (include pool components)
     products_df = sql_df(
         """
         SELECT product_id, bet_type, status, start_iso, event_id, event_name, venue,
                COALESCE(total_gross,0) AS total_gross,
-               COALESCE(total_net,0)   AS total_net,
-               COALESCE(rollover,0)    AS rollover,
-               COALESCE(deduction_rate,0) AS takeout
+               COALESCE(total_net,0) AS total_net,
+               COALESCE(rollover,0) AS rollover,
+               COALESCE(deduction_rate,0) AS deduction_rate -- Use deduction_rate directly
         FROM tote_products
         WHERE event_id=?
         ORDER BY bet_type
@@ -2013,37 +2036,31 @@ def event_detail(event_id: str):
         params=(event_id,)
     )
     products = products_df.to_dict("records") if not products_df.empty else []
+    # Format deduction_rate for display and handle nulls
+    for p in products:
+        if p.get("deduction_rate") and p["deduction_rate"] > 1.0:
+            p["deduction_rate"] /= 100.0
+        p["deduction_rate_display"] = f"{p['deduction_rate'] * 100:.1f}%" if pd.notnull(p["deduction_rate"]) else "N/A"
 
     # Runners with latest probable odds
     runners_prob: list = []
     try: # noqa
+        # Simplified query: vw_tote_probable_odds already joins with tote_product_selections
+        # to get cloth_number and competitor name.
         rprob = sql_df(
             """
-            WITH event_selections AS (
-                SELECT
-                    s.selection_id,
-                    ANY_VALUE(s.number) AS number,
-                    ANY_VALUE(s.competitor) AS competitor
-                FROM tote_product_selections s
-                JOIN tote_products p ON p.product_id = s.product_id
-                WHERE p.event_id = @event_id
-                GROUP BY s.selection_id
-            ),
-            win_product_odds AS (
-                SELECT o.selection_id, o.decimal_odds, o.ts_ms
-                FROM vw_tote_probable_odds o
-                JOIN tote_products p ON o.product_id = p.product_id
-                WHERE p.event_id = @event_id AND UPPER(p.bet_type) = 'WIN'
-            )
+            -- Simplified and more robust query for probable odds
             SELECT
-                es.selection_id,
-                es.number AS cloth_number,
-                es.competitor AS horse,
-                wpo.decimal_odds,
-                TIMESTAMP_MILLIS(wpo.ts_ms) AS odds_ts
-            FROM event_selections es
-            LEFT JOIN win_product_odds wpo ON es.selection_id = wpo.selection_id
-            ORDER BY CAST(es.number AS INT64) NULLS LAST
+                o.selection_id,
+                o.cloth_number,
+                COALESCE(s.competitor, o.selection_id) AS horse, -- Fallback to ID if name is missing
+                o.decimal_odds,
+                TIMESTAMP_MILLIS(o.ts_ms) AS odds_ts
+            FROM vw_tote_probable_odds o
+            JOIN tote_products p ON o.product_id = p.product_id
+            LEFT JOIN tote_product_selections s ON o.selection_id = s.selection_id AND o.product_id = p.product_id
+            WHERE p.event_id = @event_id AND UPPER(p.bet_type) = 'WIN' -- Use WIN market for probable odds
+            ORDER BY o.cloth_number ASC
             """,
             params={'event_id': event_id}
         )
@@ -2065,8 +2082,7 @@ def event_detail(event_id: str):
         products=products,
         features=features,
         runner_rows=runner_rows,
-        runners_prob=runners_prob,
-        competitors=competitors,
+        runners_prob=runners_prob
     )
 
 @app.route("/api/tote/product_selections/<product_id>")
@@ -2167,33 +2183,19 @@ def tote_superfecta_detail(product_id: str):
     # Runners with latest probable odds (if available)
     runners2: list = []
     try: # noqa
-        r2 = sql_df( # noqa
+        r2 = sql_df(
             """
-            WITH event_selections AS (
-                SELECT
-                    s.selection_id,
-                    ANY_VALUE(s.number) AS number,
-                    ANY_VALUE(s.competitor) AS competitor
-                FROM tote_product_selections s
-                JOIN tote_products p ON p.product_id = s.product_id
-                WHERE p.event_id = @event_id
-                GROUP BY s.selection_id
-            ),
-            win_product_odds AS (
-                SELECT o.selection_id, o.decimal_odds, o.ts_ms
-                FROM vw_tote_probable_odds o
-                JOIN tote_products p ON o.product_id = p.product_id
-                WHERE p.event_id = @event_id AND UPPER(p.bet_type) = 'WIN'
-            )
             SELECT
-                es.selection_id,
-                es.number AS cloth_number,
-                es.competitor AS horse,
-                wpo.decimal_odds,
-                TIMESTAMP_MILLIS(wpo.ts_ms) AS odds_ts
-            FROM event_selections es
-            LEFT JOIN win_product_odds wpo ON es.selection_id = wpo.selection_id
-            ORDER BY CAST(es.number AS INT64) NULLS LAST
+                o.selection_id,
+                o.cloth_number,
+                COALESCE(s.competitor, o.selection_id) AS horse,
+                o.decimal_odds,
+                TIMESTAMP_MILLIS(o.ts_ms) AS odds_ts
+            FROM vw_tote_probable_odds o
+            JOIN tote_products p ON o.product_id = p.product_id
+            LEFT JOIN tote_product_selections s ON o.selection_id = s.selection_id AND o.product_id = p.product_id
+            WHERE p.event_id = @event_id AND UPPER(p.bet_type) = 'WIN'
+            ORDER BY o.cloth_number ASC
             """,
             params={'event_id': p.get('event_id')}
         )
@@ -2855,6 +2857,8 @@ def tote_bet_page():
         selection_id = request.form.get("selection_id")
         stake_str = request.form.get("stake")
         currency = request.form.get("currency", "GBP")
+        mode = request.form.get("mode", "audit")
+        if mode != "live": mode = "audit"
 
         errors = []
         if not product_id: errors.append("Product must be selected.")
@@ -2877,7 +2881,7 @@ def tote_bet_page():
         db = get_db()
 
         res = place_audit_simple_bet(
-            db, product_id=product_id, selection_id=selection_id, stake=stake, currency=currency, post=True
+            db, product_id=product_id, selection_id=selection_id, stake=stake, currency=currency, mode=mode, post=True
         )
 
         st = res.get("placement_status")

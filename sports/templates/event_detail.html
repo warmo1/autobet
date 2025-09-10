@@ -42,7 +42,7 @@
             {% else %}
               {% for r in rows %}
               <tr>
-                <td>{{ r.cloth_number if r.cloth_number is not none else '—' }}</td>
+                <td>{{ r.cloth_number if r.cloth_number is not none else (r.cloth or '—') }}</td>
                 <td>{{ r.horse or r.selection_id }}</td>
                 <td>{{ r.decimal_odds is not none and ('%.2f' % r.decimal_odds) or '—' }}</td>
                 <td>{{ r.odds_ts or '' }}</td>
@@ -68,7 +68,7 @@
                 <td class="text-end">{{ '%.2f'|format(p.total_gross or 0) }}</td>
                 <td class="text-end">{{ '%.2f'|format(p.total_net or 0) }}</td>
                 <td class="text-end">{{ '%.2f'|format(p.rollover or 0) }}</td>
-                <td class="text-end">{{ p.takeout is not none and ('%.1f%%' % (p.takeout*100.0)) or '—' }}</td>
+                <td class="text-end">{{ p.deduction_rate_display }}</td>
                 <td class="text-truncate" style="max-width:320px;">{{ p.product_id }}</td>
               </tr>
             {% endfor %}

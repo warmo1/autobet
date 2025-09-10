@@ -35,6 +35,11 @@ query GetProducts($date: Date, $status: BettingProductSellingStatus, $first: Int
             selections { nodes { id competitor { name details { __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } }
           }
         }
+        lines {
+          nodes {
+            legs { lineSelections { selectionId } } odds { decimal }
+          }
+        }
         result {
           status
           dividends {
@@ -66,6 +71,11 @@ query GetProducts($date: Date, $status: BettingProductSellingStatus, $first: Int
               selections { nodes { id competitor { name details { __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } }
             }
           }
+        lines {
+          nodes {
+            legs { lineSelections { selectionId } } odds { decimal }
+          }
+        }
           result {
             status
             dividends {
@@ -152,11 +162,35 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
         print("No products found.")
         return 0
 
+    # Store the raw payload containing probable odds for this batch
+    try:
+        import time as _t
+        ts_ms = int(_t.time() * 1000)
+        payload_for_raw = {"products": {"nodes": products_nodes}}
+        # Generate an ID based on the request params
+        req_id_part = date_iso or "live"
+        if bet_types:
+            req_id_part += "_" + "_".join(bet_types)
+        rid = f"probable:{req_id_part}:{ts_ms}"
+        
+        db.upsert_raw_tote_probable_odds([
+            {
+                "raw_id": rid,
+                "fetched_ts": ts_ms,
+                "payload": json.dumps(payload_for_raw),
+                "product_id": None # This is a batch, not for a single product
+            }
+        ])
+        print("Stored raw probable odds payload.")
+    except Exception as e:
+        print(f"Warning: failed to store raw probable odds payload: {e}")
+
     rows_products: List[Dict[str, Any]] = []
     rows_selections: List[Dict[str, Any]] = []
     rows_events: List[Dict[str, Any]] = []
     rows_rules: List[Dict[str, Any]] = []
     rows_dividends: List[Dict[str, Any]] = []
+    rows_finishing_positions: List[Dict[str, Any]] = []
     for p in products_nodes:
         # Map current schema (BettingProduct fragment), supporting two shapes:
         # 1) fields directly on node
@@ -329,19 +363,31 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
         dvs = ((res.get("dividends") or {}).get("nodes")) or []
         # Use event start time or current time as ts
         import time as _t
-        ts_iso = (event or {}).get("start_iso") or _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())
+        ts_iso = (event or {}).get("start_iso") or _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()) # noqa
         for d in dvs:
             amt = (((d.get("dividend") or {}).get("amount") or {}).get("decimalAmount"))
             dlegs = ((d.get("dividendLegs") or {}).get("nodes")) or []
             for dl in dlegs:
                 dsel = ((dl.get("dividendSelections") or {}).get("nodes")) or []
                 for ds in dsel:
-                    sel_id = ds.get("id")
-                    if sel_id and amt is not None:
+                    sel_id = ds.get("id") # This is the selection_id
+                    finish_pos = ds.get("finishingPosition")
+                    
+                    # Store dividend if present
+                    if sel_id and amt is not None and float(amt) > 0:
                         rows_dividends.append({
                             "product_id": (bp.get("id") or src.get("id")),
                             "selection": sel_id,
                             "dividend": float(amt),
+                            "ts": ts_iso,
+                        })
+                    # Store finishing position if present
+                    if sel_id and finish_pos is not None:
+                        rows_finishing_positions.append({
+                            "product_id": (bp.get("id") or src.get("id")),
+                            "event_id": (event or {}).get("id"),
+                            "selection_id": sel_id,
+                            "finish_pos": int(finish_pos),
                             "ts": ts_iso,
                         })
     
@@ -394,11 +440,27 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
             print(f"Inserting {len(ev_rows)} rows into tote_events")
             db.upsert_tote_events(ev_rows)
         if rows_rules:
+            # Deduplicate by product_id
+            _rmap: Dict[str, Dict[str, Any]] = {}
+            for r in rows_rules:
+                pid = r.get("product_id")
+                if pid:
+                    _rmap[pid] = r
+            rules_rows = list(_rmap.values())
             print(f"Inserting {len(rows_rules)} rows into tote_bet_rules")
             try:
-                db.upsert_tote_bet_rules(rows_rules)
+                db.upsert_tote_bet_rules(rules_rows)
             except Exception as ee:
                 print(f"Warning: bet rules upsert failed: {ee}")
+        if rows_finishing_positions:
+            # Deduplicate by (product_id, selection_id)
+            _fmap: Dict[tuple, Dict[str, Any]] = {}
+            for r in rows_finishing_positions:
+                k = (r.get("product_id"), r.get("selection_id"))
+                _fmap[k] = r
+            finish_rows = list(_fmap.values())
+            print(f"Inserting {len(finish_rows)} rows into tote_horse_finishing_positions")
+            db.upsert_tote_horse_finishing_positions(finish_rows)
         print("Successfully ingested product data.")
         return len(rows_products)
     except Exception as e:

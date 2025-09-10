@@ -2,15 +2,15 @@ import pandas as pd
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram.helpers import escape_markdown
-
 from .config import cfg
-from .db import connect
-from .schema import init_schema
-
+from .db import get_db, init_db # Import get_db and init_db for BigQuery
+# from .schema import init_schema # No longer needed for BigQuery-native
+from google.cloud import bigquery # Needed for QueryJobConfig
+import pandas as pd # Already imported, but explicitly used for clarity
 
 def _get_db_conn():
     """Helper to get a DB connection."""
-    return connect(cfg.database_url)
+    return get_db() # Returns a BigQuerySink instance
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -26,16 +26,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def daily_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fetches and sends the most recent betting suggestion from the new schema."""
     print("[Telegram] Received /suggestion command.")
-    conn = _get_db_conn()
-    init_schema(conn)
+    db = _get_db_conn() # This is now a BigQuerySink object
+    # init_schema(conn) # Not needed for BigQuery, init_db() handles views
+
     query = """
     SELECT s.*, e.home_team, e.away_team, e.start_date
     FROM suggestions s
     JOIN events e ON s.event_id = e.event_id
     ORDER BY s.created_ts DESC LIMIT 1
     """
-    suggestion_df = pd.read_sql_query(query, conn)
-    conn.close()
+
+    # For BigQuery, we need to use the BigQuerySink's query method
+    # and then convert the result to a DataFrame.
+    # Assuming 'suggestions' and 'events' tables exist in BigQuery.
+    try:
+        job_config = bigquery.QueryJobConfig(default_dataset=f"{cfg.bq_project}.{cfg.bq_dataset}")
+        suggestion_df = db.query(query, job_config=job_config).to_dataframe()
+    except Exception as e:
+        print(f"[Telegram Error] Failed to fetch suggestion from BigQuery: {e}")
+        await update.message.reply_text("Sorry, I'm having trouble fetching suggestions right now.")
+        return
+
+    # No db.close() needed for BigQuerySink
 
     if not suggestion_df.empty:
         s = suggestion_df.iloc[0]
@@ -64,6 +76,7 @@ def run_bot():
         return
 
     print("[Telegram] Starting bot...")
+    init_db() # Ensure BigQuery views are initialized when the bot starts
     application = ApplicationBuilder().token(cfg.telegram_token).build()
 
     # Register command handlers

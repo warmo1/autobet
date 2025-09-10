@@ -1,95 +1,120 @@
 {% extends 'base.html' %}
+{% block title %}Bet History{% endblock %}
+
 {% block content %}
 <div class="container mt-3">
-  <h3>Audit Bets</h3>
+    <h1>Bet History</h1>
+    <p class="text-muted">A log of all bets placed in both Live and Audit mode.</p>
 
-  <form method="GET" action="{{ url_for('audit_bets_page') }}" class="mb-4 p-3 border rounded bg-light">
-    <div class="form-row">
-      <div class="form-group col-md-2">
-        <label for="country">Country</label>
-        <select name="country" id="country" class="form-control">
-          <option value="">All</option>
-          {% for c in country_options %}
-          <option value="{{ c }}" {% if filters.country == c %}selected{% endif %}>{{ c }}</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div class="form-group col-md-3">
-        <label for="venue">Venue</label>
-        <input type="text" name="venue" id="venue" class="form-control" value="{{ filters.venue }}" placeholder="e.g. Ascot">
-      </div>
-      <div class="form-group col-md-2">
-        <label for="from">From</label>
-        <input type="date" name="from" id="from" class="form-control" value="{{ filters.from }}">
-      </div>
-      <div class="form-group col-md-2">
-        <label for="to">To</label>
-        <input type="date" name="to" id="to" class="form-control" value="{{ filters.to }}">
-      </div>
-      <div class="form-group col-md-1">
-        <label for="limit">Limit</label>
-        <input type="number" name="limit" id="limit" class="form-control" value="{{ filters.limit }}">
-      </div>
-      <div class="form-group col-md-2 align-self-end">
-        <button type="submit" class="btn btn-primary btn-block">Filter</button>
-      </div>
+    <form method="GET" action="{{ url_for('audit_bets_page') }}" class="mb-4 p-3 border rounded bg-light">
+        <div class="form-row">
+            <div class="form-group col-md-3">
+                <label for="country">Country</label>
+                <select name="country" id="country" class="form-control">
+                    <option value="">All</option>
+                    {% for c in country_options or [] %}
+                    <option value="{{ c }}" {% if filters.country == c %}selected{% endif %}>{{ c }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group col-md-4">
+                <label for="venue">Venue</label>
+                <input type="text" name="venue" id="venue" class="form-control" value="{{ filters.venue }}" placeholder="e.g. Ascot">
+            </div>
+            <div class="form-group col-md-2">
+                <label for="from">From</label>
+                <input type="date" name="from" id="from" class="form-control" value="{{ filters.from }}">
+            </div>
+            <div class="form-group col-md-2">
+                <label for="to">To</label>
+                <input type="date" name="to" id="to" class="form-control" value="{{ filters.to }}">
+            </div>
+            <div class="form-group col-md-1 align-self-end">
+                <button type="submit" class="btn btn-primary btn-block">Filter</button>
+            </div>
+        </div>
+    </form>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="card mb-4">
+        <div class="card-header">
+            <h4>Live Bets</h4>
+        </div>
+        <div class="card-body">
+            {% if live_bets %}
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead>
+                        <tr>
+                            <th>Placed</th>
+                            <th>Venue</th>
+                            <th>Event</th>
+                            <th>Selection</th>
+                            <th>Stake</th>
+                            <th>Status</th>
+                            <th>Tote Bet ID</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for bet in live_bets %}
+                        <tr>
+                            <td><a href="{{ url_for('audit_bet_detail_page', bet_id=bet.bet_id) }}">{{ bet.created | datetime }}</a></td>
+                            <td>{{ bet.venue }}</td>
+                            <td>{{ bet.event_name }}</td>
+                            <td>{{ bet.selection }}</td>
+                            <td>{{ bet.currency }} {{ "%.2f"|format(bet.stake) }}</td>
+                            <td><span class="badge bg-success">{{ bet.status }}</span></td>
+                            <td>{{ bet.tote_bet_id or 'N/A' }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="text-muted">No live bets found matching the current filters.</p>
+            {% endif %}
+        </div>
     </div>
-  </form>
 
-  <table class="table table-sm table-striped table-hover">
-    <thead class="thead-dark">
-      <tr>
-        <th>Created</th>
-        <th>Event</th>
-        <th>Venue</th>
-        <th>Country</th>
-        <th>Selection</th>
-        <th>Stake</th>
-        <th>Status</th>
-        <th>Bet ID</th>
-        <th>Tote Bet ID</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for b in bets %}
-      <tr>
-        <td><small>{{ b.created | datetime }}</small></td>
-        <td><a href="{{ url_for('event_detail', event_id=b.event_id) if b.event_id else '#' }}">{{ b.event_name }}</a></td>
-        <td>{{ b.venue }}</td>
-        <td>{{ b.country }}</td>
-        <td>{{ b.selection }}</td>
-        <td>{{ "%.2f"|format(b.stake) }} {{ b.currency }}</td>
-        <td><span class="badge badge-pill badge-secondary">{{ b.status }}</span></td>
-        <td><a href="{{ url_for('audit_bet_detail_page', bet_id=b.bet_id) }}"><small>{{ b.bet_id }}</small></a></td>
-        <td><small>{{ b.tote_bet_id }}</small></td>
-      </tr>
-      {% else %}
-      <tr><td colspan="9" class="text-center">No audit bets found for the selected filters.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+    <div class="card">
+        <div class="card-header">
+            <h4>Audit Bets</h4>
+        </div>
+        <div class="card-body">
+            {% if audit_bets %}
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead>
+                        <tr>
+                            <th>Placed</th><th>Venue</th><th>Event</th><th>Selection</th><th>Stake</th><th>Status</th><th>Tote Bet ID</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for bet in audit_bets %}
+                        <tr>
+                            <td><a href="{{ url_for('audit_bet_detail_page', bet_id=bet.bet_id) }}">{{ bet.created | datetime }}</a></td>
+                            <td>{{ bet.venue }}</td><td>{{ bet.event_name }}</td><td>{{ bet.selection }}</td><td>{{ bet.currency }} {{ "%.2f"|format(bet.stake) }}</td>
+                            <td><span class="badge bg-secondary">{{ bet.status }}</span></td><td>{{ bet.tote_bet_id or 'N/A' }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="text-muted">No audit bets found matching the current filters.</p>
+            {% endif %}
+        </div>
+    </div>
 
-  {% set max_pages = (filters.total / filters.limit) | round(0, 'ceil') | int %}
-  {% if max_pages > 1 %}
-  <nav>
-    <ul class="pagination">
-      <li class="page-item {% if filters.page <= 1 %}disabled{% endif %}">
-        <a class="page-link" href="{{ url_for('audit_bets_page', page=filters.page-1, **request.args.to_dict(flat=False)) }}">Previous</a>
-      </li>
-      {% for p in range(1, max_pages + 1) %}
-        {% if p == filters.page %}
-          <li class="page-item active"><a class="page-link" href="#">{{ p }}</a></li>
-        {% elif p > filters.page - 3 and p < filters.page + 3 %}
-          <li class="page-item"><a class="page-link" href="{{ url_for('audit_bets_page', page=p, **request.args.to_dict(flat=False)) }}">{{ p }}</a></li>
-        {% elif p == 1 or p == max_pages or p == filters.page - 3 or p == filters.page + 3 %}
-          <li class="page-item disabled"><a class="page-link" href="#">...</a></li>
-        {% endif %}
-      {% endfor %}
-      <li class="page-item {% if filters.page >= max_pages %}disabled{% endif %}">
-        <a class="page-link" href="{{ url_for('audit_bets_page', page=filters.page+1, **request.args.to_dict(flat=False)) }}">Next</a>
-      </li>
-    </ul>
-  </nav>
-  {% endif %}
 </div>
 {% endblock %}

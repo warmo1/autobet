@@ -99,14 +99,31 @@ This writes explicit Event rows (incl. status and competitors list when availabl
 ### BigQuery temp-table cleanup
 
 Temporary staging tables named `_tmp_*` are created during upserts and removed after merges. If jobs fail mid-flight, leftover tables can accumulate.
+Temporary staging tables named `_tmp_*` are created during bulk upserts and are normally removed after a successful `MERGE` operation. If jobs fail mid-flight, these temporary tables can accumulate.
+
+There are several ways to clean them up:
+
+**1. Scheduled Cleanup (Recommended)**
+
+This is deployed via Terraform as part of the `make deploy` process. A Cloud Scheduler job (`bq-tmp-cleanup`) periodically publishes a message like `{ "task": "cleanup_bq_temps", "older_than_days": 1 }` to the `ingest-jobs` Pub/Sub topic. The `ingestion-fetcher` Cloud Run service receives this message and deletes any temporary tables older than the specified number of days.
+
+**2. Manual Script**
+
+For one-off cleanups, you can run a dedicated script:
+```bash
+python autobet/scripts/bq_cleanup.py --older 3   # delete _tmp_ tables older than 3 days
+```
 
 - One-off cleanup:
+**3. Manual Python Snippet**
 
+You can also trigger the cleanup directly from a Python shell:
 ```
 python - <<'PY'
 from autobet.sports.bq import get_bq_sink
 sink = get_bq_sink(); print('deleted:', sink.cleanup_temp_tables(older_than_days=1))
 PY
+python -c "from autobet.sports.bq import get_bq_sink; sink = get_bq_sink(); print('deleted:', sink.cleanup_temp_tables(older_than_days=1))"
 ```
 
 - Scheduled cleanup (deployed via Terraform):

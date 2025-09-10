@@ -27,7 +27,7 @@ def get_db() -> BigQuerySink:
 
 def init_db():
     """Initializes the database by ensuring all required views are created."""
-    print("Initializing BigQuery database...")
+    print("Initializing BigQuery schema (tables and views)...")
     db = get_db()
     db.ensure_views()
     print("Database initialization complete.")

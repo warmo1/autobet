@@ -4,8 +4,8 @@
 {% block content %}
 <div class="container mt-3">
 
-    <h1>Place a Bet (Audit Mode)</h1>
-    <p class="text-muted">Select an event and product to place a single-line audit bet.</p>
+    <h1>Place a Bet</h1>
+    <p class="text-muted">Select an event and product to place a single-line bet in either Audit or Live mode.</p>
 
     <form method="GET" action="{{ url_for('tote_bet_page') }}" class="mb-4 p-3 border rounded bg-light">
         <div class="form-row">
@@ -52,7 +52,13 @@
             <h4>Bet Slip</h4>
         </div>
         <div class="card-body">
-            <form method="POST" id="bet-form">
+            <form method="POST" id="bet-form" action="{{ url_for('tote_bet_page') }}">
+                <div class="form-check form-switch mb-3 p-3 border rounded bg-light">
+                    <input class="form-check-input" type="checkbox" id="betModeSwitch" name="mode" value="live">
+                    <label class="form-check-label" for="betModeSwitch">
+                        <strong>Enable LIVE Betting Mode</strong> (Default is Audit). Live bets may affect real funds.
+                    </label>
+                </div>
                 <div class="row g-3">
                     <div class="col-md-6">
                         <label for="event_id" class="form-label">Event</label>

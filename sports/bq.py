@@ -731,7 +731,6 @@ class BigQuerySink:
           deduction_rate FLOAT64
         );
         CREATE TABLE IF NOT EXISTS `{ds}.raw_tote_probable_odds`(
-          raw_id STRING,
           fetched_ts INT64,
           payload STRING,
           product_id STRING
@@ -1816,24 +1815,27 @@ class BigQuerySink:
         job = client.query(sql)
         job.result()
 
-        # vw_tote_probable_odds: parse latest probable odds per selection from raw payloads (REST API format)
+        # vw_tote_probable_odds: parse latest probable odds per selection from raw payloads
         sql = f"""
         CREATE OR REPLACE VIEW `{ds}.vw_tote_probable_odds` AS
         WITH exploded AS (
           SELECT
-            r.product_id,
+            JSON_EXTRACT_SCALAR(prod, '$.id') AS product_id,
             r.fetched_ts,
-            JSON_EXTRACT_SCALAR(line, '$.selectionId') AS selection_id,
-            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.decimalOdds') AS FLOAT64) AS decimal_odds
+            JSON_EXTRACT_SCALAR(sel, '$.selectionId') AS selection_id,
+            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds.decimal') AS FLOAT64) AS decimal_odds
           FROM `{ds}.raw_tote_probable_odds` r,
-          UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.lines')) AS line
+          UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
+          UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line,
+          UNNEST(JSON_EXTRACT_ARRAY(line, '$.legs')) AS leg,
+          UNNEST(JSON_EXTRACT_ARRAY(leg, '$.lineSelections')) AS sel
         ), latest AS (
           SELECT product_id,
                  selection_id,
-                 ANY_VALUE(decimal_odds) AS decimal_odds,
+                 ARRAY_AGG(decimal_odds ORDER BY fetched_ts DESC LIMIT 1)[OFFSET(0)] AS decimal_odds,
                  MAX(fetched_ts) AS ts_ms
           FROM exploded
-          WHERE selection_id IS NOT NULL AND decimal_odds IS NOT NULL
+          WHERE selection_id IS NOT NULL AND decimal_odds IS NOT NULL AND product_id IS NOT NULL
           GROUP BY product_id, selection_id
         )
         SELECT
@@ -1849,27 +1851,28 @@ class BigQuerySink:
         job = client.query(sql)
         job.result()
 
-        # vw_tote_probable_history: parsed stream of probable odds with timestamps (no aggregation)
+        # vw_tote_probable_history: parsed stream of probable odds with timestamps
         sql = f"""
-        CREATE VIEW IF NOT EXISTS `{ds}.vw_tote_probable_history` AS
+        CREATE OR REPLACE VIEW `{ds}.vw_tote_probable_history` AS
         WITH exploded AS (
           SELECT
+            JSON_EXTRACT_SCALAR(prod, '$.id') AS product_id,
             r.fetched_ts AS ts_ms,
             JSON_EXTRACT_SCALAR(sel, '$.selectionId') AS selection_id,
-            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds[0].decimal') AS FLOAT64) AS decimal_odds
+            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds.decimal') AS FLOAT64) AS decimal_odds
           FROM `{ds}.raw_tote_probable_odds` r,
           UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
           UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line,
           UNNEST(JSON_EXTRACT_ARRAY(line, '$.legs')) AS leg,
           UNNEST(JSON_EXTRACT_ARRAY(leg, '$.lineSelections')) AS sel
         )
-        SELECT s.product_id,
+        SELECT e.product_id,
                s.selection_id,
                s.number AS cloth_number,
                e.decimal_odds,
                e.ts_ms
         FROM exploded e
-        JOIN `{ds}.tote_product_selections` s ON s.selection_id = e.selection_id
+        JOIN `{ds}.tote_product_selections` s ON s.selection_id = e.selection_id AND s.product_id = e.product_id
         WHERE e.selection_id IS NOT NULL AND e.decimal_odds IS NOT NULL;
         """
         job = client.query(sql)
