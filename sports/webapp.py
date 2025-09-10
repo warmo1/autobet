@@ -1328,8 +1328,21 @@ def api_tote_product_runners():
     pid = (request.args.get("product_id") or "").strip()
     if not pid:
         return app.response_class(json.dumps({"error": "missing product_id"}), mimetype="application/json", status=400)
-    rows = sql_df("SELECT DISTINCT number, competitor FROM tote_product_selections WHERE product_id=? ORDER BY number", params=(pid,))
+    # Also return selection_id for the bet slip
+    rows = sql_df("SELECT DISTINCT selection_id, number, competitor FROM tote_product_selections WHERE product_id=? AND leg_index=1 ORDER BY number", params=(pid,))
     return app.response_class(json.dumps(rows.to_dict("records") if not rows.empty else []), mimetype="application/json")
+
+@app.route("/api/tote/event_products/<event_id>")
+def api_tote_event_products(event_id: str):
+    """Return OPEN products for a given event."""
+    if not event_id:
+        return app.response_class(json.dumps({"error": "missing event_id"}), mimetype="application/json", status=400)
+    
+    df = sql_df(
+        "SELECT product_id, bet_type, status FROM tote_products WHERE event_id=? AND status='OPEN' ORDER BY bet_type",
+        params=(event_id,)
+    )
+    return app.response_class(json.dumps(df.to_dict("records")), mimetype="application/json")
 
 @app.route("/api/tote/pool_snapshot/<product_id>")
 def api_tote_pool_snapshot(product_id: str):
@@ -2703,4 +2716,67 @@ def imports_page():
         ev_today=(ev_today.to_dict("records")[0] if ev_today is not None and not ev_today.empty else {}),
         raw_latest=(raw_latest.to_dict("records") if raw_latest is not None and not raw_latest.empty else []),
         prob_latest=(prob_latest.to_dict("records") if prob_latest is not None and not prob_latest.empty else []),
+    )
+
+@app.route("/tote/bet", methods=["GET", "POST"])
+def tote_bet_page():
+    """A simple page to place single-line audit bets."""
+    if request.method == "POST":
+        product_id = request.form.get("product_id")
+        selection_id = request.form.get("selection_id")
+        stake_str = request.form.get("stake")
+        currency = request.form.get("currency", "GBP")
+
+        errors = []
+        if not product_id: errors.append("Product must be selected.")
+        if not selection_id: errors.append("A runner/selection must be chosen.")
+        if not stake_str: errors.append("Stake is required.")
+        
+        stake = 0.0
+        try:
+            stake = float(stake_str)
+            if stake <= 0: errors.append("Stake must be a positive number.")
+        except ValueError:
+            errors.append("Stake must be a valid number.")
+
+        if errors:
+            for e in errors:
+                flash(e, "error")
+            return redirect(url_for("tote_bet_page"))
+
+        from .providers.tote_bets import place_audit_simple_bet
+        db = get_db()
+        
+        res = place_audit_simple_bet(
+            db, product_id=product_id, selection_id=selection_id, stake=stake, currency=currency, post=True
+        )
+
+        st = res.get("placement_status")
+        if res.get("error"):
+            flash(f"Audit bet error: {res.get('error')}", "error")
+        elif st:
+            ok = str(st).upper() in ("PLACED", "ACCEPTED", "OK", "SUCCESS")
+            msg = f"Audit bet placement status: {st}"
+            fr = res.get("failure_reason")
+            if fr: msg += f" (reason: {fr})"
+            flash(msg, "success" if ok else "error")
+        else:
+            flash("Audit bet recorded (no placement status returned).", "success")
+        
+        return redirect(url_for("tote_bet_page"))
+
+    # GET request: Fetch upcoming events to populate the selector
+    now = datetime.now(timezone.utc)
+    start_iso = now.isoformat(timespec='seconds').replace('+00:00', 'Z')
+    end_iso = (now + timedelta(hours=24)).isoformat(timespec='seconds').replace('+00:00', 'Z')
+
+    ev_sql = (
+        "SELECT event_id, name, venue, country, start_iso FROM tote_events "
+        "WHERE start_iso BETWEEN @start AND @end ORDER BY start_iso ASC LIMIT 200"
+    )
+    events_df = sql_df(ev_sql, params={"start": start_iso, "end": end_iso})
+    
+    return render_template(
+        "tote_bet.html",
+        events=events_df.to_dict("records") if not events_df.empty else [],
     )

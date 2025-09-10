@@ -682,6 +682,35 @@ class BigQuerySink:
             ]),
         )
 
+    def upsert_tote_audit_bets(self, rows: Iterable[Mapping[str, Any]]):
+        """Insert/merge audit bet records."""
+        temp = self._load_to_temp(
+            "tote_audit_bets",
+            rows,
+            schema_hint={
+                "ts_ms": "INT64",
+                "stake": "FLOAT64",
+            },
+        )
+        if not temp:
+            return
+        self._merge(
+            "tote_audit_bets",
+            temp,
+            key_expr="T.bet_id = S.bet_id",
+            update_set=",".join([
+                "ts_ms=S.ts_ms",
+                "mode=S.mode",
+                "product_id=S.product_id",
+                "selection=S.selection",
+                "stake=S.stake",
+                "currency=S.currency",
+                "status=S.status",
+                "response_json=S.response_json",
+                "error=S.error",
+            ]),
+        )
+
     def ensure_views(self):
         """Create views required by the web app if missing (idempotent)."""
         client = self._client_obj(); self._ensure_dataset()
@@ -757,6 +786,18 @@ class BigQuerySink:
           payload_json STRING,
           error STRING,
           metrics_json STRING
+        );
+        CREATE TABLE IF NOT EXISTS `{ds}.tote_audit_bets`(
+          bet_id STRING,
+          ts_ms INT64,
+          mode STRING,
+          product_id STRING,
+          selection STRING,
+          stake FLOAT64,
+          currency STRING,
+          status STRING,
+          response_json STRING,
+          error STRING
         );
         """
         job = client.query(sql); job.result()

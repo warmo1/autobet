@@ -1,0 +1,99 @@
+{% extends 'base.html' %}
+{% block title %}Place a Bet{% endblock %}
+
+{% block content %}
+<div class="container mt-3">
+    <h1>Place a Bet (Audit Mode)</h1>
+    <p class="text-muted">Select an event and product to place a single-line audit bet.</p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="card">
+        <div class="card-header">
+            <h4>Bet Slip</h4>
+        </div>
+        <div class="card-body">
+            <form method="POST" id="bet-form">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label for="event_id" class="form-label">Event</label>
+                        <select class="form-select" id="event_id" name="event_id" required>
+                            <option value="" selected disabled>-- Select an Event --</option>
+                            {% for event in events %}
+                                <option value="{{ event.event_id }}">{{ event.start_iso[:16] }} | {{ event.venue }} | {{ event.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="product_id" class="form-label">Bet Type (Product)</label>
+                        <select class="form-select" id="product_id" name="product_id" required disabled>
+                            <option value="" selected disabled>-- Select an event first --</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="selection_id" class="form-label">Runner / Selection</label>
+                        <select class="form-select" id="selection_id" name="selection_id" required disabled>
+                            <option value="" selected disabled>-- Select a product first --</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="stake" class="form-label">Stake</label>
+                        <div class="input-group">
+                            <span class="input-group-text">£</span>
+                            <input type="number" step="0.01" class="form-control" id="stake" name="stake" min="0.01" required>
+                        </div>
+                    </div>
+                     <div class="col-md-3">
+                        <label for="currency" class="form-label">Currency</label>
+                        <input type="text" class="form-control" id="currency" name="currency" value="GBP" required>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary mt-4">Place Audit Bet</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const eventSelect = document.getElementById('event_id');
+    const productSelect = document.getElementById('product_id');
+    const selectionSelect = document.getElementById('selection_id');
+
+    eventSelect.addEventListener('change', function() {
+        const eventId = this.value;
+        productSelect.disabled = true;
+        productSelect.innerHTML = '<option>Loading...</option>';
+        selectionSelect.disabled = true;
+        selectionSelect.innerHTML = '<option>-- Select a product first --</option>';
+        if (!eventId) return;
+        fetch(`/api/tote/event_products/${eventId}`).then(r => r.json()).then(data => {
+            productSelect.innerHTML = '<option value="" selected disabled>-- Select a Bet Type --</option>';
+            data.forEach(p => productSelect.add(new Option(`${p.bet_type} (${p.status})`, p.product_id)));
+            productSelect.disabled = false;
+        });
+    });
+
+    productSelect.addEventListener('change', function() {
+        const productId = this.value;
+        selectionSelect.disabled = true;
+        selectionSelect.innerHTML = '<option>Loading...</option>';
+        if (!productId) return;
+        fetch(`/api/tote/product_runners?product_id=${productId}`).then(r => r.json()).then(data => {
+            selectionSelect.innerHTML = '<option value="" selected disabled>-- Select a Runner --</option>';
+            data.forEach(r => selectionSelect.add(new Option(`#${r.number} - ${r.competitor}`, r.selection_id)));
+            selectionSelect.disabled = false;
+        });
+    });
+});
+</script>
+{% endblock %}

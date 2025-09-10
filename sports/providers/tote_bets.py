@@ -11,6 +11,24 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _record_audit_bq(sink, *, bet_id: str, product_id: str, selection: str, stake: float, currency: Optional[str], payload: Dict[str, Any], response: Optional[Dict[str, Any]], error: Optional[str], placement_status: Optional[str] = None):
+    """Helper to write an audit bet record to BigQuery."""
+    row = {
+        "bet_id": bet_id,
+        "ts_ms": _now_ms(),
+        "mode": "audit",
+        "product_id": product_id,
+        "selection": selection,
+        "stake": float(stake),
+        "currency": currency,
+        "status": placement_status or ('audit-recorded' if error is None else 'audit-error'),
+        "response_json": json.dumps({"request": payload, "response": response}),
+        "error": error,
+    }
+    # This method needs to be added to bq.py
+    sink.upsert_tote_audit_bets([row])
+
+
 def _record_audit(conn, *, product_id: str, selection: str, stake: float, currency: Optional[str], payload: Dict[str, Any], response: Optional[Dict[str, Any]], error: Optional[str]):
     bet_id = f"{product_id}:{_now_ms()}"
     conn.execute(
@@ -33,6 +51,83 @@ def _record_audit(conn, *, product_id: str, selection: str, stake: float, curren
         ),
     )
     return bet_id
+
+
+def place_audit_simple_bet(
+    sink,  # BigQuerySink
+    *,
+    product_id: str,
+    selection_id: str,
+    stake: float,
+    currency: str = "GBP",
+    post: bool = True,
+) -> Dict[str, Any]:
+    """Audit-mode for a simple single-leg, single-selection bet (e.g., WIN). Writes to BigQuery."""
+    product_leg_id = None
+    try:
+        from google.cloud import bigquery
+        pli_df = sink.query(
+            "SELECT product_leg_id FROM tote_product_selections WHERE product_id=@pid AND selection_id=@sid AND leg_index=1 LIMIT 1",
+            job_config=bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("pid", "STRING", product_id),
+                bigquery.ScalarQueryParameter("sid", "STRING", selection_id),
+            ])
+        ).to_dataframe()
+        if not pli_df.empty:
+            product_leg_id = pli_df.iloc[0]['product_leg_id']
+    except Exception as e:
+        print(f"[AuditBet] Could not get product_leg_id from DB: {e}")
+
+    if not product_leg_id:
+        try:
+            client = ToteClient()
+            query = "query ProductLegs($id: String){ product(id: $id){ ... on BettingProduct { legs{ nodes{ id } } } } }"
+            data = client.graphql(query, {"id": product_id})
+            legs = (((data.get("product") or {}).get("legs") or {}).get("nodes")) or []
+            if legs:
+                product_leg_id = legs[0].get("id")
+        except Exception as e:
+            print(f"[AuditBet] API fallback for product_leg_id failed: {e}")
+
+    bet_id = f"{product_id}:{selection_id}:{_now_ms()}"
+
+    if not product_leg_id:
+        err_msg = f"Could not determine productLegId for product {product_id}"
+        _record_audit_bq(sink, bet_id=bet_id, product_id=product_id, selection=selection_id, stake=stake, currency=currency,
+                         payload={"error": err_msg}, response=None, error=err_msg)
+        return {"bet_id": bet_id, "error": err_msg}
+
+    bet_v1 = {"betId": f"bet-simple-{uuid.uuid4()}", "productId": product_id, "stake": {"currencyCode": currency, "totalAmount": float(stake)}, "legs": [{"productLegId": product_leg_id, "selections": [{"productLegSelectionID": selection_id}]}]}
+    
+    resp = None; err = None; sent_variables = None
+    if post:
+        try:
+            client = ToteClient()
+            mutation_v1 = "mutation PlaceBets($input: PlaceBetsInput!) { placeBets(input:$input){ ticket{ id toteId bets{ nodes{ id toteId placement{ status rejectionReason } } } } } }"
+            variables_v1 = {"input": {"ticketId": f"ticket-{uuid.uuid4()}", "bets": [bet_v1]}}
+            sent_variables = variables_v1
+            resp = client.graphql_audit(mutation_v1, variables_v1)
+        except Exception as e:
+            err = str(e)
+
+    placement_status = None; failure_reason = None
+    try:
+        if resp and isinstance(resp, dict):
+            ticket = ((resp.get("placeBets") or {}).get("ticket")) or ((resp.get("ticket")) if "ticket" in resp else None)
+            if ticket and isinstance(ticket, dict):
+                bets_node = ((ticket.get("bets") or {}).get("nodes"))
+                if isinstance(bets_node, list) and bets_node:
+                    placement = (bets_node[0].get("placement") or {})
+                    placement_status = placement.get("status")
+                    failure_reason = placement.get("rejectionReason")
+    except Exception: pass
+
+    stored_req = {"schema": "v1", "product_id": product_id, "stake": stake, "currency": currency, "variables": sent_variables}
+    _record_audit_bq(sink, bet_id=bet_id, product_id=product_id, selection=selection_id, stake=stake, currency=currency, payload=stored_req, response=resp, error=err, placement_status=placement_status)
+    
+    out = {"bet_id": bet_id, "error": err, "response": resp, "placement_status": placement_status}
+    if failure_reason: out["failure_reason"] = failure_reason
+    return out
 
 
 def place_audit_superfecta(
