@@ -63,7 +63,9 @@
                 <td><span class="badge bg-light text-dark">{{ p.status }}</span></td>
                 <td class="text-end">{{ p.n_runners }}</td>
                 <td class="text-end">{{ "%.0f"|format(p.total_gross or 0) }}</td>
-                <td><a href="{{ url_for('tote_viability_page', product_id=p.product_id, **request.args) }}" class="btn btn-sm btn-outline-primary">Select</a></td>
+                {%- set q_args = request.args.to_dict() -%}
+                {%- set _ = q_args.update({'product_id': p.product_id}) -%}
+                <td><a href="{{ url_for('tote_viability_page', **q_args) }}" class="btn btn-sm btn-outline-primary">Select</a></td>
             </tr>
             {% else %}
             <tr><td colspan="7" class="text-center text-muted p-3">No products found for these filters.</td></tr>

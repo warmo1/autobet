@@ -405,12 +405,12 @@ def tote_params_update():
 @app.route("/tote-events")
 def tote_events_page():
     """List Tote events with filters and pagination."""
-    country = (request.args.get("country") or "").strip().upper()
+    country = (request.args.get("country") or "GB").strip().upper()
     sport = (request.args.get("sport") or "").strip()
     venue = (request.args.get("venue") or "").strip()
     name = (request.args.get("name") or "").strip()
-    date_from = (request.args.get("from") or "").strip()
-    date_to = (request.args.get("to") or "").strip()
+    date_from = (request.args.get("from") or _today_iso()).strip()
+    date_to = (request.args.get("to") or _today_iso()).strip()
     limit = max(1, int(request.args.get("limit", "200") or 200))
     page = max(1, int(request.args.get("page", "1") or 1))
     offset = (page - 1) * limit
@@ -478,7 +478,7 @@ def tote_superfecta_page():
     # UI Improvement: Default country to GB and add a venue filter.
     country = (request.args.get("country") or os.getenv("DEFAULT_COUNTRY", "GB")).strip().upper()
     venue = (request.args.get("venue") or "").strip()
-    status = (request.args.get("status") or "").strip().upper()
+    status = (request.args.get("status") or "OPEN").strip().upper()
     date_from = request.args.get("from") or _today_iso()
     date_to = request.args.get("to") or _today_iso()
     limit = int(request.args.get("limit", "200") or 200)
@@ -652,6 +652,9 @@ def tote_pools_page():
     prods = df.to_dict("records") if not df.empty else []
     for p in prods:
         p["dividend_count"] = int(p.get("dividend_count") or 0)
+        # Guard against bad data for deduction_rate (should be a fraction)
+        if p.get("deduction_rate") and p.get("deduction_rate") > 1.0:
+            p["deduction_rate"] /= 100.0
         # Attach conditions badge
         t = p.get("weather_temp_c"); w = p.get("weather_wind_kph"); pr = p.get("weather_precip_mm")
         if pd.notnull(t) or pd.notnull(w) or pd.notnull(pr):
@@ -1116,7 +1119,8 @@ def tote_viability_page():
                 except Exception: return default
 
             stake_per_line = fnum("stake_per_line", calc_params["stake_per_line"]) 
-            take_rate = fnum("take", calc_params["take_rate"]) 
+            # Handle takeout rate, which is a percentage in the form but a fraction in code
+            take_rate = fnum("take", calc_params["take_rate"] * 100.0) / 100.0
             net_rollover = fnum("rollover", calc_params["net_rollover"]) 
             inc_self = (request.values.get("inc", "1").lower() in ("1","true","yes","on"))
             div_mult = fnum("mult", calc_params["div_mult"]) 
@@ -1550,34 +1554,118 @@ def tote_audit_superfecta_post():
 
 @app.route("/audit/bets")
 def audit_bets_page():
-    """List recent audit bets via Tote API (read-only in BQ mode)."""
+    """List recent audit bets from the local BigQuery table with filters."""
+    if not _use_bq():
+        flash("Audit bets page requires BigQuery.", "error")
+        return redirect(url_for('index'))
+
+    # Filters
+    country = (request.args.get("country") or "").strip().upper()
+    venue = (request.args.get("venue") or "").strip()
+    date_from = (request.args.get("from") or "").strip()
+    date_to = (request.args.get("to") or "").strip()
+    limit = max(1, int(request.args.get("limit", "100") or 100))
+    page = max(1, int(request.args.get("page", "1") or 1))
+    offset = (page - 1) * limit
+
+    # Build query
+    where = []
+    params: dict[str, Any] = {}
+    if country:
+        where.append("UPPER(COALESCE(e.country, p.currency)) = @country")
+        params["country"] = country
+    if venue:
+        where.append("UPPER(COALESCE(e.venue, p.venue)) LIKE UPPER(@venue)")
+        params["venue"] = f"%{venue}%"
+    if date_from:
+        where.append("DATE(TIMESTAMP_MILLIS(b.ts_ms)) >= @date_from")
+        params["date_from"] = date_from
+    if date_to:
+        where.append("DATE(TIMESTAMP_MILLIS(b.ts_ms)) <= @date_to")
+        params["date_to"] = date_to
+
+    base_sql = """
+        SELECT
+          b.bet_id, b.ts_ms, b.status, b.selection, b.stake, b.currency, b.response_json,
+          p.event_id,
+          p.event_name,
+          p.start_iso,
+          COALESCE(e.venue, p.venue) AS venue,
+          COALESCE(e.country, p.currency) AS country
+        FROM tote_audit_bets b
+        LEFT JOIN tote_products p ON b.product_id = p.product_id
+        LEFT JOIN tote_events e ON p.event_id = e.event_id
+    """
+    count_sql = "SELECT COUNT(1) AS c FROM tote_audit_bets b LEFT JOIN tote_products p ON b.product_id = p.product_id LEFT JOIN tote_events e ON p.event_id = e.event_id"
+
+    if where:
+        where_clause = " WHERE " + " AND ".join(where)
+        base_sql += where_clause
+        count_sql += where_clause
+
+    total = 0
+    bets = []
     try:
-        data = audit_list_bets(first=50)
-        nodes = data.get("nodes") or data.get("results") or []
-        bets = []
-        for n in nodes:
-            stake = n.get("stake") or {}
-            legs = (n.get("legs") or [])
-            sel = None
-            if legs and legs[0].get("selections"):
-                sel = ",".join(str(s.get("position")) for s in legs[0]["selections"] if s.get("position") is not None)
-            bets.append({
-                "tote_bet_id": n.get("toteBetId") or n.get("id"),
-                "status": n.get("status"),
-                "selection": sel,
-                "stake": (stake.get("amount") or {}).get("decimalAmount"),
-                "currency": stake.get("currency"),
-                "created": n.get("createdAt"),
-            })
+        # Total count
+        total_df = sql_df(count_sql, params=params)
+        total = int(total_df.iloc[0]['c']) if not total_df.empty else 0
+
+        # Paged query
+        paged_sql = base_sql + " ORDER BY b.ts_ms DESC LIMIT @limit OFFSET @offset"
+        params_paged = {**params, "limit": limit, "offset": offset}
+        df = sql_df(paged_sql, params=params_paged)
+
+        for _, row in df.iterrows():
+            bet_data = row.to_dict()
+            bet_data['created'] = bet_data.get('ts_ms')
+            bet_data['tote_bet_id'] = None  # Default
+
+            try:
+                if row.get('response_json'):
+                    resp_data = json.loads(row['response_json'])
+                    resp = resp_data.get('response', {})
+                    if resp:
+                        ticket = (resp.get("placeBets") or {}).get("ticket")
+                        if ticket and isinstance(ticket, dict):
+                            nodes = (ticket.get("bets") or {}).get("nodes")
+                            if nodes and isinstance(nodes, list) and nodes:
+                                bet_data['tote_bet_id'] = nodes[0].get('toteId')
+                        results = (resp.get("placeBets") or {}).get("results")
+                        if results and isinstance(results, list) and results:
+                            bet_data['tote_bet_id'] = results[0].get('toteBetId')
+            except (json.JSONDecodeError, TypeError, KeyError, IndexError):
+                pass
+            bets.append(bet_data)
     except Exception as e:
-        flash(f"Audit API error: {e}", "error")
+        if 'Not found: Table' in str(e):
+            flash("The 'tote_audit_bets' table was not found in BigQuery. Place an audit bet to create it.", "info")
+        else:
+            flash(f"Error fetching audit bets from BigQuery: {e}", "error")
+            traceback.print_exc()
         bets = []
-    return render_template("audit_bets.html", bets=bets)
+
+    # Options for filters
+    try:
+        countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+        venues_df = sql_df("SELECT DISTINCT venue FROM tote_events WHERE venue IS NOT NULL AND venue<>'' ORDER BY venue")
+    except Exception:
+        countries_df = pd.DataFrame()
+        venues_df = pd.DataFrame()
+
+    return render_template(
+        "audit_bets.html",
+        bets=bets,
+        filters={
+            "country": country, "venue": venue, "from": date_from, "to": date_to,
+            "limit": limit, "page": page, "total": total,
+        },
+        country_options=(countries_df['country'].tolist() if not countries_df.empty else []),
+        venue_options=(venues_df['venue'].tolist() if not venues_df.empty else []),
+    )
 
 @app.route("/audit/bets/")
 def audit_bets_page_slash():
     return audit_bets_page()
-
 @app.route("/audit/")
 def audit_root():
     return redirect(url_for('audit_bets_page'))
@@ -1585,43 +1673,32 @@ def audit_root():
 @app.route("/audit/bets/<bet_id>")
 def audit_bet_detail_page(bet_id: str):
     """Show stored request/response for an audit bet and allow a best-effort status refresh."""
-    # This page relies on the 'tote_bets' table, which is SQLite-only.
-    flash("Audit bet details are not available in BigQuery-only mode.", "error")
-    return redirect(url_for('index'))
-    conn = _get_db_conn(); init_schema(conn)
-    row = conn.execute(
-        "SELECT bet_id, ts, mode, product_id, selection, stake, currency, status, outcome, response_json, result_json FROM tote_bets WHERE bet_id=?",
-        (bet_id,)
-    ).fetchone()
+    if not _use_bq():
+        flash("Audit bet details require BigQuery.", "error")
+        return redirect(url_for('audit_bets_page'))
+
     detail = None
-    if row:
-        cols = ["bet_id","ts","mode","product_id","selection","stake","currency","status","outcome","response_json","result_json"]
-        detail = {cols[i]: row[i] for i in range(len(cols))}
-        # Parse stored request/response for separate display
-        try:
-            import json as _json
-            rr = _json.loads(detail.get("response_json") or "{}")
-            req = rr.get("request")
-            resp = rr.get("response")
-            detail["_req_pretty"] = _json.dumps(req, indent=2, ensure_ascii=False) if req is not None else None
-            detail["_resp_pretty"] = _json.dumps(resp, indent=2, ensure_ascii=False) if resp is not None else None
-        except Exception:
-            detail["_req_pretty"] = None
-            detail["_resp_pretty"] = None
-    # Optional refresh
-    if request.args.get("refresh") == "1":
-        try:
-            res = refresh_bet_status(conn, bet_id=bet_id, post=True)
-            conn.commit()
-            flash(f"Refreshed status: {res}", "info")
-        except Exception as e:
-            flash(f"Refresh failed: {e}", "error")
-        finally:
-            try: conn.close()
-            except Exception: pass
-        return redirect(url_for('audit_bet_detail_page', bet_id=bet_id))
-    try: conn.close()
-    except Exception: pass
+    try:
+        df = sql_df("SELECT * FROM tote_audit_bets WHERE bet_id = ?", params=(bet_id,))
+        if not df.empty:
+            detail = df.iloc[0].to_dict()
+            # Parse stored request/response for pretty printing in the template
+            try:
+                rr = json.loads(detail.get("response_json") or "{}")
+                req = rr.get("request")
+                resp = rr.get("response")
+                detail["_req_pretty"] = json.dumps(req, indent=2, ensure_ascii=False) if req is not None else None
+                detail["_resp_pretty"] = json.dumps(resp, indent=2, ensure_ascii=False) if resp is not None else None
+            except Exception:
+                detail["_req_pretty"] = detail.get("response_json")  # fallback to raw
+                detail["_resp_pretty"] = None
+    except Exception as e:
+        flash(f"Error fetching bet detail: {e}", "error")
+
+    if detail is None:
+        flash(f"Audit bet with ID '{bet_id}' not found.", "error")
+        return redirect(url_for('audit_bets_page'))
+
     return render_template("audit_bet_detail.html", bet=detail)
 
 @app.route("/status")
@@ -1905,13 +1982,14 @@ def event_detail(event_id: str):
         try:
             competitors = json.loads(event["competitors_json"]) or []
             if isinstance(competitors, list):
-                runners = [
-                    {
-                        "cloth": (c.get("cloth") or c.get("cloth_number") or c.get("number")),
-                        "name": (c.get("name") or c.get("competitor") or c.get("horse") or c.get("id") or "")
-                    }
-                    for c in competitors
-                ]
+                runners = []
+                for c in competitors:
+                    cloth = c.get("cloth") or c.get("cloth_number") or c.get("number")
+                    name = c.get("name") or c.get("competitor") or c.get("horse")
+                    if not name:
+                        name = f"Runner #{cloth}" if cloth else None
+                    if name:
+                        runners.append({"cloth": cloth, "name": name})
                 # Sort by cloth number if available
                 try:
                     runners.sort(key=lambda x: (x.get("cloth") is None, int(x.get("cloth") or 1)))
@@ -2793,11 +2871,11 @@ def tote_bet_page():
         if errors:
             for e in errors:
                 flash(e, "error")
-            return redirect(url_for("tote_bet_page"))
+            return redirect(request.referrer or url_for("tote_bet_page"))
 
         from .providers.tote_bets import place_audit_simple_bet
         db = get_db()
-        
+
         res = place_audit_simple_bet(
             db, product_id=product_id, selection_id=selection_id, stake=stake, currency=currency, post=True
         )
@@ -2813,21 +2891,62 @@ def tote_bet_page():
             flash(msg, "success" if ok else "error")
         else:
             flash("Audit bet recorded (no placement status returned).", "success")
-        
-        return redirect(url_for("tote_bet_page"))
 
-    # GET request: Fetch upcoming events to populate the selector
-    now = datetime.now(timezone.utc)
-    start_iso = now.isoformat(timespec='seconds').replace('+00:00', 'Z')
-    end_iso = (now + timedelta(hours=24)).isoformat(timespec='seconds').replace('+00:00', 'Z')
+        return redirect(request.referrer or url_for("tote_bet_page"))
+
+    # GET request: Handle filters and fetch events
+    country = (request.args.get("country") or "").strip().upper()
+    venue = (request.args.get("venue") or "").strip()
+    date_from = (request.args.get("from") or "").strip()
+    date_to = (request.args.get("to") or "").strip()
+
+    where = []
+    params: dict[str, Any] = {}
+
+    if country:
+        where.append("UPPER(country) = @country")
+        params["country"] = country
+    if venue:
+        where.append("UPPER(venue) LIKE UPPER(@venue)")
+        params["venue"] = f"%{venue}%"
+
+    # Date filtering logic
+    if date_from:
+        where.append("SUBSTR(start_iso, 1, 10) >= @date_from")
+        params["date_from"] = date_from
+    if date_to:
+        where.append("SUBSTR(start_iso, 1, 10) <= @date_to")
+        params["date_to"] = date_to
+
+    # If no date filters are applied, default to the next 24 hours.
+    if not date_from and not date_to:
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        start_iso = now.isoformat(timespec='seconds').replace('+00:00', 'Z')
+        end_iso = (now + timedelta(hours=24)).isoformat(timespec='seconds').replace('+00:00', 'Z')
+        where.append("start_iso BETWEEN @start AND @end")
+        params["start"] = start_iso
+        params["end"] = end_iso
 
     ev_sql = (
         "SELECT event_id, name, venue, country, start_iso FROM tote_events "
-        "WHERE start_iso BETWEEN @start AND @end ORDER BY start_iso ASC LIMIT 200"
     )
-    events_df = sql_df(ev_sql, params={"start": start_iso, "end": end_iso})
-    
+    if where:
+        ev_sql += " WHERE " + " AND ".join(where)
+
+    ev_sql += " ORDER BY start_iso ASC LIMIT 200"
+
+    events_df = sql_df(ev_sql, params=params)
+    countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+
     return render_template(
         "tote_bet.html",
         events=events_df.to_dict("records") if not events_df.empty else [],
+        filters={
+            "country": country,
+            "venue": venue,
+            "from": date_from,
+            "to": date_to,
+        },
+        country_options=(countries_df['country'].tolist() if not countries_df.empty else []),
     )

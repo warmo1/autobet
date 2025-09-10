@@ -3,8 +3,38 @@
 
 {% block content %}
 <div class="container mt-3">
+
     <h1>Place a Bet (Audit Mode)</h1>
     <p class="text-muted">Select an event and product to place a single-line audit bet.</p>
+
+    <form method="GET" action="{{ url_for('tote_bet_page') }}" class="mb-4 p-3 border rounded bg-light">
+        <div class="form-row">
+            <div class="form-group col-md-3">
+                <label for="country">Country</label>
+                <select name="country" id="country" class="form-control">
+                    <option value="">All</option>
+                    {% for c in country_options or [] %}
+                    <option value="{{ c }}" {% if filters.country == c %}selected{% endif %}>{{ c }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group col-md-4">
+                <label for="venue">Venue</label>
+                <input type="text" name="venue" id="venue" class="form-control" value="{{ filters.venue }}" placeholder="e.g. Ascot">
+            </div>
+            <div class="form-group col-md-2">
+                <label for="from">From</label>
+                <input type="date" name="from" id="from" class="form-control" value="{{ filters.from }}">
+            </div>
+            <div class="form-group col-md-2">
+                <label for="to">To</label>
+                <input type="date" name="to" id="to" class="form-control" value="{{ filters.to }}">
+            </div>
+            <div class="form-group col-md-1 align-self-end">
+                <button type="submit" class="btn btn-primary btn-block">Filter</button>
+            </div>
+        </div>
+    </form>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
@@ -96,4 +126,5 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 </script>
+
 {% endblock %}

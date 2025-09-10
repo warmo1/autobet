@@ -154,6 +154,15 @@ def place_audit_superfecta(
         bet_lines = [selection.strip()]
     else:
         bet_lines = []
+
+    # Calculate per-line stake
+    num_lines = len(bet_lines)
+    line_stake = 0.0
+    if (stake_type or "total").lower() == "line":
+        line_stake = float(stake)
+    else:  # 'total'
+        line_stake = float(stake) / num_lines if num_lines > 0 else 0.0
+
     # Map selection strings to GraphQL legs structure using tote_product_selections
     rows = conn.execute(
         "SELECT product_leg_id, selection_id, number, leg_index FROM tote_product_selections WHERE product_id=?",
@@ -279,7 +288,7 @@ def place_audit_superfecta(
         bet_obj = {
             "productId": used_product_id,
             "stake": {
-                "amount": {"decimalAmount": float(stake)},
+                "amount": {"decimalAmount": line_stake},
                 "currency": currency,
             },
             "legs": [lg] if lg else [],
@@ -291,11 +300,7 @@ def place_audit_superfecta(
     bets_v1: List[Dict[str, Any]] = []
     for s in bet_lines:
         lg = _line_to_legs(s)
-        # Provide either totalAmount OR lineAmount, not both (per audit schema)
-        if (stake_type or "total").lower() == "line":
-            stake_obj = {"currencyCode": currency, "lineAmount": float(stake)}
-        else:
-            stake_obj = {"currencyCode": currency, "totalAmount": float(stake)}
+        stake_obj = {"currencyCode": currency, "lineAmount": line_stake}
         bets_v1.append({
             "betId": f"bet-superfecta-{uuid.uuid4()}",
             "productId": used_product_id,
