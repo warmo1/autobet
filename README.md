@@ -98,7 +98,6 @@ This writes explicit Event rows (incl. status and competitors list when availabl
 
 ### BigQuery temp-table cleanup
 
-Temporary staging tables named `_tmp_*` are created during upserts and removed after merges. If jobs fail mid-flight, leftover tables can accumulate.
 Temporary staging tables named `_tmp_*` are created during bulk upserts and are normally removed after a successful `MERGE` operation. If jobs fail mid-flight, these temporary tables can accumulate.
 
 There are several ways to clean them up:
@@ -119,10 +118,6 @@ python autobet/scripts/bq_cleanup.py --older 3   # delete _tmp_ tables older tha
 
 You can also trigger the cleanup directly from a Python shell:
 ```
-python - <<'PY'
-from autobet.sports.bq import get_bq_sink
-sink = get_bq_sink(); print('deleted:', sink.cleanup_temp_tables(older_than_days=1))
-PY
 python -c "from autobet.sports.bq import get_bq_sink; sink = get_bq_sink(); print('deleted:', sink.cleanup_temp_tables(older_than_days=1))"
 ```
 

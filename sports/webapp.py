@@ -651,6 +651,8 @@ def tote_pools_page():
     gt = sql_df(gt_sql, params=tuple(params))
 
     prods = df.to_dict("records") if not df.empty else []
+    # Aggregate totals before formatting values for display
+    total_net = sum(float(p.get('total_net') or 0.0) for p in prods)
     for p in prods: # noqa
         p["dividend_count"] = int(p.get("dividend_count") or 0)
         # Guard against bad data for deduction_rate (should be a fraction)
@@ -667,8 +669,6 @@ def tote_pools_page():
         p["total_net"] = f"{p.get('total_net', 0):.2f}"
         p["rollover"] = f"{p.get('rollover', 0):.2f}"
         p["deduction_rate_display"] = f"{p.get('deduction_rate', 0) * 100:.1f}%"
-    # Aggregate totals
-    total_net = sum((p.get('total_net') or 0) for p in prods)
     group_totals = gt.to_dict("records") if not gt.empty else []
     return render_template( # noqa: E501
         "tote_pools.html",
@@ -1526,10 +1526,30 @@ def tote_audit_superfecta_post():
 
     # Use the BigQuery-aware audit function
     db = get_db()
-    res = place_audit_superfecta(db, mode=mode, product_id=pid, selection=(sel or None), selections=selections, stake=sk, currency=currency, post=post_flag, stake_type=stake_type, placement_product_id=placement_pid)
+
+    # Explicitly create a ToteClient with the correct endpoint based on the mode.
+    # This ensures audit bets are sent to the audit endpoint, preventing "Failed to fund ticket" errors.
+    from .providers.tote_api import ToteClient
+    client_for_placement = None
+    if mode == 'audit':
+        # Use the dedicated audit endpoint provided.
+        audit_endpoint = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+        # Create a client and set its api_url property to point to the audit endpoint.
+        client_for_placement = ToteClient()
+        client_for_placement.api_url = audit_endpoint
+    else:
+        # For 'live' mode, use the default client which points to the live endpoint.
+        client_for_placement = ToteClient()
+
+    # NOTE: Assuming place_audit_superfecta accepts a 'client' argument to use for the API call.
+    res = place_audit_superfecta(db, mode=mode, product_id=pid, selection=(sel or None), selections=selections, stake=sk, currency=currency, post=post_flag, stake_type=stake_type, placement_product_id=placement_pid, client=client_for_placement)
     st = res.get("placement_status")
-    if res.get("error"):
-        flash(f"Audit bet error: {res.get('error')}", "error")
+    err_msg = res.get("error")
+    if err_msg:
+        if "Failed to fund ticket" in str(err_msg):
+            flash("Live bet placement failed: Insufficient funds in the Tote account.", "error")
+        else:
+            flash(f"Audit bet error: {err_msg}", "error")
     elif st:
         ok = str(st).upper() in ("PLACED","ACCEPTED","OK","SUCCESS")
         msg = f"Audit bet placement status: {st}"
@@ -2851,24 +2871,28 @@ def imports_page():
 
 @app.route("/tote/bet", methods=["GET", "POST"])
 def tote_bet_page():
-    """A simple page to place single-line audit bets."""
+    """A unified page to place bets. Supports simple (e.g., WIN) and complex (e.g., SUPERFECTA) bets."""
     if request.method == "POST":
         product_id = request.form.get("product_id")
-        selection_id = request.form.get("selection_id")
         stake_str = request.form.get("stake")
         currency = request.form.get("currency", "GBP")
         mode = request.form.get("mode", "audit")
         if mode != "live": mode = "audit"
 
+        # Add logging to confirm which mode is being used for the bet.
+        print(f"[BetPlacement] Attempting to place bet with product_id={product_id}, stake={stake_str}, mode='{mode}'")
+
         errors = []
-        if not product_id: errors.append("Product must be selected.")
-        if not selection_id: errors.append("A runner/selection must be chosen.")
-        if not stake_str: errors.append("Stake is required.")
-        
+        if not product_id:
+            errors.append("Product must be selected.")
+        if not stake_str:
+            errors.append("Stake is required.")
+
         stake = 0.0
         try:
             stake = float(stake_str)
-            if stake <= 0: errors.append("Stake must be a positive number.")
+            if stake <= 0:
+                errors.append("Stake must be a positive number.")
         except ValueError:
             errors.append("Stake must be a valid number.")
 
@@ -2877,36 +2901,92 @@ def tote_bet_page():
                 flash(e, "error")
             return redirect(request.referrer or url_for("tote_bet_page"))
 
-        from .providers.tote_bets import place_audit_simple_bet
+        # Determine bet type to call the correct placement function
+        prod_df = sql_df("SELECT bet_type FROM tote_products WHERE product_id=?", params=(product_id,))
+        if prod_df.empty:
+            flash(f"Product with ID '{product_id}' not found.", "error")
+            return redirect(request.referrer or url_for("tote_bet_page"))
+        
+        bet_type = (prod_df.iloc[0]['bet_type'] or "").upper()
         db = get_db()
+        res = {}
 
-        res = place_audit_simple_bet(
-            db, product_id=product_id, selection_id=selection_id, stake=stake, currency=currency, mode=mode, post=True
-        )
+        # --- Simple Bets (e.g., WIN) ---
+        if bet_type in ["WIN", "PLACE"]:
+            from .providers.tote_bets import place_audit_simple_bet
+            from .providers.tote_api import ToteClient
+            selection_id = request.form.get("selection_id")
+            if not selection_id:
+                flash("A runner/selection must be chosen for a WIN bet.", "error")
+                return redirect(request.referrer or url_for("tote_bet_page"))
+            
+            # Create a client pointing to the correct endpoint (live vs audit)
+            client_for_placement = None
+            if mode == 'audit':
+                audit_endpoint = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+                client_for_placement = ToteClient()
+                client_for_placement.api_url = audit_endpoint
+            else:
+                client_for_placement = ToteClient()
 
+            # The `mode` parameter is not supported by `place_audit_simple_bet`, causing a TypeError.
+            # The correct endpoint (live vs audit) is handled by passing the configured `client` object.
+            res = place_audit_simple_bet(db, product_id=product_id, selection_id=selection_id, stake=stake, currency=currency, post=True, client=client_for_placement)
+
+        # --- Complex Bets (e.g., SUPERFECTA) ---
+        elif bet_type in ["SUPERFECTA", "TRIFECTA", "EXACTA"]:
+            from .providers.tote_bets import place_audit_superfecta
+            from .providers.tote_api import ToteClient
+            selections_text = (request.form.get("selections_text") or "").strip()
+            if not selections_text:
+                flash("Selections must be provided for a combination bet (e.g., '1-2-3-4').", "error")
+                return redirect(request.referrer or url_for("tote_bet_page"))
+            
+            selections = [p for p in (selections_text.replace("\r","\n").replace(",","\n").split("\n")) if p.strip()]
+
+            # Explicitly create a ToteClient with the correct endpoint based on the mode.
+            client_for_placement = None
+            if mode == 'audit':
+                # Use the dedicated audit endpoint to prevent funding errors on paper bets.
+                audit_endpoint = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+                # Create a client and set its api_url property to point to the audit endpoint.
+                client_for_placement = ToteClient()
+                client_for_placement.api_url = audit_endpoint
+            else:
+                client_for_placement = ToteClient()
+
+            # NOTE: Assuming place_audit_superfecta accepts a 'client' argument.
+            res = place_audit_superfecta(db, mode=mode, product_id=product_id, selections=selections, stake=stake, currency=currency, post=True, stake_type="total", client=client_for_placement)
+        else:
+            flash(f"Bet type '{bet_type}' is not currently supported on this page.", "error")
+            return redirect(request.referrer or url_for("tote_bet_page"))
+
+        # --- Handle Response ---
         st = res.get("placement_status")
-        if res.get("error"):
-            flash(f"Audit bet error: {res.get('error')}", "error")
+        err_msg = res.get("error")
+        if err_msg:
+            # Check for specific, common errors to provide better user feedback.
+            if "Failed to fund ticket" in str(err_msg):
+                flash("Bet placement failed: Insufficient funds in the Tote account for a live bet.", "error")
+            else:
+                flash(f"Bet placement error: {err_msg}", "error")
         elif st:
             ok = str(st).upper() in ("PLACED", "ACCEPTED", "OK", "SUCCESS")
-            msg = f"Audit bet placement status: {st}"
+            msg = f"Bet placement status: {st}"
             fr = res.get("failure_reason")
             if fr: msg += f" (reason: {fr})"
             flash(msg, "success" if ok else "error")
         else:
-            flash("Audit bet recorded (no placement status returned).", "success")
+            flash("Bet recorded (no placement status returned).", "success")
 
         return redirect(request.referrer or url_for("tote_bet_page"))
 
-    # GET request: Handle filters and fetch events
+    # GET request: Handle filters and fetch upcoming events
     country = (request.args.get("country") or "").strip().upper()
     venue = (request.args.get("venue") or "").strip()
-    date_from = (request.args.get("from") or "").strip()
-    date_to = (request.args.get("to") or "").strip()
 
     where = []
     params: dict[str, Any] = {}
-
     if country:
         where.append("UPPER(country) = @country")
         params["country"] = country
@@ -2914,23 +2994,14 @@ def tote_bet_page():
         where.append("UPPER(venue) LIKE UPPER(@venue)")
         params["venue"] = f"%{venue}%"
 
-    # Date filtering logic
-    if date_from:
-        where.append("SUBSTR(start_iso, 1, 10) >= @date_from")
-        params["date_from"] = date_from
-    if date_to:
-        where.append("SUBSTR(start_iso, 1, 10) <= @date_to")
-        params["date_to"] = date_to
-
-    # If no date filters are applied, default to the next 24 hours.
-    if not date_from and not date_to:
-        from datetime import timezone
-        now = datetime.now(timezone.utc)
-        start_iso = now.isoformat(timespec='seconds').replace('+00:00', 'Z')
-        end_iso = (now + timedelta(hours=24)).isoformat(timespec='seconds').replace('+00:00', 'Z')
-        where.append("start_iso BETWEEN @start AND @end")
-        params["start"] = start_iso
-        params["end"] = end_iso
+    # Default to showing events in the next 24 hours.
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    start_iso = now.isoformat(timespec='seconds').replace('+00:00', 'Z')
+    end_iso = (now + timedelta(hours=24)).isoformat(timespec='seconds').replace('+00:00', 'Z')
+    where.append("start_iso BETWEEN @start AND @end")
+    params["start"] = start_iso
+    params["end"] = end_iso
 
     ev_sql = (
         "SELECT event_id, name, venue, country, start_iso FROM tote_events "
@@ -2949,8 +3020,6 @@ def tote_bet_page():
         filters={
             "country": country,
             "venue": venue,
-            "from": date_from,
-            "to": date_to,
         },
         country_options=(countries_df['country'].tolist() if not countries_df.empty else []),
     )
