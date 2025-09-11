@@ -350,14 +350,17 @@ def sql_df(*args, **kwargs) -> pd.DataFrame:
     except Exception:
         df = it.to_dataframe(create_bqstorage_client=False)
 
+    # Cache the full dataframe BEFORE applying the row limit for the response.
+    _sqldf_cache_set(ck, df, cache_ttl)
+
     # Soft cap rows if configured (for safety); 0 disables
     if cfg.web_sqldf_max_rows and cfg.web_sqldf_max_rows > 0:
         try:
-            df = df.head(cfg.web_sqldf_max_rows)
+            # Return a copy to avoid modifying the cached dataframe by reference
+            return df.head(cfg.web_sqldf_max_rows).copy(deep=True)
         except Exception:
             pass
 
-    _sqldf_cache_set(ck, df, cache_ttl)
     return df
 
 @app.template_filter('datetime')
