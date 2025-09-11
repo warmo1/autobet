@@ -411,7 +411,7 @@ def index():
     # UI Improvement: Also expand the time window for upcoming Superfecta products.
     sf_sql = (
         "SELECT product_id, event_id, event_name, venue, start_iso, status, currency, total_net "
-        "FROM tote_products WHERE UPPER(bet_type)='SUPERFECTA' AND start_iso BETWEEN @start AND @end "
+        "FROM vw_products_latest_totals WHERE UPPER(bet_type)='SUPERFECTA' AND start_iso BETWEEN @start AND @end "
         "ORDER BY start_iso ASC LIMIT 20"
     )
     sfs = sql_df(sf_sql, params={"start": start_iso, "end": end_iso})
@@ -945,7 +945,7 @@ def tote_calculators_page():
           p.product_id, p.event_id, p.event_name, COALESCE(e.venue, p.venue) AS venue,
           p.start_iso, p.currency, p.total_gross, p.total_net, COALESCE(p.status,'') AS status,
           (SELECT COUNT(1) FROM tote_product_selections s WHERE s.product_id = p.product_id) AS n_runners
-        FROM tote_products p
+        FROM vw_products_latest_totals p
         LEFT JOIN tote_events e USING(event_id)
         WHERE UPPER(p.bet_type)=@bt
     """
@@ -1250,7 +1250,7 @@ def tote_viability_page():
     }
 
     if product_id:
-        pdf = sql_df("SELECT * FROM tote_products WHERE product_id=?", params=(product_id,))
+        pdf = sql_df("SELECT * FROM vw_products_latest_totals WHERE product_id=?", params=(product_id,))
         if not pdf.empty:
             prod = pdf.iloc[0].to_dict()
 
@@ -1417,7 +1417,7 @@ def api_tote_viability():
     # Load product
     prod = None
     if product_id:
-        pdf = sql_df("SELECT * FROM tote_products WHERE product_id=?", params=(product_id,))
+        pdf = sql_df("SELECT * FROM vw_products_latest_totals WHERE product_id=?", params=(product_id,))
         if not pdf.empty:
             prod = pdf.iloc[0].to_dict()
     # Params
@@ -1531,7 +1531,7 @@ def api_tote_pool_snapshot(product_id: str):
         # Fallback to products
         pdf = sql_df(
             "SELECT product_id, event_id, currency, status, start_iso, total_gross, total_net, rollover, deduction_rate, NULL AS ts_ms, 'products_fallback' AS source "
-            "FROM tote_products WHERE product_id=?",
+            "FROM vw_products_latest_totals WHERE product_id=?",
             params=(product_id,)
         )
         if not pdf.empty:
@@ -2269,7 +2269,7 @@ def event_detail(event_id: str):
                COALESCE(SAFE_CAST(total_net AS FLOAT64), 0.0) AS total_net,
                COALESCE(SAFE_CAST(rollover AS FLOAT64), 0.0) AS rollover,
                COALESCE(SAFE_CAST(deduction_rate AS FLOAT64), 0.0) AS deduction_rate -- Use deduction_rate directly
-        FROM tote_products
+        FROM vw_products_latest_totals
         WHERE event_id=?
         ORDER BY bet_type
         """,
@@ -2534,7 +2534,7 @@ def horse_detail(horse_id: str):
 
 @app.route("/tote-superfecta/<product_id>")
 def tote_superfecta_detail(product_id: str):
-    pdf = sql_df("SELECT * FROM tote_products WHERE product_id=?", params=(product_id,))
+    pdf = sql_df("SELECT * FROM vw_products_latest_totals WHERE product_id=?", params=(product_id,))
     if pdf.empty:
         flash("Unknown product id", "error")
         return redirect(url_for("tote_superfecta_page"))
