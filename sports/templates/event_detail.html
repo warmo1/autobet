@@ -3,7 +3,10 @@
 <div class="card">
   <div class="card-header d-flex justify-content-between align-items-center">
     <strong>Event</strong>
-    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('tote_events_page') }}">Back</a>
+    <div>
+      <button class="btn btn-sm btn-outline-primary me-2" id="btn-refresh-pools" data-eid="{{ event.event_id }}">Refresh Pools</button>
+      <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('tote_events_page') }}">Back</a>
+    </div>
   </div>
   <div class="card-body">
     <div class="mb-2">
@@ -158,4 +161,26 @@
     {% endif %}
   </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+  const btn = document.getElementById('btn-refresh-pools');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    try {
+      btn.disabled = true; btn.textContent = 'Refreshing...';
+      const eid = btn.getAttribute('data-eid');
+      const res = await fetch(`/api/tote/refresh_event_pools/${eid}`, { method: 'POST' });
+      const j = await res.json().catch(()=>({}));
+      btn.textContent = 'Refreshed';
+      setTimeout(()=>window.location.reload(), 800);
+    } catch (e) {
+      console.error('refresh pools', e);
+      btn.textContent = 'Error'; btn.disabled = false;
+    }
+  });
+});
+</script>
 {% endblock %}

@@ -86,11 +86,11 @@ def place_audit_simple_bet(
     product_leg_id = None
     try:
         from google.cloud import bigquery
+        # Prefer product_leg_id by product+leg, independent of selection (more robust)
         pli_df = sink.query(
-            "SELECT product_leg_id FROM tote_product_selections WHERE product_id=@pid AND selection_id=@sid AND leg_index=1 LIMIT 1",
+            "SELECT product_leg_id FROM tote_product_selections WHERE product_id=@pid AND leg_index=1 LIMIT 1",
             job_config=bigquery.QueryJobConfig(query_parameters=[
                 bigquery.ScalarQueryParameter("pid", "STRING", product_id),
-                bigquery.ScalarQueryParameter("sid", "STRING", selection_id),
             ])
         ).to_dataframe()
         if not pli_df.empty:
@@ -100,7 +100,8 @@ def place_audit_simple_bet(
 
     if not product_leg_id:
         try:
-            client = ToteClient()
+            # Use provided client if available (respects audit/live endpoint), else default
+            client = client or ToteClient()
             query = "query ProductLegs($id: String){ product(id: $id){ ... on BettingProduct { legs{ nodes{ id } } } } }"
             data = client.graphql(query, {"id": product_id})
             legs = (((data.get("product") or {}).get("legs") or {}).get("nodes")) or []

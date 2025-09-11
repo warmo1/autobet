@@ -5,6 +5,7 @@ import time
 from typing import Any, Dict, Optional
 
 import requests
+import os
 import threading
 
 from ..config import cfg

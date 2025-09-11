@@ -662,8 +662,8 @@ def tote_pools_page():
     count_sql = "SELECT COUNT(1) AS c FROM (" + filtered_sql + ") AS sub"
     total = int(sql_df(count_sql, params=tuple(params)).iloc[0]["c"])
 
-    # Page slice, sorted latest first
-    paged_sql = filtered_sql + " ORDER BY p.start_iso DESC LIMIT ? OFFSET ?"
+    # Page slice, ascending (earliest at top)
+    paged_sql = filtered_sql + " ORDER BY p.start_iso ASC LIMIT ? OFFSET ?"
     paged_params = list(params) + [limit, offset]
     df = sql_df(paged_sql, params=tuple(paged_params))
 
@@ -2188,6 +2188,54 @@ def event_detail(event_id: str):
         runner_rows=runner_rows,
         runners_prob=runners_prob
     )
+
+@app.post("/api/tote/refresh_event_pools/<event_id>")
+def api_refresh_event_pools(event_id: str):
+    """Synchronously poll Tote API for all products of this event and upsert totals.
+
+    This is a local, on-demand helper independent of Cloud Run.
+    """
+    try:
+        if not event_id:
+            return app.response_class(json.dumps({"error": "missing event_id"}), mimetype="application/json", status=400)
+        # List products for the event (open + closed; we update whichever exist)
+        df = sql_df("SELECT product_id FROM tote_products WHERE event_id=?", params=(event_id,))
+        ids = ([] if df.empty else [r["product_id"] for _, r in df.iterrows()])
+        if not ids:
+            return app.response_class(json.dumps({"updated": 0}), mimetype="application/json")
+        from .bq import get_bq_sink
+        from .providers.tote_api import ToteClient
+        from .ingest.tote_products import ingest_products
+        sink = get_bq_sink()
+        client = ToteClient()
+        n = ingest_products(sink, client, date_iso=None, status=None, first=len(ids), bet_types=None, product_ids=ids)
+        # Create snapshots for each product (best-effort)
+        try:
+            pdf = sql_df("SELECT product_id, event_id, bet_type, status, currency, start_iso, total_gross, total_net, rollover, deduction_rate FROM tote_products WHERE event_id=?", params=(event_id,))
+            if not pdf.empty:
+                ts = int(time.time() * 1000)
+                rows = []
+                for _, r in pdf.iterrows():
+                    rows.append({
+                        "product_id": r["product_id"],
+                        "event_id": r["event_id"],
+                        "bet_type": r["bet_type"],
+                        "status": r["status"],
+                        "currency": r["currency"],
+                        "start_iso": r["start_iso"],
+                        "ts_ms": ts,
+                        "total_gross": float(r.get("total_gross") or 0.0),
+                        "total_net": float(r.get("total_net") or 0.0),
+                        "rollover": float(r.get("rollover") or 0.0),
+                        "deduction_rate": float(r.get("deduction_rate") or 0.0),
+                    })
+                if rows:
+                    sink.upsert_tote_pool_snapshots(rows)
+        except Exception:
+            pass
+        return app.response_class(json.dumps({"updated": n, "product_ids": ids}), mimetype="application/json")
+    except Exception as e:
+        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
 @app.route("/api/tote/product_selections/<product_id>")
 def api_tote_product_selections(product_id: str):
