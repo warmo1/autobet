@@ -121,7 +121,7 @@ def place_audit_simple_bet(
         try:
             query_client = ToteClient()  # live
             query = (
-                "query ProductLegs($id: ID!){ product(id: $id){ ... on BettingProduct { legs{ nodes{ id selections{ nodes{ id } } } } } } }"
+                "query ProductLegs($id: String){ product(id: $id){ ... on BettingProduct { legs{ nodes{ id selections{ nodes{ id } } } } } } }"
             )
             data = query_client.graphql(query, {"id": product_id})
             legs = (((data.get("product") or {}).get("legs") or {}).get("nodes")) or []
