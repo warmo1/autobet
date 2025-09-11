@@ -576,8 +576,8 @@ def tote_events_page():
     if date_to:
         # Ensure date_to includes the entire day by checking against the start of the next day
         where.append("SUBSTR(start_iso,1,10) <= ?"); params.append(date_to)
-    # Default to OPEN events and ascending time to show next races first
-    where.append("UPPER(status)='OPEN'")
+    # Default to OPEN or SCHEDULED events and ascending time to show next races first
+    where.append("UPPER(status) IN ('OPEN','SCHEDULED')")
     base_sql = ( # noqa
         "SELECT event_id, name, venue, country, start_iso, sport, status, competitors_json, home, away "
         "FROM tote_events"
