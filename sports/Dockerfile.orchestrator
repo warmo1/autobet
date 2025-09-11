@@ -5,7 +5,11 @@ WORKDIR /app
 
 # When building from the repo root as context, requirements.txt lives under autobet/
 COPY autobet/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Suppress pip root-user warning and version check in CI builds; upgrade pip first
+ENV PIP_ROOT_USER_ACTION=ignore \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir -r requirements.txt
 
 # Copy the autobet package under /app/autobet so imports like autobet.sports work
 COPY autobet/ ./autobet/

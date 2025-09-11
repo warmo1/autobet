@@ -1844,6 +1844,18 @@ class BigQuerySink:
         """
         client.query(sql).result()
 
+        # QC: today's GB Superfecta products with no pool snapshots yet
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_qc_today_gb_sf_missing_snapshots` AS
+        SELECT v.product_id, v.event_id, v.event_name, v.venue, v.start_iso
+        FROM `{ds}.vw_today_gb_superfecta` v
+        LEFT JOIN (
+          SELECT DISTINCT product_id FROM `{ds}.tote_pool_snapshots`
+        ) s USING(product_id)
+        WHERE s.product_id IS NULL;
+        """
+        client.query(sql).result()
+
         # vw_superfecta_dividends_latest: latest dividend per selection for each product
         sql = f"""
         CREATE VIEW IF NOT EXISTS `{ds}.vw_superfecta_dividends_latest` AS

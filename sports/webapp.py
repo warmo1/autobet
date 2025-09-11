@@ -1784,6 +1784,40 @@ def api_status_data_freshness():
         return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
 
+@app.get("/api/status/qc")
+def api_status_qc():
+    """Return QC gaps and counts from QC views."""
+    try:
+        out: dict[str, Any] = {}
+        # Missing runner numbers today
+        try:
+            df = sql_df("SELECT COUNT(DISTINCT product_id) AS c FROM vw_qc_today_missing_runner_numbers")
+            out["missing_runner_numbers"] = int(df.iloc[0]["c"]) if not df.empty else 0
+        except Exception:
+            out["missing_runner_numbers"] = None
+        # Missing bet rules
+        try:
+            df = sql_df("SELECT COUNT(1) AS c FROM vw_qc_missing_bet_rules")
+            out["missing_bet_rules"] = int(df.iloc[0]["c"]) if not df.empty else 0
+        except Exception:
+            out["missing_bet_rules"] = None
+        # Probable odds coverage (average across products)
+        try:
+            df = sql_df("SELECT AVG(coverage) AS avg_cov FROM vw_qc_probable_odds_coverage")
+            out["probable_odds_avg_cov"] = float(df.iloc[0]["avg_cov"]) if not df.empty else None
+        except Exception:
+            out["probable_odds_avg_cov"] = None
+        # Today's GB Superfecta missing snapshots
+        try:
+            df = sql_df("SELECT COUNT(1) AS c FROM vw_qc_today_gb_sf_missing_snapshots")
+            out["gb_sf_missing_snapshots"] = int(df.iloc[0]["c"]) if not df.empty else 0
+        except Exception:
+            out["gb_sf_missing_snapshots"] = None
+        return app.response_class(json.dumps(out), mimetype="application/json")
+    except Exception as e:
+        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
+
+
 @app.get("/api/status/upcoming")
 def api_status_upcoming():
     """Return upcoming races/products in the next 60 minutes (GB) if view exists."""
@@ -1840,24 +1874,23 @@ def api_status_gcp():
 
     out = {"project": project, "region": region, "cloud_run": {}, "scheduler": {}, "pubsub": {}, "app": {}}
 
-    # Cloud Run services
+    # Cloud Run services (list all in region)
     try:
-        services = []
-        for name in [os.getenv("SERVICE_FETCHER", "ingestion-fetcher"), os.getenv("SERVICE_ORCHESTRATOR", "ingestion-orchestrator")]:
-            url = f"https://run.googleapis.com/v2/projects/{project}/locations/{region}/services/{name}"
-            r = sess.get(url, timeout=10)
-            if r.status_code == 200:
-                j = r.json()
+        services: list[dict] = []
+        url = f"https://run.googleapis.com/v2/projects/{project}/locations/{region}/services"
+        r = sess.get(url, timeout=10)
+        if r.status_code == 200:
+            for j in (r.json().get("services") or []):
                 conds = {c.get("type"): c.get("state") or c.get("status") for c in j.get("conditions", [])}
                 services.append({
-                    "name": name,
+                    "name": (j.get("name") or "").split("/")[-1],
                     "uri": j.get("uri"),
                     "latestReadyRevision": j.get("latestReadyRevision"),
                     "ready": (conds.get("Ready") == "CONDITION_SUCCEEDED" or conds.get("Ready") == "True"),
                     "updateTime": j.get("updateTime"),
                 })
-            else:
-                services.append({"name": name, "missing": True, "status_code": r.status_code})
+        else:
+            out["cloud_run"]["status_code"] = r.status_code
         out["cloud_run"]["services"] = services
     except Exception as e:
         out["cloud_run"]["error"] = str(e)
@@ -2987,10 +3020,10 @@ def tote_bet_page():
     where = []
     params: dict[str, Any] = {}
     if country:
-        where.append("UPPER(country) = @country")
+        where.append("UPPER(e.country) = @country")
         params["country"] = country
     if venue:
-        where.append("UPPER(venue) LIKE UPPER(@venue)")
+        where.append("UPPER(e.venue) LIKE UPPER(@venue)")
         params["venue"] = f"%{venue}%"
 
     # Default to showing events in the next 24 hours.
@@ -2998,7 +3031,7 @@ def tote_bet_page():
     now = datetime.now(timezone.utc)
     start_iso = now.isoformat(timespec='seconds').replace('+00:00', 'Z')
     end_iso = (now + timedelta(hours=24)).isoformat(timespec='seconds').replace('+00:00', 'Z')
-    where.append("start_iso BETWEEN @start AND @end")
+    where.append("e.start_iso BETWEEN @start AND @end")
     params["start"] = start_iso
     params["end"] = end_iso
 
@@ -3009,7 +3042,7 @@ def tote_bet_page():
     if where:
         ev_sql += " AND " + " AND ".join(where)
 
-    ev_sql += " ORDER BY start_iso ASC LIMIT 200"
+    ev_sql += " ORDER BY e.start_iso ASC LIMIT 200"
 
     events_df = sql_df(ev_sql, params=params)
     countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")

@@ -198,6 +198,33 @@ window.addEventListener('DOMContentLoaded', () => {
   setInterval(loadGcp, 120000);
   setInterval(loadJobLog, 60000);
 
+  // QC widget
+  (async function loadQc(){
+    try{
+      const res = await fetch('/api/status/qc');
+      const j = await res.json();
+      const el = document.getElementById('qc-list');
+      if (!el) return;
+      el.innerHTML = '';
+      const add = (label, value, goodWhenZero=false) => {
+        const row = document.createElement('div');
+        row.className = 'qc-row';
+        const l = document.createElement('span'); l.textContent = label; row.appendChild(l);
+        const v = document.createElement('span'); v.textContent = (value == null ? '—' : value);
+        const ok = goodWhenZero ? (Number(value) === 0) : (Number(value) > 0);
+        v.className = 'badge ' + (ok ? 'ok' : 'warn');
+        row.appendChild(v);
+        el.appendChild(row);
+      };
+      add('Missing runner numbers (today)', j.missing_runner_numbers, true);
+      add('Missing bet rules', j.missing_bet_rules, true);
+      add('Avg odds coverage', (j.probable_odds_avg_cov!=null? (j.probable_odds_avg_cov*100).toFixed(1)+'%':'—'));
+      add('GB SF missing snapshots (today)', j.gb_sf_missing_snapshots, true);
+    }catch(e){ console.error('qc error', e);} 
+    // refresh QC periodically
+    setTimeout(arguments.callee, 120000);
+  })();
+
   // Quick actions wiring
   document.querySelectorAll('.quick-actions .btn').forEach(btn => {
     btn.addEventListener('click', async () => {
