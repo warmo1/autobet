@@ -19,6 +19,7 @@ from .gcp import publish_pubsub_message
 import itertools
 import math
 from collections import defaultdict
+import requests
 
 # Helper function for permutations (nPr) - not directly used in PL, but good to have
 def _permutations_count(n, r):
@@ -2234,6 +2235,125 @@ def api_refresh_event_pools(event_id: str):
         except Exception:
             pass
         return app.response_class(json.dumps({"updated": n, "product_ids": ids}), mimetype="application/json")
+    except Exception as e:
+        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
+
+@app.post("/api/tote/refresh_odds/<event_id>")
+def api_refresh_odds(event_id: str):
+    """Fetch WIN probable odds via REST, normalize, and store to raw_tote_probable_odds.
+
+    This does not depend on Cloud Run. It targets the partner gateway using the configured
+    TOTE_GRAPHQL_URL host and Api-Key header.
+    """
+    try:
+        # Find an OPEN WIN product for this event
+        pdf = sql_df(
+            "SELECT product_id FROM tote_products WHERE event_id=? AND UPPER(bet_type)='WIN' ORDER BY status DESC LIMIT 1",
+            params=(event_id,)
+        )
+        if pdf.empty:
+            return app.response_class(json.dumps({"error": "no WIN product for event"}), mimetype="application/json", status=404)
+        win_product_id = pdf.iloc[0]["product_id"]
+
+        # Build host root from configured GraphQL URL
+        base = cfg.tote_graphql_url or ""
+        host_root = ""
+        try:
+            if "/partner/" in base:
+                host_root = base.split("/partner/")[0].rstrip("/")
+            else:
+                from urllib.parse import urlparse
+                u = urlparse(base)
+                if u.scheme and u.netloc:
+                    host_root = f"{u.scheme}://{u.netloc}"
+        except Exception:
+            host_root = ""
+        if not host_root:
+            host_root = "https://hub.production.racing.tote.co.uk"
+
+        candidates = [
+            f"{host_root}/partner/gateway/probable-odds/v1/products/{win_product_id}",
+            f"{host_root}/partner/gateway/v1/products/{win_product_id}/probable-odds",
+            f"{host_root}/v1/products/{win_product_id}/probable-odds",
+        ]
+        headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
+        data = None; url_used = None
+        for url in candidates:
+            try:
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    url_used = url
+                    break
+            except Exception:
+                continue
+        if data is None:
+            return app.response_class(json.dumps({"error": "probable-odds fetch failed"}), mimetype="application/json", status=502)
+
+        # Normalize to the view's expected shape: {products:{nodes:[{id, lines:{nodes:[{legs:[{lineSelections:[{selectionId}]}], odds:{decimal}}]}}]}}
+        def _extract_lines(obj):
+            lines = []
+            if not isinstance(obj, dict):
+                return lines
+            # common shapes
+            try:
+                if isinstance(obj.get("lines"), dict) and isinstance(obj["lines"].get("nodes"), list):
+                    for ln in obj["lines"]["nodes"]:
+                        lines.append(ln)
+                elif isinstance(obj.get("lines"), list):
+                    lines.extend(obj["lines"])
+            except Exception:
+                pass
+            # nested scan
+            for k, v in list(obj.items()):
+                if isinstance(v, dict):
+                    lines.extend(_extract_lines(v))
+                elif isinstance(v, list):
+                    for it in v:
+                        if isinstance(it, dict):
+                            lines.extend(_extract_lines(it))
+            return lines
+
+        lines = _extract_lines(data)
+        norm_lines = []
+        for ln in lines:
+            try:
+                odds = ((ln.get("odds") or {}).get("decimal"))
+                legs = ln.get("legs") or []
+                sel_id = None
+                if legs:
+                    try:
+                        sels = (legs[0].get("lineSelections") or [])
+                        if sels:
+                            sel_id = sels[0].get("selectionId")
+                    except Exception:
+                        pass
+                if sel_id and odds is not None:
+                    norm_lines.append({
+                        "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
+                        "odds": {"decimal": float(odds)},
+                    })
+            except Exception:
+                continue
+
+        if not norm_lines:
+            return app.response_class(json.dumps({"error": "no lines found in response", "url": url_used}), mimetype="application/json", status=422)
+
+        payload = {
+            "products": {
+                "nodes": [
+                    {"id": win_product_id, "lines": {"nodes": norm_lines}}
+                ]
+            }
+        }
+        from .bq import get_bq_sink
+        sink = get_bq_sink()
+        import time as _t
+        ts_ms = int(_t.time() * 1000)
+        sink.upsert_raw_tote_probable_odds([
+            {"raw_id": f"probable:{win_product_id}:{ts_ms}", "fetched_ts": ts_ms, "payload": json.dumps(payload), "product_id": win_product_id}
+        ])
+        return app.response_class(json.dumps({"ok": True, "product_id": win_product_id, "lines": len(norm_lines)}), mimetype="application/json")
     except Exception as e:
         return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 

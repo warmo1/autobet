@@ -5,6 +5,7 @@
     <strong>Event</strong>
     <div>
       <button class="btn btn-sm btn-outline-primary me-2" id="btn-refresh-pools" data-eid="{{ event.event_id }}">Refresh Pools</button>
+      <button class="btn btn-sm btn-outline-primary me-2" id="btn-refresh-odds" data-eid="{{ event.event_id }}">Refresh Odds</button>
       <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('tote_events_page') }}">Back</a>
     </div>
   </div>
@@ -181,6 +182,22 @@ document.addEventListener('DOMContentLoaded', function(){
       btn.textContent = 'Error'; btn.disabled = false;
     }
   });
+  const btnOdds = document.getElementById('btn-refresh-odds');
+  if (btnOdds) {
+    btnOdds.addEventListener('click', async () => {
+      try {
+        btnOdds.disabled = true; btnOdds.textContent = 'Refreshing...';
+        const eid = btnOdds.getAttribute('data-eid');
+        const res = await fetch(`/api/tote/refresh_odds/${eid}`, { method: 'POST' });
+        const j = await res.json().catch(()=>({}));
+        btnOdds.textContent = 'Refreshed';
+        setTimeout(()=>window.location.reload(), 800);
+      } catch (e) {
+        console.error('refresh odds', e);
+        btnOdds.textContent = 'Error'; btnOdds.disabled = false;
+      }
+    });
+  }
 });
 </script>
 {% endblock %}

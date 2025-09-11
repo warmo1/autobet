@@ -195,10 +195,10 @@ class BigQuerySink:
             update_set=",".join([
                 "status=S.status",
                 "currency=S.currency",
-                "total_gross=S.total_gross",
-                "total_net=S.total_net",
-                "rollover=S.rollover",
-                "deduction_rate=S.deduction_rate",
+                "total_gross=COALESCE(S.total_gross, T.total_gross)",
+                "total_net=COALESCE(S.total_net, T.total_net)",
+                "rollover=COALESCE(S.rollover, T.rollover)",
+                "deduction_rate=COALESCE(S.deduction_rate, T.deduction_rate)",
                 "event_id=S.event_id",
                 "event_name=S.event_name",
                 "venue=S.venue",
@@ -607,11 +607,13 @@ class BigQuerySink:
             schema_hint={
                 "fetched_ts": "INT64",
                 "product_id": "STRING",
+                "raw_id": "STRING",
             },
         )
         if not temp:
             return
-        self._ensure_columns("raw_tote_probable_odds", {"product_id": "STRING"})
+        # Ensure required columns exist on destination
+        self._ensure_columns("raw_tote_probable_odds", {"raw_id": "STRING", "product_id": "STRING"})
         self._merge(
             "raw_tote_probable_odds",
             temp,
