@@ -110,7 +110,20 @@ def _resolve_audit_ids_for_simple(
     client = ToteClient()
     client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
     query = (
-        "query GetEventProducts($id: String){ event(id: $id){ products{ nodes{ id betType status legs{ nodes{ id selections{ nodes{ id competitor{ name details{ __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } } } } } } } }"
+        "query GetEventProducts($id: String){\n"
+        "  event(id: $id){\n"
+        "    products{\n"
+        "      nodes{\n"
+        "        id\n"
+        "        ... on BettingProduct {\n"
+        "          betType { code }\n"
+        "          selling { status }\n"
+        "          legs{ nodes{ id selections{ nodes{ id competitor{ name details{ __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } } } }\n"
+        "        }\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "}"
     )
     try:
         data = client.graphql(query, {"id": event_id})
@@ -119,8 +132,10 @@ def _resolve_audit_ids_for_simple(
         # pick matching betType; prefer OPEN
         cand = None
         for n in nodes:
-            if (n.get("betType") or "").upper() == (bet_type or "").upper():
-                if (n.get("status") or "").upper() == "OPEN":
+            bt = ((n.get("betType") or {}) or {}).get("code")
+            selling_status = ((n.get("selling") or {}) or {}).get("status")
+            if (bt or "").upper() == (bet_type or "").upper():
+                if (selling_status or "").upper() == "OPEN":
                     cand = n; break
                 cand = cand or n
         if not cand:
@@ -233,6 +248,10 @@ def place_audit_simple_bet(
             used_product_id = mapped["product_id"]
             used_product_leg_id = mapped["product_leg_id"]
             used_selection_id = mapped["selection_id"]
+            try:
+                print(f"[AuditBet] ID mapping -> product:{used_product_id} leg:{used_product_leg_id} sel:{used_selection_id}")
+            except Exception:
+                pass
     # When querying product legs for audit, prefer the audit endpoint to avoid ID mismatches
     # (product and leg IDs should be the same, but Tote recommends querying from audit when testing)
 
