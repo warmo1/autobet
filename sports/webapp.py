@@ -344,17 +344,8 @@ def sql_df(*args, **kwargs) -> pd.DataFrame:
     except Exception:
         df = it.to_dataframe(create_bqstorage_client=False)
 
-    # Cache the full dataframe BEFORE applying the row limit for the response.
+    # Cache the full dataframe
     _sqldf_cache_set(ck, df, cache_ttl)
-
-    # Soft cap rows if configured (for safety); 0 disables
-    if cfg.web_sqldf_max_rows and cfg.web_sqldf_max_rows > 0:
-        try:
-            # Return a copy to avoid modifying the cached dataframe by reference
-            return df.head(cfg.web_sqldf_max_rows).copy(deep=True)
-        except Exception:
-            pass
-
     return df
 
 @app.template_filter('datetime')
@@ -598,8 +589,9 @@ def tote_events_page():
     base_sql += " ORDER BY start_iso ASC LIMIT ? OFFSET ?"
     params_paged = list(params) + [limit, offset]
     # Performance: Simplified total count query.
-    df = sql_df(base_sql, params=tuple(params_paged))
-    total = int(sql_df(count_sql, params=tuple(params)).iloc[0]["c"])
+    # Bypass cache for paged results to avoid any unexpected truncation/staleness
+    df = sql_df(base_sql, params=tuple(params_paged), cache_ttl=0)
+    total = int(sql_df(count_sql, params=tuple(params), cache_ttl=0).iloc[0]["c"])
     countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
     sports_df = sql_df("SELECT DISTINCT sport FROM tote_events WHERE sport IS NOT NULL AND sport<>'' ORDER BY sport")
     venues_df = sql_df("SELECT DISTINCT venue FROM tote_events WHERE venue IS NOT NULL AND venue<>'' ORDER BY venue")
@@ -1986,12 +1978,16 @@ def api_status_upcoming():
     """Return upcoming races/products in the next 4 hours if view exists."""
     upcoming = []
     try:
-        # Expanded to 4 hours and includes all bet types from the view
+        # Prefer 240m GB Superfecta view if available
         df = sql_df("SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, combos, S, roi_current, viable_now FROM vw_gb_open_superfecta_next240_be ORDER BY start_iso")
         upcoming = df.to_dict("records") if not df.empty else []
     except Exception:
         try:
-            # Fallback: generic query for open products in the next 4 hours
+            # Secondary fallback: older 60m view name
+            df = sql_df("SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, combos, S, roi_current, viable_now FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso")
+            upcoming = df.to_dict("records") if not df.empty else []
+        except Exception:
+            # Final fallback: generic query for open products in the next 4 hours
             now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
             df = sql_df(
                 "SELECT p.product_id, p.event_id, COALESCE(p.event_name, e.name) AS event_name, e.sport, COALESCE(p.venue, e.venue) AS venue, COALESCE(e.country, p.currency) AS country, p.start_iso, p.status, p.currency, qc.avg_cov "
@@ -2047,12 +2043,21 @@ def api_status_gcp():
         r = sess.get(url, timeout=10)
         if r.status_code == 200:
             for j in (r.json().get("services") or []):
+                # Normalize conditions map across API variants
                 conds = {c.get("type"): c.get("state") or c.get("status") for c in j.get("conditions", [])}
+                ok_vals = {"CONDITION_SUCCEEDED", "True", True}
+                # Some list responses omit the top-level Ready condition. Consider the
+                # service ready if either Ready succeeded OR both RoutesReady and
+                # ConfigurationsReady succeeded. As a final hint, the presence of
+                # latestReadyRevision typically implies readiness of the latest deploy.
+                ready_from_subconds = (conds.get("RoutesReady") in ok_vals) and (conds.get("ConfigurationsReady") in ok_vals)
+                ready_from_ready = (conds.get("Ready") in ok_vals)
+                ready_flag = bool(ready_from_ready or ready_from_subconds or bool(j.get("latestReadyRevision")))
                 services.append({
                     "name": (j.get("name") or "").split("/")[-1],
                     "uri": j.get("uri"),
                     "latestReadyRevision": j.get("latestReadyRevision"),
-                    "ready": (conds.get("Ready") == "CONDITION_SUCCEEDED" or conds.get("Ready") == "True"),
+                    "ready": ready_flag,
                     "updateTime": j.get("updateTime"),
                     "conditions": j.get("conditions", []),
                 })
