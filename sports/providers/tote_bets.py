@@ -6,12 +6,27 @@ import uuid
 from ..config import cfg
 from .tote_api import ToteClient
 
+# BigQuery-only providers for audit and placement helpers.
+# All persistence is done via the BigQuerySink in sports.bq.
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _record_audit_bq(sink, *, bet_id: str, product_id: str, selection: str, stake: float, currency: Optional[str], payload: Dict[str, Any], response: Optional[Dict[str, Any]], error: Optional[str], placement_status: Optional[str] = None):
+def _record_audit_bq(
+    sink,
+    *,
+    bet_id: str,
+    product_id: str,
+    selection: str,
+    stake: float,
+    currency: Optional[str],
+    payload: Dict[str, Any],
+    response: Optional[Dict[str, Any]],
+    error: Optional[str],
+    placement_status: Optional[str] = None,
+):
     """Helper to write an audit bet record to BigQuery."""
     row = {
         "bet_id": bet_id,
@@ -25,32 +40,35 @@ def _record_audit_bq(sink, *, bet_id: str, product_id: str, selection: str, stak
         "response_json": json.dumps({"request": payload, "response": response}),
         "error": error,
     }
-    # This method needs to be added to bq.py
     sink.upsert_tote_audit_bets([row])
 
-
-def _record_audit(conn, *, product_id: str, selection: str, stake: float, currency: Optional[str], payload: Dict[str, Any], response: Optional[Dict[str, Any]], error: Optional[str]):
-    bet_id = f"{product_id}:{_now_ms()}"
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO tote_bets(bet_id,ts,mode,product_id,selection,stake,currency,status,return,response_json,error)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            bet_id,
-            _now_ms(),
-            'audit',
-            product_id,
-            selection,
-            float(stake),
-            currency,
-            'audit-recorded' if error is None else 'audit-error',
-            None,
-            json.dumps({"request": payload, "response": response} if error is None else {"request": payload}),
-            error,
-        ),
-    )
-    return bet_id
+def _bq_query_rows(sink, sql: str, params: Dict[str, Any] | None = None) -> list[dict]:
+    """Run a parameterized query on BigQuery and return a list of dict rows."""
+    from google.cloud import bigquery  # lazy import to avoid hard dependency at import time
+    qp = []
+    if params:
+        for k, v in params.items():
+            if isinstance(v, bool):
+                qp.append(bigquery.ScalarQueryParameter(k, "BOOL", v))
+            elif isinstance(v, int):
+                qp.append(bigquery.ScalarQueryParameter(k, "INT64", v))
+            elif isinstance(v, float):
+                qp.append(bigquery.ScalarQueryParameter(k, "FLOAT64", v))
+            else:
+                qp.append(bigquery.ScalarQueryParameter(k, "STRING", None if v is None else str(v)))
+    job_cfg = bigquery.QueryJobConfig(query_parameters=qp)
+    rs = sink.query(sql, job_config=job_cfg)
+    try:
+        df = rs.to_dataframe(create_bqstorage_client=False)
+        return ([] if df.empty else df.to_dict("records"))
+    except Exception:
+        out = []
+        for r in rs:
+            try:
+                out.append(dict(r))
+            except Exception:
+                out.append({})
+        return out
 
 
 def place_audit_simple_bet(
@@ -61,6 +79,7 @@ def place_audit_simple_bet(
     stake: float,
     currency: str = "GBP",
     post: bool = True,
+    client: ToteClient | None = None,
 ) -> Dict[str, Any]:
     """Audit-mode for a simple single-leg, single-selection bet (e.g., WIN). Writes to BigQuery."""
     product_leg_id = None
@@ -102,7 +121,7 @@ def place_audit_simple_bet(
     resp = None; err = None; sent_variables = None
     if post:
         try:
-            client = ToteClient()
+            client = client or ToteClient()
             mutation_v1 = "mutation PlaceBets($input: PlaceBetsInput!) { placeBets(input:$input){ ticket{ id toteId bets{ nodes{ id toteId placement{ status rejectionReason } } } } } }"
             variables_v1 = {"input": {"ticketId": f"ticket-{uuid.uuid4()}", "bets": [bet_v1]}}
             sent_variables = variables_v1
@@ -131,7 +150,7 @@ def place_audit_simple_bet(
 
 
 def place_audit_superfecta(
-    conn,
+    sink,
     *,
     product_id: str,
     selection: Optional[str] = None,
@@ -141,6 +160,8 @@ def place_audit_superfecta(
     post: bool = False,
     stake_type: str = "total",  # 'total' or 'line' for v1 schema
     placement_product_id: Optional[str] = None,
+    mode: str | None = None,
+    client: ToteClient | None = None,
 ) -> Dict[str, Any]:
     """Audit-mode Superfecta bet. Supports single selection or a list (multiple bets).
 
@@ -164,26 +185,33 @@ def place_audit_superfecta(
         line_stake = float(stake) / num_lines if num_lines > 0 else 0.0
 
     # Map selection strings to GraphQL legs structure using tote_product_selections
-    rows = conn.execute(
-        "SELECT product_leg_id, selection_id, number, leg_index FROM tote_product_selections WHERE product_id=?",
-        (product_id,)
-    ).fetchall()
     by_number: Dict[int, str] = {}
     product_leg_id: Optional[str] = None
-    for r in rows:
-        pli, sid, num, li = r[0], r[1], r[2], r[3]
-        if product_leg_id is None and pli:
-            product_leg_id = pli
-        try:
-            if num is not None and int(li) == 1:  # single leg assumed
-                by_number[int(num)] = sid
-        except Exception:
-            pass
+    try:
+        rows = _bq_query_rows(
+            sink,
+            "SELECT product_leg_id, selection_id, number, leg_index FROM tote_product_selections WHERE product_id=@pid",
+            {"pid": product_id},
+        )
+        for r in rows:
+            pli = r.get("product_leg_id")
+            sid = r.get("selection_id")
+            num = r.get("number")
+            li = r.get("leg_index")
+            if product_leg_id is None and pli:
+                product_leg_id = pli
+            try:
+                if num is not None and int(li) == 1:
+                    by_number[int(num)] = sid
+            except Exception:
+                pass
+    except Exception:
+        by_number = {}
     print(f"[AuditBet] by_number from DB: {by_number}")
-    # If mapping missing, fetch live from Tote GraphQL (handles WEB_USE_BIGQUERY case where SQLite lacks selections)
+    # If mapping missing, fetch live from Tote GraphQL (handles cases where selections were not yet persisted)
     if not by_number:
         try:
-            client = ToteClient()
+            client = client or ToteClient()
             query = """
             query ProductLegs($id: String){
               product(id: $id){
@@ -212,14 +240,16 @@ def place_audit_superfecta(
                             by_number[n_int] = sid
                             # Cache locally for future requests
                             try:
-                                conn.execute(
-                                    """
-                                    INSERT OR REPLACE INTO tote_product_selections(product_id,leg_index,product_leg_id,selection_id,competitor,number)
-                                    VALUES(?,?,?,?,?,?)
-                                    """,
-                                    (product_id, li, product_leg_id, sid, comp.get("name"), n_int),
-                                )
-                                conn.commit()
+                                sink.upsert_tote_product_selections([
+                                    {
+                                        "product_id": product_id,
+                                        "leg_index": li,
+                                        "product_leg_id": product_leg_id,
+                                        "selection_id": sid,
+                                        "competitor": comp.get("name"),
+                                        "number": n_int,
+                                    }
+                                ])
                             except Exception:
                                 pass
                     except Exception:
@@ -266,8 +296,10 @@ def place_audit_superfecta(
         if missing:
             err_msg += f": unknown numbers {{{','.join(sorted(set(missing)))}}} for product {product_id}"
         # Record audit row with error and return early
-        bet_id = _record_audit(
-            conn,
+        bet_id = f"{product_id}:{_now_ms()}"
+        _record_audit_bq(
+            sink,
+            bet_id=bet_id,
             product_id=product_id,
             selection=",".join(bet_lines),
             stake=stake,
@@ -313,7 +345,7 @@ def place_audit_superfecta(
     sent_variables = None
     if post:
         try:
-            client = ToteClient()
+            client = client or ToteClient()
             # Try v1 (ticket) first for compatibility with audit endpoint
             mutation_v1 = """
             mutation PlaceBets($input: PlaceBetsInput!) {
@@ -405,14 +437,35 @@ def place_audit_superfecta(
         "currency": currency,
         "variables": sent_variables,
     }
-    bet_id = _record_audit(conn, product_id=product_id, selection=sel_str, stake=stake, currency=currency, payload=stored_req, response=resp, error=err)
+    bet_id = f"{product_id}:{_now_ms()}"
+    _record_audit_bq(
+        sink,
+        bet_id=bet_id,
+        product_id=product_id,
+        selection=sel_str,
+        stake=stake,
+        currency=currency,
+        payload=stored_req,
+        response=resp,
+        error=err,
+        placement_status=placement_status,
+    )
     out = {"bet_id": bet_id, "error": err, "response": resp, "placement_status": placement_status}
     if failure_reason:
         out["failure_reason"] = failure_reason
     return out
 
 
-def place_audit_win(conn, *, event_id: str, selection_id: str, stake: float, currency: str = "GBP", post: bool = False) -> Dict[str, Any]:
+def place_audit_win(
+    sink,
+    *,
+    event_id: str,
+    selection_id: str,
+    stake: float,
+    currency: str = "GBP",
+    post: bool = False,
+    client: ToteClient | None = None,
+) -> Dict[str, Any]:
     payload = {
         "eventId": event_id,
         "selectionId": selection_id,
@@ -425,7 +478,7 @@ def place_audit_win(conn, *, event_id: str, selection_id: str, stake: float, cur
     err = None
     if post:
         try:
-            client = ToteClient()
+            client = client or ToteClient()
             mutation = """
             mutation PlaceBets($input: PlaceBetsInput!) {
               placeBets(input:$input){
@@ -444,63 +497,93 @@ def place_audit_win(conn, *, event_id: str, selection_id: str, stake: float, cur
         except Exception as e:
             err = str(e)
     # Use synthetic product id for WIN audit record (event scoped)
-    bet_id = _record_audit(conn, product_id=f"WIN:{event_id}", selection=selection_id, stake=stake, currency=currency, payload=payload, response=resp, error=err)
+    bet_id = f"WIN:{event_id}:{_now_ms()}"
+    _record_audit_bq(
+        sink,
+        bet_id=bet_id,
+        product_id=f"WIN:{event_id}",
+        selection=selection_id,
+        stake=stake,
+        currency=currency,
+        payload=payload,
+        response=resp,
+        error=err,
+    )
     return {"bet_id": bet_id, "error": err, "response": resp}
 
 
-def refresh_bet_status(conn, *, bet_id: str, post: bool = False) -> Dict[str, Any]:
-    """Attempt to refresh bet status from Tote API if provider bet id is available in response_json.
+def refresh_bet_status(sink, *, bet_id: str, post: bool = False) -> Dict[str, Any]:
+    """Attempt to refresh audit bet status stored in BigQuery.
 
-    For audit-mode, uses test headers if post=True. If no provider id, marks as 'pending' and returns.
+    Infers a provider bet id from the stored response_json and optionally queries the Tote API
+    (audit endpoint by default) to update the stored status.
     """
-    row = conn.execute("SELECT response_json, mode FROM tote_bets WHERE bet_id=?", (bet_id,)).fetchone()
-    if not row:
+    rows = _bq_query_rows(
+        sink,
+        "SELECT response_json, mode FROM tote_audit_bets WHERE bet_id=@bid LIMIT 1",
+        {"bid": bet_id},
+    )
+    if not rows:
         return {"error": "unknown bet_id"}
-    resp_json = row[0]
-    mode = row[1]
+    resp_json = (rows[0] or {}).get("response_json")
+    mode = (rows[0] or {}).get("mode") or "audit"
+
     provider_id = None
     try:
         if resp_json:
             d = json.loads(resp_json)
-            # Try common keys
-            provider_id = d.get('response',{}).get('betId') or d.get('response',{}).get('id') or d.get('betId')
+            resp = d.get("response") or {}
+            ticket = (resp.get("placeBets") or {}).get("ticket")
+            if ticket and isinstance(ticket, dict):
+                nodes = (ticket.get("bets") or {}).get("nodes") or []
+                if nodes:
+                    provider_id = nodes[0].get("toteId") or nodes[0].get("id")
+            if not provider_id:
+                results = (resp.get("placeBets") or {}).get("results") or []
+                if results:
+                    provider_id = results[0].get("toteBetId")
+            provider_id = provider_id or d.get("betId") or d.get("id")
     except Exception:
         provider_id = None
-    status_payload = None; err = None
+
+    status_payload = None
+    err = None
     if provider_id and post:
         try:
             client = ToteClient()
-            # Use connections GraphQL for status, if available
-            # Placeholder query; adjust to real schema
             query = """
             query Ticket($id: ID!){
               ticket(id:$id){ id toteId bets{ nodes{ id toteId placement{ status } } } }
             }
             """
-            try:
-                # Try audit endpoint first for audit bets
-                if mode == 'audit':
-                    status_payload = client.graphql_audit(query, {"id": provider_id})
-                else:
-                    status_payload = client.graphql(query, {"id": provider_id})
-            except Exception:
-                status_payload = None
+            if str(mode).lower() == "audit":
+                status_payload = client.graphql_audit(query, {"id": provider_id})
+            else:
+                status_payload = client.graphql(query, {"id": provider_id})
         except Exception as e:
             err = str(e)
-    # Update DB
-    outcome = None
-    settled_ts = None
-    if status_payload:
-        try:
-            outcome = status_payload.get('status') or status_payload.get('outcome')
-            settled_ts = _now_ms()
-        except Exception:
-            pass
-    conn.execute(
-        "UPDATE tote_bets SET result_json=COALESCE(result_json, ?), outcome=COALESCE(?, outcome), settled_ts=COALESCE(?, settled_ts) WHERE bet_id=?",
-        (json.dumps(status_payload) if status_payload else None, outcome, settled_ts, bet_id)
-    )
-    return {"bet_id": bet_id, "provider_id": provider_id, "error": err, "status": status_payload, "outcome": outcome}
+
+    try:
+        if status_payload and isinstance(status_payload, dict):
+            st = None
+            try:
+                ticket = (status_payload.get("ticket") or {})
+                nodes = (ticket.get("bets") or {}).get("nodes") or []
+                if nodes:
+                    st = (nodes[0].get("placement") or {}).get("status")
+            except Exception:
+                st = None
+            if st:
+                from google.cloud import bigquery
+                job_cfg = bigquery.QueryJobConfig(query_parameters=[
+                    bigquery.ScalarQueryParameter("st", "STRING", st),
+                    bigquery.ScalarQueryParameter("bid", "STRING", bet_id),
+                ])
+                sink.query("UPDATE tote_audit_bets SET status=@st WHERE bet_id=@bid", job_config=job_cfg)
+    except Exception:
+        pass
+
+    return {"bet_id": bet_id, "provider_id": provider_id, "error": err, "status": status_payload}
 
 
 def audit_list_bets(*, since_iso: Optional[str] = None, until_iso: Optional[str] = None, first: int = 20) -> Dict[str, Any]:
@@ -529,29 +612,28 @@ def audit_list_bets(*, since_iso: Optional[str] = None, until_iso: Optional[str]
         return {"error": str(e)}
 
 
-def sync_bets_from_api(conn, api_data: Dict[str, Any]) -> int:
-    """Update tote_bets outcome/settled_ts by matching toteId from API data to response_json contents (best-effort)."""
+def sync_bets_from_api(sink, api_data: Dict[str, Any]) -> int:
+    """Best-effort: update tote_audit_bets.status by matching toteId from API data to stored response_json."""
     nodes = (((api_data or {}).get("bets") or {}).get("nodes")) if isinstance(api_data, dict) else None
     if nodes is None:
         return 0
-    import time as _t
     updated = 0
+    from google.cloud import bigquery
     for n in nodes:
         try:
             bet_tid = n.get("toteId")
             status = ((n.get("placement") or {}).get("status"))
             if not bet_tid or not status:
                 continue
-            # Find rows whose response_json contains this toteId (very simple search)
-            rows = conn.execute("SELECT bet_id, response_json FROM tote_bets WHERE response_json LIKE ?", (f"%{bet_tid}%",)).fetchall()
-            for r in rows:
-                bid = r[0]
-                conn.execute(
-                    "UPDATE tote_bets SET outcome=?, settled_ts=? WHERE bet_id=?",
-                    (status, int(_t.time()*1000), bid)
-                )
-                updated += 1
+            job_cfg = bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("tid", "STRING", bet_tid),
+                bigquery.ScalarQueryParameter("st", "STRING", status),
+            ])
+            sink.query(
+                "UPDATE tote_audit_bets SET status=@st WHERE response_json LIKE CONCAT('%', @tid, '%')",
+                job_config=job_cfg,
+            )
+            updated += 1
         except Exception:
             continue
-    conn.commit()
     return updated

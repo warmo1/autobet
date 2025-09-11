@@ -7,30 +7,22 @@
     <p class="text-muted">A log of all bets placed in both Live and Audit mode.</p>
 
     <form method="GET" action="{{ url_for('audit_bets_page') }}" class="mb-4 p-3 border rounded bg-light">
-        <div class="form-row">
-            <div class="form-group col-md-3">
-                <label for="country">Country</label>
-                <select name="country" id="country" class="form-control">
+        <div class="row g-2 align-items-end">
+            <div class="col-12 col-md-3">
+                <label for="country" class="form-label">Country</label>
+                <select name="country" id="country" class="form-select">
                     <option value="">All</option>
                     {% for c in country_options or [] %}
                     <option value="{{ c }}" {% if filters.country == c %}selected{% endif %}>{{ c }}</option>
                     {% endfor %}
                 </select>
             </div>
-            <div class="form-group col-md-4">
-                <label for="venue">Venue</label>
+            <div class="col-12 col-md-6">
+                <label for="venue" class="form-label">Venue</label>
                 <input type="text" name="venue" id="venue" class="form-control" value="{{ filters.venue }}" placeholder="e.g. Ascot">
             </div>
-            <div class="form-group col-md-2">
-                <label for="from">From</label>
-                <input type="date" name="from" id="from" class="form-control" value="{{ filters.from }}">
-            </div>
-            <div class="form-group col-md-2">
-                <label for="to">To</label>
-                <input type="date" name="to" id="to" class="form-control" value="{{ filters.to }}">
-            </div>
-            <div class="form-group col-md-1 align-self-end">
-                <button type="submit" class="btn btn-primary btn-block">Filter</button>
+            <div class="col-12 col-md-3">
+                <button type="submit" class="btn btn-primary w-100">Filter</button>
             </div>
         </div>
     </form>

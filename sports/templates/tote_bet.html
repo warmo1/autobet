@@ -8,30 +8,22 @@
     <p class="text-muted">Select an event and product to place a single-line bet in either Audit or Live mode.</p>
 
     <form method="GET" action="{{ url_for('tote_bet_page') }}" class="mb-4 p-3 border rounded bg-light">
-        <div class="form-row">
-            <div class="form-group col-md-3">
-                <label for="country">Country</label>
-                <select name="country" id="country" class="form-control">
+        <div class="row g-2 align-items-end">
+            <div class="col-12 col-md-3">
+                <label for="country" class="form-label">Country</label>
+                <select name="country" id="country" class="form-select">
                     <option value="">All</option>
                     {% for c in country_options or [] %}
                     <option value="{{ c }}" {% if filters.country == c %}selected{% endif %}>{{ c }}</option>
                     {% endfor %}
                 </select>
             </div>
-            <div class="form-group col-md-4">
-                <label for="venue">Venue</label>
+            <div class="col-12 col-md-6">
+                <label for="venue" class="form-label">Venue</label>
                 <input type="text" name="venue" id="venue" class="form-control" value="{{ filters.venue }}" placeholder="e.g. Ascot">
             </div>
-            <div class="form-group col-md-2">
-                <label for="from">From</label>
-                <input type="date" name="from" id="from" class="form-control" value="{{ filters.from }}">
-            </div>
-            <div class="form-group col-md-2">
-                <label for="to">To</label>
-                <input type="date" name="to" id="to" class="form-control" value="{{ filters.to }}">
-            </div>
-            <div class="form-group col-md-1 align-self-end">
-                <button type="submit" class="btn btn-primary btn-block">Filter</button>
+            <div class="col-12 col-md-3">
+                <button type="submit" class="btn btn-primary w-100">Filter</button>
             </div>
         </div>
     </form>
@@ -75,11 +67,16 @@
                             <option value="" selected disabled>-- Select an event first --</option>
                         </select>
                     </div>
-                    <div class="col-md-6">
+                    <div class="col-md-6" id="simple-section">
                         <label for="selection_id" class="form-label">Runner / Selection</label>
                         <select class="form-select" id="selection_id" name="selection_id" required disabled>
                             <option value="" selected disabled>-- Select a product first --</option>
                         </select>
+                    </div>
+                    <div class="col-12 d-none" id="sf-section">
+                        <label for="selections_text" class="form-label">Selections (one per line, e.g., 3-7-1-5)</label>
+                        <textarea class="form-control" id="selections_text" name="selections_text" rows="4" placeholder="3-7-1-5\n1-2-3-4"></textarea>
+                        <small class="text-muted">For combination bets (EXACTA/TRIFECTA/SUPERFECTA), enter ordered finish positions separated by dashes.</small>
                     </div>
                     <div class="col-md-3">
                         <label for="stake" class="form-label">Stake</label>
@@ -93,7 +90,7 @@
                         <input type="text" class="form-control" id="currency" name="currency" value="GBP" required>
                     </div>
                 </div>
-                <button type="submit" class="btn btn-primary mt-4">Place Audit Bet</button>
+                <button type="submit" class="btn btn-primary mt-4">Place Bet</button>
             </form>
         </div>
     </div>
@@ -114,21 +111,33 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!eventId) return;
         fetch(`/api/tote/event_products/${eventId}`).then(r => r.json()).then(data => {
             productSelect.innerHTML = '<option value="" selected disabled>-- Select a Bet Type --</option>';
-            data.forEach(p => productSelect.add(new Option(`${p.bet_type} (${p.status})`, p.product_id)));
+            data.forEach(p => {
+                const opt = new Option(`${p.bet_type} (${p.status})`, p.product_id);
+                opt.dataset.bt = (p.bet_type || '').toUpperCase();
+                productSelect.add(opt);
+            });
             productSelect.disabled = false;
         });
     });
 
     productSelect.addEventListener('change', function() {
         const productId = this.value;
+        const selectedOpt = this.options[this.selectedIndex];
+        const bt = (selectedOpt && selectedOpt.dataset.bt) ? selectedOpt.dataset.bt : '';
+        const isCombo = ['EXACTA','TRIFECTA','SUPERFECTA'].includes(bt);
+        // Toggle UI sections
+        document.getElementById('sf-section').classList.toggle('d-none', !isCombo);
+        document.getElementById('simple-section').classList.toggle('d-none', isCombo);
         selectionSelect.disabled = true;
         selectionSelect.innerHTML = '<option>Loading...</option>';
         if (!productId) return;
-        fetch(`/api/tote/product_runners?product_id=${productId}`).then(r => r.json()).then(data => {
-            selectionSelect.innerHTML = '<option value="" selected disabled>-- Select a Runner --</option>';
-            data.forEach(r => selectionSelect.add(new Option(`#${r.number} - ${r.competitor}`, r.selection_id)));
-            selectionSelect.disabled = false;
-        });
+        if (!isCombo) {
+            fetch(`/api/tote/product_runners?product_id=${productId}`).then(r => r.json()).then(data => {
+                selectionSelect.innerHTML = '<option value="" selected disabled>-- Select a Runner --</option>';
+                data.forEach(r => selectionSelect.add(new Option(`#${r.number} - ${r.competitor}`, r.selection_id)));
+                selectionSelect.disabled = false;
+            });
+        }
     });
 });
 </script>

@@ -148,9 +148,10 @@ def _viability_local_perm(N: int, K: int, O: float, M: int, l: float, t: float, 
     alpha = (M_adj / C) if C > 0 else 0.0
     S = M_adj * l
     S_inc = S if inc_self else 0.0
-    # auto f-share
-    denom = (C * l * l + O)
-    f_auto = float((C * l * l) / denom) if (C > 0 and denom > 0) else 0.0
+    # auto f-share (fix units): approximate others' stake on a single permutation as O/C
+    # Your stake on a single permutation is l -> f_auto = l / (l + O/C) = (C*l) / (O + C*l)
+    denom = (O + C * l)
+    f_auto = float((C * l) / denom) if (C > 0 and denom > 0) else 0.0
     f_used = float(f_fix) if (f_fix is not None) else f_auto
     NetPool_now = mult * (((1.0 - t) * (O + S_inc)) + R)
     ExpReturn = alpha * f_used * NetPool_now
@@ -245,7 +246,7 @@ def index():
     """Simplified dashboard with quick links and bank widget."""
     from datetime import datetime, timedelta, timezone
 
-    # Bankroll is a placeholder as it was stored in SQLite
+    # Bankroll placeholder sourced from config
     bankroll = cfg.paper_starting_bankroll
 
     # UI Improvement: Show all upcoming events in the next 24 hours, not just horse racing in the next 60 mins.
@@ -880,7 +881,7 @@ def tote_calculators_page():
                     flash("No probable odds found in BigQuery for this product.", "warning")
             except Exception as e:
                 flash(f"Probable odds fetch (BQ) failed: {e}", "error")
-        # Skip legacy SQLite fallback; rely solely on BQ probable odds or selection units
+        # Skip legacy local fallback; rely solely on BigQuery probable odds or selection units
         # If no runners found, the calculators will show a warning below.
         if (not runners) or len(runners) == 0:
             runners = []
@@ -1407,7 +1408,12 @@ def tote_audit_superfecta_post():
     stake = (request.form.get("stake") or "").strip()
     currency = (request.form.get("currency") or "GBP").strip() or "GBP"
     mode = request.form.get("mode", "audit")
-    if mode != "live": mode = "audit"
+    if mode != "live":
+        mode = "audit"
+    # Gate live placement behind env flag
+    if mode == "live" and (os.getenv("TOTE_LIVE_ENABLED", "0").lower() not in ("1","true","yes","on")):
+        flash("Live betting disabled (TOTE_LIVE_ENABLED not set). Using audit mode.", "warning")
+        mode = "audit"
     if not pid or (not sel and not sels_raw):
         flash("Missing product or selection(s)", "error")
         return redirect(request.referrer or url_for('tote_superfecta_page'))
@@ -1534,9 +1540,9 @@ def tote_audit_superfecta_post():
     if mode == 'audit':
         # Use the dedicated audit endpoint provided.
         audit_endpoint = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
-        # Create a client and set its api_url property to point to the audit endpoint.
+        # Create a client and point its base_url to the audit endpoint.
         client_for_placement = ToteClient()
-        client_for_placement.api_url = audit_endpoint
+        client_for_placement.base_url = audit_endpoint
     else:
         # For 'live' mode, use the default client which points to the live endpoint.
         client_for_placement = ToteClient()
@@ -1589,8 +1595,6 @@ def audit_bets_page():
     # Filters
     country = (request.args.get("country") or "").strip().upper()
     venue = (request.args.get("venue") or "").strip()
-    date_from = (request.args.get("from") or "").strip()
-    date_to = (request.args.get("to") or "").strip()
     limit = max(1, int(request.args.get("limit", "100") or 100))
     page = max(1, int(request.args.get("page", "1") or 1))
     offset = (page - 1) * limit
@@ -1604,12 +1608,6 @@ def audit_bets_page():
     if venue:
         where.append("UPPER(COALESCE(e.venue, p.venue)) LIKE UPPER(@venue)")
         params["venue"] = f"%{venue}%"
-    if date_from:
-        where.append("DATE(TIMESTAMP_MILLIS(b.ts_ms)) >= @date_from")
-        params["date_from"] = date_from
-    if date_to:
-        where.append("DATE(TIMESTAMP_MILLIS(b.ts_ms)) <= @date_to")
-        params["date_to"] = date_to
 
     base_sql = """
         SELECT
@@ -1691,7 +1689,7 @@ def audit_bets_page():
         live_bets=live_bets,
         audit_bets=audit_bets,
         filters={
-            "country": country, "venue": venue, "from": date_from, "to": date_to,
+            "country": country, "venue": venue,
             "limit": limit, "page": page, "total": total,
         },
         country_options=(countries_df['country'].tolist() if not countries_df.empty else []),
@@ -2278,10 +2276,15 @@ def manual_calculator_page():
             # New weighting multipliers
             calc_params["key_horse_mult"] = float(request.form.get("key_horse_mult", calc_params["key_horse_mult"]))
             calc_params["poor_horse_mult"] = float(request.form.get("poor_horse_mult", calc_params["poor_horse_mult"]))
-            calc_params["concentration"] = float(request.form.get("concentration", calc_params["concentration"]))
-            calc_params["market_inefficiency"] = float(request.form.get("market_inefficiency", calc_params["market_inefficiency"]))
+            # Accept 0..1 or 0..100 inputs and normalize to 0..1 internally
+            conc_raw = float(request.form.get("concentration", calc_params["concentration"]))
+            mi_raw = float(request.form.get("market_inefficiency", calc_params["market_inefficiency"]))
+            calc_params["concentration"] = conc_raw / 100.0 if conc_raw > 1.0 else conc_raw
+            calc_params["market_inefficiency"] = mi_raw / 100.0 if mi_raw > 1.0 else mi_raw
             calc_params["desired_profit_pct"] = float(request.form.get("desired_profit_pct", calc_params["desired_profit_pct"]))
-            calc_params["take_rate"] = float(request.form.get("take_rate", calc_params["take_rate"]))
+            # Takeout rate: accept percent (0..100) or fraction (0..1)
+            tr_raw = float(request.form.get("take_rate", calc_params["take_rate"]))
+            calc_params["take_rate"] = tr_raw / 100.0 if tr_raw > 1.0 else tr_raw
             calc_params["net_rollover"] = float(request.form.get("net_rollover", calc_params["net_rollover"]))
             calc_params["inc_self"] = request.form.get("inc_self") == "1"
             calc_params["div_mult"] = float(request.form.get("div_mult", calc_params["div_mult"]))
@@ -2293,8 +2296,8 @@ def manual_calculator_page():
                 errors.append("Number of runners must be positive.")
             if calc_params["bankroll"] <= 0:
                 errors.append("Bankroll must be positive.")
-            if not (0 <= calc_params["take_rate"] < 1):
-                errors.append("Takeout rate must be between 0 and 1 (e.g., 0.30 for 30%).")
+            if not (0 <= calc_params["take_rate"] <= 1):
+                errors.append("Takeout rate must be between 0% and 100%.")
 
             # Parse runner grid
             runners_from_form = []
@@ -2335,7 +2338,12 @@ def manual_calculator_page():
 
             # Map runner IDs to their final weights and names
             runners_with_strengths = [
-                {"id": i + 1, "name": calc_params["runners"][i]["name"], "strength": runner_weights[i]}
+                {
+                    "id": i + 1,
+                    "name": calc_params["runners"][i]["name"],
+                    "strength": runner_weights[i],
+                    "odds": float(calc_params["runners"][i]["odds"]),
+                }
                 for i in range(calc_params["num_runners"])
             ]
             
@@ -2376,41 +2384,62 @@ def manual_calculator_page():
 
             for m in range(1, C + 1):
                 covered_lines = pl_permutations[:m]
-                hit_rate = sum(p['probability'] for p in covered_lines)
-                
                 S = calc_params['bankroll']
                 S_inc = S if calc_params['inc_self'] else 0.0
                 O = calc_params['pool_gross_other']
                 t = calc_params['take_rate']
                 R = calc_params['net_rollover']
                 mult = calc_params['div_mult']
-                
-                # Apply market inefficiency to O for f-share calculation
-                O_effective = O * (1.0 - calc_params['market_inefficiency'])
 
-                # Enhanced f-share calculation. Assumes others' money 'O' is spread according to PL probabilities.
-                # Our f-share on any of our covered lines is our effective stake density vs the market's.
-                if hit_rate > 0:
-                    stake_density = S / hit_rate
-                    f_auto = stake_density / (stake_density + O_effective)
-                else:
-                    f_auto = 0.0
-                f_used = float(calc_params['f_fix']) if (calc_params['f_fix'] is not None) else f_auto
-                
+                # Crowd distribution parameter and effective others' money
+                mi = calc_params['market_inefficiency']
+                beta = max(0.1, 1.0 - 0.6 * mi)
+                O_effective = O * (1.0 - mi)
+
+                # Concentration -> weighting exponent
+                gamma = 1.0 + 2.0 * calc_params['concentration']
+                probs = [max(0.0, p['probability']) for p in covered_lines]
+                weights = [(p ** gamma) for p in probs]
+                sum_w = sum(weights) or 1.0
+                stakes = [S * (w / sum_w) for w in weights]
+
+                # Crowd allocation across covered lines
+                def _crowd_score(line):
+                    q = 1.0
+                    for rd in line['runners_detail']:
+                        try:
+                            od = float(rd.get('odds') or 0.0)
+                            q *= (1.0 / od) ** beta if od > 0 else 0.0
+                        except Exception:
+                            q *= 0.0
+                    return q
+                qs = [_crowd_score(line) for line in covered_lines]
+                sum_q = sum(qs) or 1.0
+
+                # Net pool and EV computation
                 net_pool_if_bet = mult * (((1.0 - t) * (O + S_inc)) + R)
-                expected_return = hit_rate * f_used * net_pool_if_bet
-                expected_profit = expected_return - S
-                
-                ev_grid.append({"lines_covered": m, "hit_rate": hit_rate, "expected_profit": expected_profit})
-                
-                if expected_profit > max_ev:
-                    max_ev = expected_profit
+                ev_total = 0.0
+                hit_rate = 0.0
+                fshare_weighted = 0.0
+                for i, line in enumerate(covered_lines):
+                    p_i = probs[i]
+                    stake_i = stakes[i]
+                    others_i = O_effective * (qs[i] / sum_q)
+                    f_i = float(calc_params['f_fix']) if (calc_params['f_fix'] is not None) else (stake_i / (stake_i + others_i) if (stake_i + others_i) > 0 else 0.0)
+                    ev_total += p_i * f_i * net_pool_if_bet - stake_i
+                    hit_rate += p_i
+                    fshare_weighted += p_i * f_i
+
+                ev_grid.append({"lines_covered": m, "hit_rate": hit_rate, "expected_profit": ev_total})
+
+                if ev_total > max_ev:
+                    max_ev = ev_total
                     optimal_ev_scenario = {
                         "lines_covered": m,
                         "hit_rate": hit_rate,
-                        "expected_profit": expected_profit,
-                        "expected_return": expected_return,
-                        "f_share_used": f_used,
+                        "expected_profit": ev_total,
+                        "expected_return": ev_total + S,
+                        "f_share_used": (fshare_weighted / hit_rate) if hit_rate > 0 else 0.0,
                         "net_pool_if_bet": net_pool_if_bet,
                         "total_stake": S,
                     }
@@ -2438,8 +2467,8 @@ def manual_calculator_page():
                         }
                         break
             
-            # The base for our adjustments is the target profit scenario, or the max EV scenario as a fallback.
-            base_scenario = target_profit_scenario if target_profit_scenario else optimal_ev_scenario
+                # The base for our adjustments is the target profit scenario, or the max EV scenario as a fallback.
+                base_scenario = target_profit_scenario if target_profit_scenario else optimal_ev_scenario
 
             # --- Strategy Adjustment & Final Calculation ---
             display_scenario = None
@@ -2508,47 +2537,64 @@ def manual_calculator_page():
                 
                 # Calculate the final number of lines to cover based on concentration slider
                 final_lines_to_cover = max(1, int(round(base_lines_to_cover * (1.0 - concentration) + 1.0 * concentration)))
-                # Build the scenario that will actually be displayed and used for staking
                 final_covered_lines = pl_permutations[:final_lines_to_cover]
-                final_hit_rate = sum(p['probability'] for p in final_covered_lines)
-                
+
+                # Recompute EV/stakes for the final displayed scenario using gamma weighting and crowd allocation
                 S = calc_params['bankroll']
                 S_inc = S if calc_params['inc_self'] else 0.0
                 O = calc_params['pool_gross_other']
                 t = calc_params['take_rate']
                 R = calc_params['net_rollover']
                 mult = calc_params['div_mult']
-                
-                # Apply market inefficiency to O for f-share calculation
-                O_effective = O * (1.0 - calc_params['market_inefficiency'])
+                mi = calc_params['market_inefficiency']
+                beta = max(0.1, 1.0 - 0.6 * mi)
+                O_effective = O * (1.0 - mi)
+                gamma = 1.0 + 2.0 * concentration
 
-                # Enhanced f-share calculation for the final displayed scenario.
-                if final_hit_rate > 0:
-                    stake_density = S / final_hit_rate
-                    f_auto = stake_density / (stake_density + O_effective)
-                else:
-                    f_auto = 0.0
-                f_used = float(calc_params['f_fix']) if (calc_params['f_fix'] is not None) else f_auto
-                
+                probs_f = [max(0.0, p['probability']) for p in final_covered_lines]
+                weights_f = [(p ** gamma) for p in probs_f]
+                sum_wf = sum(weights_f) or 1.0
+                stakes_f = [S * (w / sum_wf) for w in weights_f]
+                def _crowd_score(line):
+                    q = 1.0
+                    for rd in line['runners_detail']:
+                        try:
+                            od = float(rd.get('odds') or 0.0)
+                            q *= (1.0 / od) ** beta if od > 0 else 0.0
+                        except Exception:
+                            q *= 0.0
+                    return q
+                qs_f = [_crowd_score(line) for line in final_covered_lines]
+                sum_qf = sum(qs_f) or 1.0
                 net_pool_if_bet = mult * (((1.0 - t) * (O + S_inc)) + R)
-                expected_return = final_hit_rate * f_used * net_pool_if_bet
-                expected_profit = expected_return - S
-                
+
+                expected_return = 0.0
+                expected_profit = 0.0
+                final_hit_rate = 0.0
+                fshare_weighted = 0.0
+                staking_plan = []
+                for i, line in enumerate(final_covered_lines):
+                    p_i = probs_f[i]
+                    stake_i = stakes_f[i]
+                    others_i = O_effective * (qs_f[i] / sum_qf)
+                    f_i = float(calc_params['f_fix']) if (calc_params['f_fix'] is not None) else (stake_i / (stake_i + others_i) if (stake_i + others_i) > 0 else 0.0)
+                    expected_return += p_i * f_i * net_pool_if_bet
+                    expected_profit += p_i * f_i * net_pool_if_bet - stake_i
+                    final_hit_rate += p_i
+                    fshare_weighted += p_i * f_i
+                    entry = dict(line)
+                    entry['stake'] = stake_i
+                    staking_plan.append(entry)
+
                 display_scenario = {
                     "lines_covered": final_lines_to_cover,
                     "hit_rate": final_hit_rate,
                     "expected_profit": expected_profit,
                     "expected_return": expected_return,
-                    "f_share_used": f_used,
+                    "f_share_used": (fshare_weighted / final_hit_rate) if final_hit_rate > 0 else 0.0,
                     "net_pool_if_bet": net_pool_if_bet,
                     "total_stake": S,
                 }
-
-                # Calculate the weighted staking plan for the final scenario
-                prob_sum_final = sum(p['probability'] for p in final_covered_lines)
-                for line in final_covered_lines:
-                    line['stake'] = (line['probability'] / prob_sum_final) * calc_params['bankroll'] if prob_sum_final > 0 else 0
-                staking_plan = final_covered_lines
             
             results["pl_model"] = {
                 "best_scenario": display_scenario,           # final scenario after concentration slider
@@ -2570,75 +2616,24 @@ def manual_calculator_page():
 
 @app.route("/api/tote/bet_status")
 def api_tote_bet_status():
-    from .providers.tote_bets import refresh_bet_status
-    # This API relies on the 'tote_bets' table, which is SQLite-only.
-    return app.response_class(json.dumps({"error": "Bet status API not available in BigQuery-only mode."}),
-                              mimetype="application/json", status=400)
-    bet_id = (request.args.get("bet_id") or "").strip()
-    post = (request.args.get("post") or "").lower() in ("1","true","yes","on")
-    if not bet_id:
-        return app.response_class(json.dumps({"error": "missing bet_id"}), mimetype="application/json", status=400)
-    conn = _get_db_conn(); init_schema(conn)
-    res = refresh_bet_status(conn, bet_id=bet_id, post=post)
-    conn.commit(); conn.close()
-    return app.response_class(json.dumps(res), mimetype="application/json")
+    # Not available in the current BigQuery-only mode.
+    return app.response_class(
+        json.dumps({"error": "Bet status API not available"}),
+        mimetype="application/json",
+        status=400,
+    )
 
 @app.route("/api/tote/placement_id")
 def api_tote_placement_id():
-    pid = (request.args.get("product_id") or "").strip()
-    # This API relies on the 'tote_bets' table, which is SQLite-only.
-    return app.response_class(json.dumps({"error": "Placement ID API not available in BigQuery-only mode."}),
-                              mimetype="application/json", status=400)
-    if not pid:
-        return app.response_class(json.dumps({"error": "missing product_id"}), mimetype="application/json", status=400)
-    conn = _get_db_conn(); init_schema(conn)
-    try:
-        row = conn.execute("SELECT event_id, substr(start_iso,1,10) FROM tote_products WHERE product_id=?", (pid,)).fetchone()
-        if not row:
-            return app.response_class(json.dumps({"product_id": pid, "placement_product_id": pid, "method": "original", "note": "product not found locally"}), mimetype="application/json")
-        event_id = row[0]; day = row[1]
-        placement_pid = pid; method = "original"
-        selling_status = None
-        try:
-            from .providers.tote_api import ToteClient
-            client = ToteClient()
-            q2 = """
-            query Products($date: Date, $betTypes: [BetTypeCode!], $status: BettingProductSellingStatus, $first: Int){
-              products(date:$date, betTypes:$betTypes, sellingStatus:$status, first:$first){
-                nodes{ id eventId selling{status} }
-              }
-            }
-            """
-            vars = {"date": day, "betTypes": ["SUPERFECTA"], "status": "OPEN", "first": 1000}
-            pdata2 = client.graphql(q2, vars)
-            nodes = ((pdata2.get("products") or {}).get("nodes")) or []
-            for n in nodes:
-                if (n.get("eventId") == event_id) and ((n.get("selling") or {}).get("status","OPEN").upper() == "OPEN"):
-                    placement_pid = n.get("id") or placement_pid
-                    selling_status = (n.get("selling") or {}).get("status")
-                    method = "products_match"
-                    break
-            if method == "original":
-                placement_pid = f"SUPERFECTA:{event_id}"
-                method = "alias"
-        except Exception:
-            pass
-        out = {
-            "original_product_id": pid,
-            "placement_product_id": placement_pid,
-            "method": method,
-            "event_id": event_id,
-            "date": day,
-            "selling_status": selling_status,
-        }
-        return app.response_class(json.dumps(out), mimetype="application/json")
-    finally:
-        try: conn.close()
-        except Exception: pass
+    # Not available in the current BigQuery-only mode.
+    return app.response_class(
+        json.dumps({"error": "Placement ID API not available"}),
+        mimetype="application/json",
+        status=400,
+    )
 
 @app.route("/models")
 def models_page():
-    # This page relies on SQLite-only tables like 'models' and 'predictions'.
     flash("Models pages are temporarily disabled.", "warning")
     return redirect(url_for('index'))
     conn = _get_db_conn(); init_schema(conn)
@@ -2664,7 +2659,7 @@ def models_page():
 
 @app.route("/models/<model_id>/eval")
 def model_eval_page(model_id: str):
-    # This page relies on SQLite-only tables like 'predictions', 'hr_horse_runs', 'hr_horses', 'features_runner_event'.
+    # This page relies on legacy local tables.
     flash("Model evaluation is temporarily disabled.", "warning")
     return redirect(url_for('index'))
     conn = _get_db_conn(); init_schema(conn)
@@ -2745,7 +2740,7 @@ def model_eval_page(model_id: str):
 
 @app.route("/models/<model_id>/superfecta")
 def model_superfecta_eval_page(model_id: str):
-    # This page relies on SQLite-only tables like 'predictions', 'superfecta_eval', 'tote_products'.
+    # This page relies on legacy local tables.
     flash("Model pages are temporarily disabled.", "warning")
     return redirect(url_for('index'))
     conn = _get_db_conn(); init_schema(conn)
@@ -2798,7 +2793,7 @@ def model_superfecta_eval_page(model_id: str):
 
 @app.route("/models/<model_id>/eval/event/<event_id>")
 def model_event_eval_page(model_id: str, event_id: str):
-    # This page relies on SQLite-only tables like 'predictions', 'hr_horses', 'hr_horse_runs', 'tote_events', 'tote_products'.
+    # This page relies on legacy local tables.
     flash("Model pages are temporarily disabled.", "warning")
     return redirect(url_for('index'))
     """Drill-down: show predicted probabilities vs actual finish for one event."""
@@ -2876,8 +2871,12 @@ def tote_bet_page():
         product_id = request.form.get("product_id")
         stake_str = request.form.get("stake")
         currency = request.form.get("currency", "GBP")
-        mode = request.form.get("mode", "audit")
-        if mode != "live": mode = "audit"
+    mode = request.form.get("mode", "audit")
+    if mode != "live":
+        mode = "audit"
+    if mode == "live" and (os.getenv("TOTE_LIVE_ENABLED", "0").lower() not in ("1","true","yes","on")):
+        flash("Live betting disabled (TOTE_LIVE_ENABLED not set). Using audit mode.", "warning")
+        mode = "audit"
 
         # Add logging to confirm which mode is being used for the bet.
         print(f"[BetPlacement] Attempting to place bet with product_id={product_id}, stake={stake_str}, mode='{mode}'")
@@ -2925,7 +2924,7 @@ def tote_bet_page():
             if mode == 'audit':
                 audit_endpoint = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
                 client_for_placement = ToteClient()
-                client_for_placement.api_url = audit_endpoint
+                client_for_placement.base_url = audit_endpoint
             else:
                 client_for_placement = ToteClient()
 
@@ -2949,9 +2948,9 @@ def tote_bet_page():
             if mode == 'audit':
                 # Use the dedicated audit endpoint to prevent funding errors on paper bets.
                 audit_endpoint = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
-                # Create a client and set its api_url property to point to the audit endpoint.
+                # Create a client and point its base_url to the audit endpoint.
                 client_for_placement = ToteClient()
-                client_for_placement.api_url = audit_endpoint
+                client_for_placement.base_url = audit_endpoint
             else:
                 client_for_placement = ToteClient()
 
@@ -3004,10 +3003,11 @@ def tote_bet_page():
     params["end"] = end_iso
 
     ev_sql = (
-        "SELECT event_id, name, venue, country, start_iso FROM tote_events "
+        "SELECT DISTINCT e.event_id, e.name, e.venue, e.country, e.start_iso "
+        "FROM tote_events e JOIN tote_products p USING(event_id) WHERE p.status='OPEN'"
     )
     if where:
-        ev_sql += " WHERE " + " AND ".join(where)
+        ev_sql += " AND " + " AND ".join(where)
 
     ev_sql += " ORDER BY start_iso ASC LIMIT 200"
 

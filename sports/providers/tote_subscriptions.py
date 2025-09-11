@@ -150,7 +150,7 @@ subscription {
                     else:
                         payload = (msg.get("payload") or {}).get("data") or {}
 
-                    # Store raw (SQLite only; skip for BQ)
+                    # Store raw when not using a BigQuery sink (legacy/local)
                     if not _is_bq_sink(conn):
                         try:
                             conn.execute(
