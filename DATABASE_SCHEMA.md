@@ -36,6 +36,25 @@ python -c "from autobet.sports.db import init_db; init_db()"
 
 Data is imported from various sources using scripts located in the `sports/ingest/` directory. Each script is responsible for fetching data from a specific source and inserting it into the appropriate database tables.
 
+### Tote Events → Horses and Runs
+
+- `sports/ingest/tote_events.py` calls the Tote GraphQL `events` API and extracts:
+  - `eventCompetitors` → upsert into `hr_horses` (`horse_id`, `name`, `country`).
+    - Note: The event response does not expose a horse nationality; we store the event venue’s `country.alpha2Code` as a proxy for country.
+  - Event metadata → upsert into `tote_events` (incl. status/result status and a competitors JSON snapshot for reference).
+  - If present, finishing positions → upsert into `hr_horse_runs` (with `cloth_number`/`trapNumber` mapped from competitor details).
+
+### Tote Products → Runners, Pools, Rules and Probable Odds
+
+- `sports/ingest/tote_products.py` queries `products` and upserts:
+  - `tote_products` (bet type, selling status, pool totals, event linkage)
+  - `tote_product_selections` (per-leg selections with cloth/trap numbers)
+  - `tote_bet_rules` (min/max/increment)
+  - `tote_product_dividends` (latest known dividends)
+- Probable odds are captured from `lines { nodes { legs { lineSelections { selectionId } } odds { decimal } } }` and stored as JSON batches in `raw_tote_probable_odds`. Views materialize these into tables for convenience:
+  - `vw_tote_probable_odds` – latest decimal odds per (product_id, selection_id)
+  - `vw_tote_probable_history` – time series of parsed odds
+
 ### Data Sources
 
 *   **Tote (`tote_events.py`, `tote_horse.py`, `tote_products.py`, `tote_results.py`)**: Ingests a wide range of betting data from the Tote API.

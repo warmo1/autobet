@@ -1801,6 +1801,49 @@ class BigQuerySink:
         job = client.query(sql)
         job.result()
 
+        # --- QC Views ---
+        # QC: products for today with missing runner numbers (cloth/trap)
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_qc_today_missing_runner_numbers` AS
+        SELECT DISTINCT p.product_id, p.event_id, p.event_name, p.venue, p.start_iso
+        FROM `{ds}.tote_products` p
+        LEFT JOIN `{ds}.tote_product_selections` s ON s.product_id = p.product_id
+        WHERE DATE(SUBSTR(p.start_iso,1,10)) = CURRENT_DATE()
+          AND s.number IS NULL;
+        """
+        client.query(sql).result()
+
+        # QC: products missing bet rules (min/max/increment)
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_qc_missing_bet_rules` AS
+        SELECT p.product_id, p.event_id, p.bet_type, p.start_iso
+        FROM `{ds}.tote_products` p
+        LEFT JOIN `{ds}.tote_bet_rules` r ON r.product_id = p.product_id
+        WHERE r.product_id IS NULL
+           OR (r.min_line IS NULL AND r.line_increment IS NULL AND r.min_bet IS NULL);
+        """
+        client.query(sql).result()
+
+        # QC: probable odds coverage by product (share of selections with odds)
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_qc_probable_odds_coverage` AS
+        WITH sel AS (
+          SELECT product_id, COUNT(1) AS sel_count
+          FROM `{ds}.tote_product_selections`
+          GROUP BY product_id
+        ), odded AS (
+          SELECT product_id, COUNT(DISTINCT selection_id) AS with_odds
+          FROM `{ds}.vw_tote_probable_odds`
+          GROUP BY product_id
+        )
+        SELECT p.product_id, p.event_id, COALESCE(o.with_odds,0) AS with_odds, COALESCE(s.sel_count,0) AS selections,
+               SAFE_DIVIDE(COALESCE(o.with_odds,0), NULLIF(s.sel_count,0)) AS coverage
+        FROM `{ds}.tote_products` p
+        LEFT JOIN sel s USING(product_id)
+        LEFT JOIN odded o USING(product_id);
+        """
+        client.query(sql).result()
+
         # vw_superfecta_dividends_latest: latest dividend per selection for each product
         sql = f"""
         CREATE VIEW IF NOT EXISTS `{ds}.vw_superfecta_dividends_latest` AS

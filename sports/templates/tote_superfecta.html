@@ -13,7 +13,7 @@
   </div>
   {% endif %}
   <table class="table table-sm table-striped">
-    <thead><tr><th>Product</th><th>Event</th><th>Venue</th><th>Country</th><th>Start</th><th>Status</th><th>Pool (net)</th></tr></thead>
+    <thead><tr><th>Product</th><th>Event</th><th>Venue</th><th>Country</th><th>Start</th><th>Status</th><th>Pool (net)</th><th></th></tr></thead>
     <tbody>
       {% for p in products %}
       <tr>
@@ -24,10 +24,12 @@
         <td>{{ p.start_iso }}</td>
         <td>{{ p.status }}</td>
         <td>{{ p.total_net }}</td>
+        <td>
+          <a class="btn btn-sm btn-primary" href="{{ url_for('tote_bet_page') }}?product_id={{ p.product_id }}">Place Bet</a>
+        </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
 </div>
 {% endblock %}
-

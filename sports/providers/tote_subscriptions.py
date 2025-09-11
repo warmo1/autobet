@@ -95,6 +95,33 @@ subscription {
 """
     )
     started = time.time()
+    # Cache product context to enrich snapshots without repeated queries
+    ctx_cache: dict[str, dict] = {}
+
+    def _get_product_ctx(pid: str) -> dict | None:
+        if not _is_bq_sink(conn):
+            return None
+        if not pid:
+            return None
+        if pid in ctx_cache:
+            return ctx_cache.get(pid)
+        try:
+            from google.cloud import bigquery  # type: ignore
+            job_cfg = bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("pid", "STRING", pid)
+            ])
+            rs = conn.query(
+                "SELECT event_id, UPPER(bet_type) AS bet_type, currency, start_iso FROM tote_products WHERE product_id=@pid LIMIT 1",
+                job_config=job_cfg,
+            )
+            df = rs.to_dataframe(create_bqstorage_client=False)
+            if not df.empty:
+                row = df.iloc[0].to_dict()
+                ctx_cache[pid] = row
+                return row
+        except Exception:
+            return None
+        return None
     backoff = 1.0
     while True:
         if duration and (time.time() - started) > duration:
@@ -183,15 +210,15 @@ subscription {
                                 if pid:
                                     if _is_bq_sink(conn):
                                         try:
-                                            # Minimal join context: rely on existing product context in BQ at query time
+                                            ctx = _get_product_ctx(str(pid)) or {}
                                             conn.upsert_tote_pool_snapshots([
                                                 {
                                                     "product_id": str(pid),
-                                                    "event_id": None,
-                                                    "bet_type": None,
+                                                    "event_id": ctx.get("event_id"),
+                                                    "bet_type": ctx.get("bet_type"),
                                                     "status": None,
-                                                    "currency": None,
-                                                    "start_iso": None,
+                                                    "currency": ctx.get("currency"),
+                                                    "start_iso": ctx.get("start_iso"),
                                                     "ts_ms": ts,
                                                     "total_gross": gross,
                                                     "total_net": net,
@@ -306,6 +333,34 @@ subscription {
                                             conn.upsert_tote_product_dividends(rows)
                                     except Exception:
                                         pass
+
+                        # onSelectionStatusChanged → selection status log
+                        if "onSelectionStatusChanged" in data and _is_bq_sink(conn):
+                            try:
+                                node = data["onSelectionStatusChanged"]
+                                pid = (node or {}).get("productId") or (node or {}).get("ProductId")
+                                sid = (node or {}).get("selectionId") or (node or {}).get("SelectionId")
+                                st = (node or {}).get("status") or (node or {}).get("Status")
+                                if pid and sid and st is not None:
+                                    conn.upsert_tote_selection_status_log([
+                                        {"product_id": str(pid), "selection_id": str(sid), "ts_ms": ts, "status": str(st)}
+                                    ])
+                            except Exception:
+                                pass
+
+                        # onCompetitorStatusChanged → competitor status per event
+                        if "onCompetitorStatusChanged" in data and _is_bq_sink(conn):
+                            try:
+                                node = data["onCompetitorStatusChanged"]
+                                eid = (node or {}).get("eventId") or (node or {}).get("EventId")
+                                cid = (node or {}).get("competitorId") or (node or {}).get("CompetitorId")
+                                st = (node or {}).get("status") or (node or {}).get("Status")
+                                if eid and cid and st is not None:
+                                    conn.upsert_tote_competitor_status_log([
+                                        {"event_id": str(eid), "competitor_id": str(cid), "ts_ms": ts, "status": str(st)}
+                                    ])
+                            except Exception:
+                                pass
 
                         # Other updates: log raw payloads for future processing
                         for key in (

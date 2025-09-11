@@ -3013,6 +3013,16 @@ def tote_bet_page():
 
     events_df = sql_df(ev_sql, params=params)
     countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+    # Optional preselect by product_id
+    preselect = None
+    try:
+        pid = (request.args.get("product_id") or "").strip()
+        if pid:
+            df = sql_df("SELECT event_id FROM tote_products WHERE product_id=?", params=(pid,))
+            if not df.empty:
+                preselect = {"product_id": pid, "event_id": df.iloc[0]['event_id']}
+    except Exception:
+        preselect = None
 
     return render_template(
         "tote_bet.html",
@@ -3022,4 +3032,5 @@ def tote_bet_page():
             "venue": venue,
         },
         country_options=(countries_df['country'].tolist() if not countries_df.empty else []),
+        preselect=preselect,
     )

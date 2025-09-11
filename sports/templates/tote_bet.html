@@ -101,6 +101,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const eventSelect = document.getElementById('event_id');
     const productSelect = document.getElementById('product_id');
     const selectionSelect = document.getElementById('selection_id');
+    const PRESELECT = {{ preselect | tojson if preselect else 'null' }};
 
     eventSelect.addEventListener('change', function() {
         const eventId = this.value;
@@ -117,6 +118,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 productSelect.add(opt);
             });
             productSelect.disabled = false;
+            // If we have a preselect product for this event, set it and trigger change
+            if (PRESELECT && PRESELECT.product_id) {
+                const opt = Array.from(productSelect.options).find(o => o.value === PRESELECT.product_id);
+                if (opt) {
+                    productSelect.value = PRESELECT.product_id;
+                    productSelect.dispatchEvent(new Event('change'));
+                }
+            }
         });
     });
 
@@ -139,6 +148,14 @@ document.addEventListener('DOMContentLoaded', function() {
             });
         }
     });
+    // If preselect is provided, set event and trigger load
+    if (PRESELECT && PRESELECT.event_id) {
+        const evOpt = Array.from(eventSelect.options).find(o => o.value === PRESELECT.event_id);
+        if (evOpt) {
+            eventSelect.value = PRESELECT.event_id;
+            eventSelect.dispatchEvent(new Event('change'));
+        }
+    }
 });
 </script>
 
