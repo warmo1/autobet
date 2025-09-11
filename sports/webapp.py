@@ -329,12 +329,6 @@ def sql_df(*args, **kwargs) -> pd.DataFrame:
     if cache_ttl > 0:
         hit = _sqldf_cache_get(ck)
         if hit is not None:
-            # Optional soft row cap on return
-            if cfg.web_sqldf_max_rows and cfg.web_sqldf_max_rows > 0:
-                try:
-                    return hit.head(cfg.web_sqldf_max_rows).copy(deep=True)
-                except Exception:
-                    return hit
             return hit
 
     job_config = bigquery.QueryJobConfig(
