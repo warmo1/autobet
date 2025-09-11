@@ -106,6 +106,9 @@ def place_audit_simple_bet(
             # as the audit endpoint may not support product queries.
             # The 'client' parameter is for the subsequent bet placement.
             query_client = ToteClient()
+            # For audit mode, fetch product legs from the audit endpoint to avoid ID mismatches
+            if str(mode).lower() == 'audit':
+                query_client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
             query = "query ProductLegs($id: String){ product(id: $id){ ... on BettingProduct { legs{ nodes{ id } } } } }"
             data = query_client.graphql(query, {"id": product_id})
             legs = (((data.get("product") or {}).get("legs") or {}).get("nodes")) or []
@@ -122,29 +125,10 @@ def place_audit_simple_bet(
                          payload={"error": err_msg}, response=None, error=err_msg)
         return {"bet_id": bet_id, "error": err_msg}
 
+    # Always use the real product ID for placement; audit uses same schema/IDs
     used_product_id = product_id
-    if mode == 'audit':
-        # The audit endpoint requires a synthetic product ID format (BET_TYPE:EVENT_ID).
-        # The live product ID (UUID) is not recognized.
-        event_id_rows = _bq_query_rows(sink, "SELECT event_id, bet_type FROM tote_products WHERE product_id=@pid LIMIT 1", {"pid": product_id})
-        
-    # Get event_id and bet_type for productLegId conversion
-    event_id = None
-    bet_type_from_db = None
-    prod_info = _bq_query_rows(sink, 
-        "SELECT event_id, bet_type FROM tote_products WHERE product_id=@pid LIMIT 1",
-        {"pid": product_id} # Use original product_id to query BQ
-    )
-    if prod_info:
-        event_id = prod_info[0].get("event_id")
-        bet_type_from_db = prod_info[0].get("bet_type")
-
-        if event_id_rows:
-            event_id = event_id_rows[0].get("event_id")
-            bet_type = event_id_rows[0].get("bet_type")
-            if event_id and bet_type:
-                used_product_id = f"{bet_type.upper()}:{event_id}"
-                print(f"[AuditBet] Using synthetic product ID for audit mode: {used_product_id}")
+    # When querying product legs for audit, prefer the audit endpoint to avoid ID mismatches
+    # (product and leg IDs should be the same, but Tote recommends querying from audit when testing)
 
     bet_v1 = {"betId": f"bet-simple-{uuid.uuid4()}", "productId": used_product_id, "stake": {"currencyCode": currency, "totalAmount": float(stake)}, "legs": [{"productLegId": product_leg_id, "selections": [{"productLegSelectionID": selection_id}]}]}
     
@@ -249,6 +233,9 @@ def place_audit_superfecta(
             # Use a new client for this query to ensure it hits the live endpoint.
             # The 'client' parameter is for the subsequent bet placement.
             query_client = ToteClient()
+            # For audit mode, prefer the audit endpoint for product/selection discovery
+            if str(mode).lower() == 'audit':
+                query_client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
             query = """
             query ProductLegs($id: String){
               product(id: $id){
@@ -295,6 +282,14 @@ def place_audit_superfecta(
             print(f"[AuditBet] API fallback error: {e}")
             pass
     print(f"[AuditBet] by_number after API fallback: {by_number}")
+    # Choose product id used for placement (may differ if caller overrides)
+    # Always use the real product ID for audit; schema/IDs are the same as live
+    used_product_id = (placement_product_id or product_id)
+
+    # Use the real productLegId obtained from DB/API for both live and audit
+    audit_product_leg_id = product_leg_id
+
+    # --- Helper function to convert a line string to GraphQL leg structure ---
     def _line_to_legs(line: str) -> Optional[Dict[str, Any]]:
         try:
             parts = [int(x.strip()) for x in line.split('-') if x.strip()]
@@ -302,24 +297,30 @@ def place_audit_superfecta(
                 return None
             sels: List[Dict[str, Any]] = []
             for pos, num in enumerate(parts[:4], start=1):
+                # Always use the mapped selection ID for both live and audit
                 sid = by_number.get(int(num))
                 if not sid:
                     return None
                 sels.append({"productLegSelectionID": sid, "position": pos})
+            
             return {
-                "productLegId": product_leg_id,
+                "productLegId": audit_product_leg_id,
                 "selections": sels,
             }
-        except Exception:
+        except (ValueError, KeyError):
             return None
+
+    # Process legs using the helper function
     legs = []
     for s in bet_lines:
         lg = _line_to_legs(s)
         if not lg:
             continue
         legs.append(lg)
-    if bet_lines and (not product_leg_id or not legs or any(lg is None for lg in legs)):
-        # Do not submit if mapping failed; surface a clear error with missing numbers
+
+    # Validate mapping before attempting placement
+    if bet_lines and (not product_leg_id or not legs):
+        # Surface a clear error with missing numbers for easier debugging
         missing: List[str] = []
         for s in bet_lines:
             try:
@@ -347,58 +348,6 @@ def place_audit_superfecta(
             error=err_msg,
         )
         return {"bet_id": bet_id, "error": err_msg}
-    # Choose product id used for placement (may differ from the graph id)
-    used_product_id = (placement_product_id or product_id)
-
-    if mode == 'audit' and not placement_product_id:
-        # The audit endpoint requires a synthetic product ID format (BET_TYPE:EVENT_ID).
-        # The live product ID (UUID) is not recognized.
-        event_id_rows = _bq_query_rows(sink, "SELECT event_id, bet_type FROM tote_products WHERE product_id=@pid LIMIT 1", {"pid": product_id})
-        if event_id_rows:
-            event_id = event_id_rows[0].get("event_id")
-            bet_type = event_id_rows[0].get("bet_type")
-            if event_id and bet_type:
-                used_product_id = f"{bet_type.upper()}:{event_id}"
-                print(f"[AuditBet] Using synthetic product ID for audit mode: {used_product_id}")
-
-    # Construct synthetic productLegId for audit mode
-    audit_product_leg_id = product_leg_id # Default to what was found/fetched (UUID)
-    if mode == 'audit' and event_id and bet_type_from_db:
-        audit_product_leg_id = f"{bet_type_from_db.upper()}:{event_id}"
-
-    # --- Helper function to convert a line string to GraphQL leg structure ---
-    def _line_to_legs(line: str) -> Optional[Dict[str, Any]]:
-        try:
-            parts = [int(x.strip()) for x in line.split('-') if x.strip()]
-            if len(parts) < 4:
-                return None
-            sels: List[Dict[str, Any]] = []
-            for pos, num in enumerate(parts[:4], start=1):
-                # For audit mode, use the runner number directly as selection ID
-                # For live mode, use the UUID from by_number
-                if mode == 'audit':
-                    audit_sel_id = str(num) # Use the runner number as string
-                else:
-                    audit_sel_id = by_number.get(int(num)) # Use the UUID from by_number
-                    if not audit_sel_id:
-                        return None # If live mode and no UUID found, fail
-
-                sels.append({"productLegSelectionID": audit_sel_id, "position": pos})
-            
-            return {
-                "productLegId": audit_product_leg_id, # Use synthetic productLegId
-                "selections": sels,
-            }
-        except (ValueError, KeyError):
-            return None
-
-    # Process legs using the helper function
-    legs = []
-    for s in bet_lines:
-        lg = _line_to_legs(s)
-        if not lg:
-            continue
-        legs.append(lg)
 
     # Build bets arrays for both schema variants
     # v2 (docs/tote_queries.graphql): PlaceBetsInput with results[]
