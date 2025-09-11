@@ -49,7 +49,7 @@
                 <td>{{ r.cloth_number if r.cloth_number is not none else (r.cloth or '—') }}</td>
                 <td>{{ r.horse or r.selection_id }}</td>
                 <td>{{ r.decimal_odds is not none and ('%.2f' % r.decimal_odds) or '—' }}</td>
-                <td>{{ r.odds_ts or '' }}</td>
+                <td>{% if r.odds_iso %}<span class="time-iso" data-iso="{{ r.odds_iso }}">{{ r.odds_iso }}</span>{% else %}—{% endif %}</td>
               </tr>
               {% endfor %}
             {% endif %}

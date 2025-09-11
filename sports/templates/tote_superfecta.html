@@ -7,7 +7,7 @@
     <strong>Upcoming 60m (GB):</strong>
     <ul class="mb-0">
       {% for u in upcoming %}
-      <li>{{ u.start_iso }} — {{ u.venue }} ({{ u.country }}) — {{ u.event_name or 'Race' }}</li>
+      <li><span class="time-iso" data-iso="{{ u.start_iso }}">{{ u.start_iso }}</span> — {{ u.venue }} ({{ u.country }}) — {{ u.event_name or 'Race' }}</li>
       {% endfor %}
     </ul>
   </div>
@@ -20,7 +20,7 @@
         <td><a href="{{ url_for('tote_superfecta_detail', product_id=p.product_id) }}">{{ p.event_name }}</a></td>
         <td>{{ p.venue }}</td>
         <td>{{ p.country }}</td>
-        <td>{{ p.start_iso }}</td>
+        <td><span class="time-iso" data-iso="{{ p.start_iso }}">{{ p.start_iso }}</span></td>
         <td>{{ p.status }}</td>
         <td class="text-end">{{ p.total_net | f2 }}</td>
         <td>

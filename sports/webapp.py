@@ -1233,10 +1233,14 @@ def tote_viability_page():
 
     opts_sql = """
         SELECT
-          p.product_id, p.event_id, p.event_name, COALESCE(e.venue, p.venue) AS venue,
-          p.start_iso, p.currency, p.total_gross, p.total_net, COALESCE(p.status,'') AS status,
+          p.product_id, p.event_id, COALESCE(e.name, p.event_name) AS event_name,
+          COALESCE(e.venue, p.venue) AS venue,
+          p.start_iso, p.currency,
+          COALESCE(SAFE_CAST(p.total_gross AS FLOAT64), 0.0) AS total_gross,
+          COALESCE(SAFE_CAST(p.total_net AS FLOAT64), 0.0) AS total_net,
+          COALESCE(p.status,'') AS status,
           (SELECT COUNT(1) FROM tote_product_selections s WHERE s.product_id = p.product_id) AS n_runners
-        FROM tote_products p
+        FROM vw_products_latest_totals p
         LEFT JOIN tote_events e USING(event_id)
         WHERE UPPER(p.bet_type)=@bt
     """
@@ -2247,7 +2251,10 @@ def event_detail(event_id: str):
             if isinstance(competitors_json_data, list):
                 runners = [] # Reset runners if using fallback
                 for c in competitors_json_data: # Fix: was iterating over 'competitors' which was not defined
-                    cloth = c.get("cloth") or c.get("cloth_number") or c.get("number")
+                    # Accept multiple possible keys for cloth/trap numbers
+                    cloth = (
+                        c.get("cloth") or c.get("cloth_number") or c.get("clothNumber") or c.get("trapNumber") or c.get("number")
+                    )
                     name = c.get("name") or c.get("competitor") or c.get("horse")
                     if not name:
                         name = f"Runner #{cloth}" if cloth else None
@@ -2312,7 +2319,7 @@ def event_detail(event_id: str):
                 o.cloth_number,
                 COALESCE(s.competitor, o.selection_id) AS horse, -- Fallback to ID if name is missing
                 o.decimal_odds,
-                TIMESTAMP_MILLIS(o.ts_ms) AS odds_ts
+                FORMAT_TIMESTAMP('%FT%T%Ez', TIMESTAMP_MILLIS(o.ts_ms)) AS odds_iso
             FROM vw_tote_probable_odds o
             JOIN tote_products p ON o.product_id = p.product_id
             LEFT JOIN tote_product_selections s ON o.selection_id = s.selection_id AND o.product_id = p.product_id

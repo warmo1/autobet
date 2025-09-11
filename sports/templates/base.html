@@ -24,12 +24,12 @@
                 <li><a class="dropdown-item" href="{{ url_for('manual_calculator_page') }}">Manual Calculator</a></li>
                 <li><a class="dropdown-item" href="{{ url_for('audit_bets_page') }}">Audit Bets</a></li>
                 <li><a class="dropdown-item" href="{{ url_for('imports_page') }}">Latest Imports</a></li>
-                <li><a class="dropdown-item" href="{{ url_for('models_page') }}">Models</a></li>
+                {# Removed Models: not in use #}
                 <li><hr class="dropdown-divider"></li>
                 <li><a class="dropdown-item" href="{{ url_for('tote_schema_page') }}">Schema</a></li>
               </ul>
             </li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('models_page') }}">Models</a></li>
+            {# Removed Models link from top nav #}
             <li class="nav-item"><a class="nav-link" href="{{ url_for('status_page') }}">Status</a></li>
             
             
