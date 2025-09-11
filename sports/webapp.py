@@ -659,7 +659,7 @@ def tote_superfecta_page():
         "COALESCE(p.status,'') AS status, p.currency, p.total_gross, p.total_net, p.rollover, "
         # UI Improvement: The product_id column can be de-emphasized in the template in favor of more user-friendly info.
         "(SELECT COUNT(1) FROM tote_product_selections s WHERE s.product_id = p.product_id) AS n_runners "
-        "FROM tote_products p LEFT JOIN tote_events e USING(event_id) "
+        "FROM vw_products_latest_totals p LEFT JOIN tote_events e USING(event_id) "
     )
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -757,7 +757,7 @@ def tote_pools_page():
         "p.event_id, COALESCE(e.name, p.event_name) AS event_name, "
         "divs.c AS dividend_count, "
         "rc.going, rc.weather_temp_c, rc.weather_wind_kph, rc.weather_precip_mm "
-        "FROM tote_products p "
+        "FROM vw_products_latest_totals p "
         "LEFT JOIN tote_events e USING(event_id) "
         "LEFT JOIN (SELECT product_id, COUNT(1) AS c FROM tote_product_dividends GROUP BY product_id) divs ON divs.product_id = p.product_id "
         "LEFT JOIN race_conditions rc ON rc.event_id = p.event_id "

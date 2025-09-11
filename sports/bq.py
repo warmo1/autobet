@@ -77,6 +77,36 @@ class BigQuerySink:
         job = client.query(sql)
         job.result()
 
+        # vw_products_latest_totals: tote_products overlaid with latest snapshot totals (all bet types)
+        sql = f"""
+        CREATE VIEW IF NOT EXISTS `{ds}.vw_products_latest_totals` AS
+        WITH latest AS (
+          SELECT
+            product_id,
+            ARRAY_AGG(total_gross ORDER BY ts_ms DESC LIMIT 1)[OFFSET(0)] AS latest_gross,
+            ARRAY_AGG(total_net ORDER BY ts_ms DESC LIMIT 1)[OFFSET(0)] AS latest_net,
+            MAX(ts_ms) AS ts_ms
+          FROM `{ds}.tote_pool_snapshots`
+          GROUP BY product_id
+        )
+        SELECT
+          p.product_id,
+          p.event_id,
+          p.event_name,
+          p.venue,
+          p.start_iso,
+          p.status,
+          p.currency,
+          COALESCE(l.latest_gross, p.total_gross) AS total_gross,
+          COALESCE(l.latest_net, p.total_net) AS total_net,
+          p.rollover,
+          p.deduction_rate,
+          p.bet_type
+        FROM `{ds}.tote_products` p
+        LEFT JOIN latest l USING(product_id);
+        """
+        job = client.query(sql); job.result()
+
     # --- generic helpers ---
     def _ensure_dataset(self):
         bq = self._bq; client = self._client_obj()
