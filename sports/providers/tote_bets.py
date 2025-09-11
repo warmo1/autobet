@@ -389,6 +389,20 @@ def place_audit_superfecta(
     except Exception:
         by_number = {}
     print(f"[AuditBet] by_number from DB: {by_number}")
+    # If we have selection mapping but are missing the leg id, fetch it from live GraphQL
+    if by_number and not product_leg_id:
+        try:
+            query_client = ToteClient()  # live
+            query = "query ProductLegs($id: String){ product(id: $id){ ... on BettingProduct { legs{ nodes{ id } } } } }"
+            data = query_client.graphql(query, {"id": product_id})
+            legs = (((data.get("product") or {}).get("legs") or {}).get("nodes")) or []
+            if legs:
+                product_leg_id = legs[0].get("id")
+        except Exception as e:
+            try:
+                print(f"[AuditBet] live leg lookup failed: {e}")
+            except Exception:
+                pass
     # If mapping missing, fetch live from Tote GraphQL (handles cases where selections were not yet persisted)
     if not by_number:
         try:
