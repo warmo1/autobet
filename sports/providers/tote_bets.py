@@ -73,6 +73,82 @@ def _bq_query_rows(sink, sql: str, params: Dict[str, Any] | None = None) -> list
         return out
 
 
+def _resolve_audit_ids_for_simple(
+    sink,
+    *,
+    live_product_id: str,
+    live_selection_id: str,
+) -> Optional[dict]:
+    """Translate live product + selection IDs to audit-side IDs using event+betType and cloth/trap number.
+
+    Returns dict with keys: product_id, product_leg_id, selection_id; or None if not resolved.
+    """
+    # 1) From BQ, find event_id, bet_type and the runner number for the chosen selection on live
+    prod = _bq_query_rows(
+        sink,
+        "SELECT event_id, bet_type FROM tote_products WHERE product_id=@pid LIMIT 1",
+        {"pid": live_product_id},
+    )
+    if not prod:
+        return None
+    event_id = (prod[0] or {}).get("event_id")
+    bet_type = (prod[0] or {}).get("bet_type")
+    if not event_id or not bet_type:
+        return None
+    sel = _bq_query_rows(
+        sink,
+        "SELECT number FROM tote_product_selections WHERE product_id=@pid AND selection_id=@sid LIMIT 1",
+        {"pid": live_product_id, "sid": live_selection_id},
+    )
+    if not sel:
+        return None
+    try:
+        runner_num = int((sel[0] or {}).get("number"))
+    except Exception:
+        return None
+    # 2) Query audit endpoint for the equivalent product on that event/betType
+    client = ToteClient()
+    client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+    query = (
+        "query GetEventProducts($id: String){ event(id: $id){ products{ nodes{ id betType status legs{ nodes{ id selections{ nodes{ id competitor{ name details{ __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } } } } } } } }"
+    )
+    try:
+        data = client.graphql(query, {"id": event_id})
+        ev = (data or {}).get("event") or {}
+        nodes = ((ev.get("products") or {}).get("nodes")) or []
+        # pick matching betType; prefer OPEN
+        cand = None
+        for n in nodes:
+            if (n.get("betType") or "").upper() == (bet_type or "").upper():
+                if (n.get("status") or "").upper() == "OPEN":
+                    cand = n; break
+                cand = cand or n
+        if not cand:
+            return None
+        audit_pid = cand.get("id")
+        legs = ((cand.get("legs") or {}).get("nodes")) or []
+        if not legs:
+            return None
+        # Assume first leg and map by runner number
+        leg = legs[0]
+        audit_plid = leg.get("id")
+        sels = ((leg.get("selections") or {}).get("nodes")) or []
+        audit_sid = None
+        for s in sels:
+            det = ((s.get("competitor") or {}).get("details") or {})
+            n = det.get("clothNumber") if det.get("__typename") == "HorseDetails" else det.get("trapNumber")
+            try:
+                if n is not None and int(n) == runner_num:
+                    audit_sid = s.get("id"); break
+            except Exception:
+                continue
+        if not (audit_pid and audit_plid and audit_sid):
+            return None
+        return {"product_id": audit_pid, "product_leg_id": audit_plid, "selection_id": audit_sid}
+    except Exception:
+        return None
+
+
 def place_audit_simple_bet(
     sink,  # BigQuerySink
     *,
@@ -147,14 +223,22 @@ def place_audit_simple_bet(
                          payload={"error": err_msg}, response=None, error=err_msg)
         return {"bet_id": bet_id, "error": err_msg}
 
-    # Always use the real product ID for placement; audit uses same schema/IDs
+    # Choose placement IDs; translate to audit-side if needed
     used_product_id = product_id
+    used_product_leg_id = product_leg_id
+    used_selection_id = selection_id
+    if str(mode).lower() == 'audit':
+        mapped = _resolve_audit_ids_for_simple(sink, live_product_id=product_id, live_selection_id=selection_id)
+        if mapped:
+            used_product_id = mapped["product_id"]
+            used_product_leg_id = mapped["product_leg_id"]
+            used_selection_id = mapped["selection_id"]
     # When querying product legs for audit, prefer the audit endpoint to avoid ID mismatches
     # (product and leg IDs should be the same, but Tote recommends querying from audit when testing)
 
     # Build v1 (ticket) and v2 (results) variants
-    bet_v1 = {"betId": f"bet-simple-{uuid.uuid4()}", "productId": used_product_id, "stake": {"currencyCode": currency, "lineAmount": float(stake)}, "legs": [{"productLegId": product_leg_id, "selections": [{"productLegSelectionID": selection_id}]}]}
-    bet_v2 = {"bet": {"productId": used_product_id, "stake": {"amount": {"decimalAmount": float(stake)}, "currency": currency}, "legs": [{"productLegId": product_leg_id, "selections": [{"productLegSelectionID": selection_id}]}]}}
+    bet_v1 = {"betId": f"bet-simple-{uuid.uuid4()}", "productId": used_product_id, "stake": {"currencyCode": currency, "lineAmount": float(stake)}, "legs": [{"productLegId": used_product_leg_id, "selections": [{"productLegSelectionID": used_selection_id}]}]}
+    bet_v2 = {"bet": {"productId": used_product_id, "stake": {"amount": {"decimalAmount": float(stake)}, "currency": currency}, "legs": [{"productLegId": used_product_leg_id, "selections": [{"productLegSelectionID": used_selection_id}]}]}}
 
     resp = None; err = None; sent_variables = None; used_schema = None
     if post:
