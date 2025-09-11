@@ -242,6 +242,33 @@ def _fmt_datetime(ts: float | int | str):
         except Exception:
             return ''
 
+@app.template_filter('f0')
+def _fmt_f0(v):
+    """Format a value as 0 decimal float; safe for Decimal/str/None."""
+    try:
+        return f"{float(v):.0f}"
+    except Exception:
+        return "0"
+
+@app.template_filter('f2')
+def _fmt_f2(v):
+    """Format a value as 2 decimal float; safe for Decimal/str/None."""
+    try:
+        return f"{float(v):.2f}"
+    except Exception:
+        return "0.00"
+
+@app.template_filter('pct1')
+def _fmt_pct1(v):
+    """Format 0-1 (or 0-100) as percentage with 1 decimal place."""
+    try:
+        x = float(v)
+        if x > 1.0:
+            x = x / 100.0
+        return f"{x*100.0:.1f}%"
+    except Exception:
+        return "—"
+
 @app.route("/")
 def index():
     """Simplified dashboard with quick links and bank widget."""
@@ -431,6 +458,8 @@ def tote_events_page():
     if date_to:
         # Ensure date_to includes the entire day by checking against the start of the next day
         where.append("SUBSTR(start_iso,1,10) <= ?"); params.append(date_to)
+    # Default to OPEN events and ascending time to show next races first
+    where.append("UPPER(status)='OPEN'")
     base_sql = ( # noqa
         "SELECT event_id, name, venue, country, start_iso, sport, status, competitors_json, home, away "
         "FROM tote_events"
@@ -439,13 +468,14 @@ def tote_events_page():
     if where:
         base_sql += " WHERE " + " AND ".join(where)
         count_sql += " WHERE " + " AND ".join(where)
-    base_sql += " ORDER BY start_iso DESC LIMIT ? OFFSET ?"
+    base_sql += " ORDER BY start_iso ASC LIMIT ? OFFSET ?"
     params_paged = list(params) + [limit, offset]
     # Performance: Simplified total count query.
     df = sql_df(base_sql, params=tuple(params_paged))
     total = int(sql_df(count_sql, params=tuple(params)).iloc[0]["c"])
     countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
     sports_df = sql_df("SELECT DISTINCT sport FROM tote_events WHERE sport IS NOT NULL AND sport<>'' ORDER BY sport")
+    venues_df = sql_df("SELECT DISTINCT venue FROM tote_events WHERE venue IS NOT NULL AND venue<>'' ORDER BY venue")
     events = df.to_dict("records") if not df.empty else []
     for ev in events:
         comps = []
@@ -471,6 +501,7 @@ def tote_events_page():
         },
         country_options=(countries_df['country'].tolist() if not countries_df.empty else []),
         sport_options=(sports_df['sport'].tolist() if not sports_df.empty else []),
+        venue_options=(venues_df['venue'].tolist() if not venues_df.empty else []),
     )
 
 @app.route("/tote-superfecta", methods=["GET","POST"])
@@ -513,7 +544,7 @@ def tote_superfecta_page():
     )
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY p.start_iso DESC LIMIT ?"; params.append(limit)
+    sql += " ORDER BY p.start_iso ASC LIMIT ?"; params.append(limit)
     df = sql_df(sql, params=tuple(params))
 
     # Options for filters
@@ -1746,14 +1777,17 @@ def status_page():
 def api_status_data_freshness():
     """Return counts and last-ingest timestamps for key tables."""
     try:
-        # Events (avoid referencing non-existent updated_ts)
+        # Events: count by start date; last ingest from job runs
         ev_today = sql_df("SELECT COUNT(1) AS c FROM tote_events WHERE SUBSTR(start_iso,1,10)=FORMAT_DATE('%F', CURRENT_DATE())")
-        # Use start_iso as proxy for last update; casting guards string format
-        ev_last = sql_df("SELECT MAX(TIMESTAMP(start_iso)) AS ts FROM tote_events")
+        ev_last = sql_df(
+            "SELECT TIMESTAMP_MILLIS(MAX(ended_ts)) AS ts FROM ingest_job_runs WHERE task IN ('ingest_events_for_day','ingest_events_range') AND status='OK'"
+        )
 
-        # Products
+        # Products: count by start date; last ingest from job runs
         pr_today = sql_df("SELECT COUNT(1) AS c FROM tote_products WHERE SUBSTR(start_iso,1,10)=FORMAT_DATE('%F', CURRENT_DATE())")
-        pr_last = sql_df("SELECT MAX(TIMESTAMP(start_iso)) AS ts FROM tote_products")
+        pr_last = sql_df(
+            "SELECT TIMESTAMP_MILLIS(MAX(ended_ts)) AS ts FROM ingest_job_runs WHERE task IN ('ingest_products_for_day','ingest_single_product') AND status='OK'"
+        )
 
         # Probable odds
         po_today = sql_df("SELECT COUNT(1) AS c FROM raw_tote_probable_odds WHERE DATE(TIMESTAMP_MILLIS(fetched_ts))=CURRENT_DATE()")
@@ -2073,6 +2107,23 @@ def event_detail(event_id: str):
                     pass # Fallback to unsorted if cloth number is not int
         except (json.JSONDecodeError, TypeError):
             runners = [] # Ensure runners is an empty list on error
+
+    # Final fallback: derive runners from WIN product selections if available
+    if not runners:
+        try:
+            dfw = sql_df(
+                """
+                SELECT CAST(s.number AS INT64) AS cloth, COALESCE(s.competitor, s.selection_id) AS name
+                FROM tote_product_selections s
+                JOIN tote_products p ON p.product_id = s.product_id
+                WHERE p.event_id = ? AND UPPER(p.bet_type) = 'WIN' AND s.leg_index=1
+                ORDER BY CAST(s.number AS INT64)
+                """,
+                params=(event_id,)
+            )
+            runners = ([] if dfw.empty else dfw.to_dict("records"))
+        except Exception:
+            pass
 
     # Fetch products (include pool components)
     products_df = sql_df(
@@ -2906,15 +2957,18 @@ def tote_bet_page():
         product_id = request.form.get("product_id")
         stake_str = request.form.get("stake")
         currency = request.form.get("currency", "GBP")
-    mode = request.form.get("mode", "audit")
-    if mode != "live":
-        mode = "audit"
-    if mode == "live" and (os.getenv("TOTE_LIVE_ENABLED", "0").lower() not in ("1","true","yes","on")):
-        flash("Live betting disabled (TOTE_LIVE_ENABLED not set). Using audit mode.", "warning")
-        mode = "audit"
+        mode = request.form.get("mode", "audit")
+        if mode != "live":
+            mode = "audit"
+        if mode == "live" and (os.getenv("TOTE_LIVE_ENABLED", "0").lower() not in ("1","true","yes","on")):
+            flash("Live betting disabled (TOTE_LIVE_ENABLED not set). Using audit mode.", "warning")
+            mode = "audit"
 
-        # Add logging to confirm which mode is being used for the bet.
-        print(f"[BetPlacement] Attempting to place bet with product_id={product_id}, stake={stake_str}, mode='{mode}'")
+        # Add logging
+        try:
+            print(f"[BetPlacement] Attempting bet product_id={product_id}, stake={stake_str}, mode='{mode}'")
+        except Exception:
+            pass
 
         errors = []
         if not product_id:
@@ -2927,7 +2981,7 @@ def tote_bet_page():
             stake = float(stake_str)
             if stake <= 0:
                 errors.append("Stake must be a positive number.")
-        except ValueError:
+        except Exception:
             errors.append("Stake must be a valid number.")
 
         if errors:
@@ -2935,39 +2989,26 @@ def tote_bet_page():
                 flash(e, "error")
             return redirect(request.referrer or url_for("tote_bet_page"))
 
-        # Determine bet type to call the correct placement function
+        # Determine bet type
         prod_df = sql_df("SELECT bet_type FROM tote_products WHERE product_id=?", params=(product_id,))
         if prod_df.empty:
             flash(f"Product with ID '{product_id}' not found.", "error")
             return redirect(request.referrer or url_for("tote_bet_page"))
-        
         bet_type = (prod_df.iloc[0]['bet_type'] or "").upper()
         db = get_db()
         res = {}
 
-        # --- Simple Bets (e.g., WIN) ---
         if bet_type in ["WIN", "PLACE"]:
             from .providers.tote_bets import place_audit_simple_bet
             from .providers.tote_api import ToteClient
             selection_id = request.form.get("selection_id")
             if not selection_id:
-                flash("A runner/selection must be chosen for a WIN bet.", "error")
+                flash("A runner/selection must be chosen for a WIN/PLACE bet.", "error")
                 return redirect(request.referrer or url_for("tote_bet_page"))
-            
-            # Create a client pointing to the correct endpoint (live vs audit)
-            client_for_placement = None
+            client_for_placement = ToteClient()
             if mode == 'audit':
-                audit_endpoint = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
-                client_for_placement = ToteClient()
-                client_for_placement.base_url = audit_endpoint
-            else:
-                client_for_placement = ToteClient()
-
-            # The `mode` parameter is not supported by `place_audit_simple_bet`, causing a TypeError.
-            # The correct endpoint (live vs audit) is handled by passing the configured `client` object.
+                client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
             res = place_audit_simple_bet(db, product_id=product_id, selection_id=selection_id, stake=stake, currency=currency, post=True, client=client_for_placement)
-
-        # --- Complex Bets (e.g., SUPERFECTA) ---
         elif bet_type in ["SUPERFECTA", "TRIFECTA", "EXACTA"]:
             from .providers.tote_bets import place_audit_superfecta
             from .providers.tote_api import ToteClient
@@ -2975,31 +3016,18 @@ def tote_bet_page():
             if not selections_text:
                 flash("Selections must be provided for a combination bet (e.g., '1-2-3-4').", "error")
                 return redirect(request.referrer or url_for("tote_bet_page"))
-            
             selections = [p for p in (selections_text.replace("\r","\n").replace(",","\n").split("\n")) if p.strip()]
-
-            # Explicitly create a ToteClient with the correct endpoint based on the mode.
-            client_for_placement = None
+            client_for_placement = ToteClient()
             if mode == 'audit':
-                # Use the dedicated audit endpoint to prevent funding errors on paper bets.
-                audit_endpoint = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
-                # Create a client and point its base_url to the audit endpoint.
-                client_for_placement = ToteClient()
-                client_for_placement.base_url = audit_endpoint
-            else:
-                client_for_placement = ToteClient()
-
-            # NOTE: Assuming place_audit_superfecta accepts a 'client' argument.
+                client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
             res = place_audit_superfecta(db, mode=mode, product_id=product_id, selections=selections, stake=stake, currency=currency, post=True, stake_type="total", client=client_for_placement)
         else:
             flash(f"Bet type '{bet_type}' is not currently supported on this page.", "error")
             return redirect(request.referrer or url_for("tote_bet_page"))
 
-        # --- Handle Response ---
         st = res.get("placement_status")
         err_msg = res.get("error")
         if err_msg:
-            # Check for specific, common errors to provide better user feedback.
             if "Failed to fund ticket" in str(err_msg):
                 flash("Bet placement failed: Insufficient funds in the Tote account for a live bet.", "error")
             else:
@@ -3008,7 +3036,8 @@ def tote_bet_page():
             ok = str(st).upper() in ("PLACED", "ACCEPTED", "OK", "SUCCESS")
             msg = f"Bet placement status: {st}"
             fr = res.get("failure_reason")
-            if fr: msg += f" (reason: {fr})"
+            if fr:
+                msg += f" (reason: {fr})"
             flash(msg, "success" if ok else "error")
         else:
             flash("Bet recorded (no placement status returned).", "success")

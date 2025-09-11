@@ -49,8 +49,8 @@
               <td>{{ p.event_name }}</td>
               <td>{{ p.venue }}</td>
               <td>{{ p.status }}</td>
-              <td class="text-end">{{ '%.0f'|format(p.total_gross or 0) }}</td>
-              <td class="text-end">{{ '%.0f'|format(p.total_net or 0) }}</td>
+              <td class="text-end">{{ p.total_gross | f0 }}</td>
+              <td class="text-end">{{ p.total_net | f0 }}</td>
               <td class="text-end">{{ p.n_runners }}</td>
             </tr>
             {% else %}

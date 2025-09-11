@@ -74,10 +74,10 @@
           <td>{{ p.venue }}</td>
           <td>{{ p.country }}</td>
           <td>{{ p.status }}</td>
-          <td class="text-end">{{ '%.0f'|format(p.total_gross or 0) }}</td>
-          <td class="text-end">{{ '%.0f'|format(p.total_net or 0) }}</td>
-          <td class="text-end">{{ '%.0f'|format(p.rollover or 0) }}</td>
-          <td class="text-end">{{ p.deduction_rate is not none and ('%.1f%%' % (p.deduction_rate*100.0)) or '—' }}</td>
+          <td class="text-end">{{ p.total_gross | f0 }}</td>
+          <td class="text-end">{{ p.total_net | f0 }}</td>
+          <td class="text-end">{{ p.rollover | f0 }}</td>
+          <td class="text-end">{{ p.deduction_rate | pct1 }}</td>
           <td class="text-end">{{ p.dividend_count }}</td>
         </tr>
         {% else %}

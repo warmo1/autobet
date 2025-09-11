@@ -61,7 +61,7 @@
                     <td>{{ p.venue }}</td>
                     <td>{{ p.status }}</td>
                     <td>{{ p.currency }}</td>
-                    <td>{{ '%.2f'|format(p.total_net or 0) }}</td>
+                    <td>{{ p.total_net | f2 }}</td>
                     <td class="text-truncate" style="max-width:240px;">
                       <a href="{{ url_for('tote_superfecta_detail', product_id=p.product_id) }}">{{ p.product_id }}</a>
                     </td>

@@ -65,9 +65,9 @@
               <tr>
                 <td>{{ p.bet_type }}</td>
                 <td>{{ p.status }}</td>
-                <td class="text-end">{{ '%.2f'|format(p.total_gross or 0) }}</td>
-                <td class="text-end">{{ '%.2f'|format(p.total_net or 0) }}</td>
-                <td class="text-end">{{ '%.2f'|format(p.rollover or 0) }}</td>
+                <td class="text-end">{{ p.total_gross | f2 }}</td>
+                <td class="text-end">{{ p.total_net | f2 }}</td>
+                <td class="text-end">{{ p.rollover | f2 }}</td>
                 <td class="text-end">{{ p.deduction_rate_display }}</td>
                 <td class="text-truncate" style="max-width:320px;">{{ p.product_id }}</td>
               </tr>
