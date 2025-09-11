@@ -407,14 +407,25 @@ def index():
     )
     evs = sql_df(ev_sql, params={"start": start_iso, "end": end_iso})
 
-    # Optional: superfecta products upcoming
-    # UI Improvement: Also expand the time window for upcoming Superfecta products.
-    sf_sql = (
-        "SELECT product_id, event_id, event_name, venue, start_iso, status, currency, total_net "
-        "FROM vw_products_latest_totals WHERE UPPER(bet_type)='SUPERFECTA' AND start_iso BETWEEN @start AND @end "
-        "ORDER BY start_iso ASC LIMIT 20"
-    )
-    sfs = sql_df(sf_sql, params={"start": start_iso, "end": end_iso})
+    # Upcoming Superfecta (prefer 60m GB view with breakeven); graceful fallback if missing.
+    try:
+        sfs = sql_df(
+            "SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, COALESCE(total_net,0.0) AS total_net "
+            "FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso LIMIT 20",
+            cache_ttl=0,
+        )
+    except Exception:
+        # Fallback: next 60 minutes using latest totals view
+        sf_fallback = (
+            "SELECT p.product_id, p.event_id, p.event_name, COALESCE(e.venue,p.venue) AS venue, "
+            "UPPER(COALESCE(e.country,p.currency)) AS country, p.start_iso, COALESCE(p.status,'') AS status, p.currency, COALESCE(p.total_net,0.0) AS total_net "
+            "FROM vw_products_latest_totals p LEFT JOIN tote_events e USING(event_id) "
+            "WHERE UPPER(p.bet_type)='SUPERFECTA' "
+            "AND TIMESTAMP(p.start_iso) BETWEEN CURRENT_TIMESTAMP() AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 60 MINUTE) "
+            "AND UPPER(COALESCE(e.country,p.currency))='GB' "
+            "ORDER BY p.start_iso ASC LIMIT 20"
+        )
+        sfs = sql_df(sf_fallback, cache_ttl=10)
 
     return render_template(
         "index.html",
@@ -631,7 +642,8 @@ def tote_superfecta_page():
     # UI Improvement: Default country to GB and add a venue filter.
     country = (request.args.get("country") or os.getenv("DEFAULT_COUNTRY", "GB")).strip().upper()
     venue = (request.args.get("venue") or "").strip()
-    status = (request.args.get("status") or "OPEN").strip().upper()
+    # Default to all statuses (OPEN+SCHEDULED etc.) unless explicitly filtered
+    status = (request.args.get("status") or "").strip().upper()
     date_from = request.args.get("from") or _today_iso()
     date_to = request.args.get("to") or _today_iso()
     limit = int(request.args.get("limit", "200") or 200)
@@ -664,7 +676,12 @@ def tote_superfecta_page():
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY p.start_iso ASC LIMIT ?"; params.append(limit)
-    df = sql_df(sql, params=tuple(params))
+    try:
+        df = sql_df(sql, params=tuple(params))
+    except Exception:
+        # Fallback to raw tote_products if view not present
+        sql2 = sql.replace("FROM vw_products_latest_totals p", "FROM tote_products p")
+        df = sql_df(sql2, params=tuple(params))
 
     # Options for filters
     cdf = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
