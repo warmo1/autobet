@@ -130,9 +130,11 @@ def place_audit_simple_bet(
     # When querying product legs for audit, prefer the audit endpoint to avoid ID mismatches
     # (product and leg IDs should be the same, but Tote recommends querying from audit when testing)
 
-    bet_v1 = {"betId": f"bet-simple-{uuid.uuid4()}", "productId": used_product_id, "stake": {"currencyCode": currency, "totalAmount": float(stake)}, "legs": [{"productLegId": product_leg_id, "selections": [{"productLegSelectionID": selection_id}]}]}
-    
-    resp = None; err = None; sent_variables = None
+    # Build v1 (ticket) and v2 (results) variants
+    bet_v1 = {"betId": f"bet-simple-{uuid.uuid4()}", "productId": used_product_id, "stake": {"currencyCode": currency, "lineAmount": float(stake)}, "legs": [{"productLegId": product_leg_id, "selections": [{"productLegSelectionID": selection_id}]}]}
+    bet_v2 = {"bet": {"productId": used_product_id, "stake": {"amount": {"decimalAmount": float(stake)}, "currency": currency}, "legs": [{"productLegId": product_leg_id, "selections": [{"productLegSelectionID": selection_id}]}]}}
+
+    resp = None; err = None; sent_variables = None; used_schema = None
     if post:
         try:
             if not client:
@@ -141,26 +143,61 @@ def place_audit_simple_bet(
                 if mode != 'live':
                     client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
 
-            mutation_v1 = "mutation PlaceBets($input: PlaceBetsInput!) { placeBets(input:$input){ ticket{ id toteId bets{ nodes{ id toteId placement{ status rejectionReason } } } } } }"
+            # Try v1 first for audit compatibility
+            mutation_v1 = """
+            mutation PlaceBets($input: PlaceBetsInput!) {
+              placeBets(input:$input){
+                ticket{ id toteId bets{ nodes{ id toteId placement{ status rejectionReason } } } }
+              }
+            }
+            """
             variables_v1 = {"input": {"ticketId": f"ticket-{uuid.uuid4()}", "bets": [bet_v1]}}
-            sent_variables = variables_v1
-            resp = client.graphql_audit(mutation_v1, variables_v1)
+            try:
+                resp = client.graphql_audit(mutation_v1, variables_v1)
+                sent_variables = variables_v1; used_schema = "v1"
+            except Exception as e1:
+                # Fallback to v2
+                mutation_v2 = """
+                mutation PlaceBets($input: PlaceBetsInput!) {
+                  placeBets(input: $input) {
+                    results { toteBetId status failureReason }
+                  }
+                }
+                """
+                variables_v2 = {"input": {"bets": [bet_v2]}}
+                try:
+                    resp = client.graphql_audit(mutation_v2, variables_v2)
+                    sent_variables = variables_v2; used_schema = "v2"
+                except Exception as e2:
+                    err = str(e2)
+                    try:
+                        print("[AuditBet][ERROR] simple v1 variables:", json.dumps(variables_v1)[:400])
+                        print("[AuditBet][ERROR] simple v1 exception:", str(e1))
+                        print("[AuditBet][ERROR] simple v2 variables:", json.dumps(variables_v2)[:400])
+                        print("[AuditBet][ERROR] simple v2 exception:", err)
+                    except Exception:
+                        pass
         except Exception as e:
             err = str(e)
 
     placement_status = None; failure_reason = None
     try:
         if resp and isinstance(resp, dict):
-            ticket = ((resp.get("placeBets") or {}).get("ticket")) or ((resp.get("ticket")) if "ticket" in resp else None)
-            if ticket and isinstance(ticket, dict):
-                bets_node = ((ticket.get("bets") or {}).get("nodes"))
-                if isinstance(bets_node, list) and bets_node:
-                    placement = (bets_node[0].get("placement") or {})
-                    placement_status = placement.get("status")
-                    failure_reason = placement.get("rejectionReason")
-    except Exception: pass
+            if used_schema == "v2":
+                results = ((resp.get("placeBets") or {}).get("results"))
+                if isinstance(results, list) and results:
+                    placement_status = results[0].get("status"); failure_reason = results[0].get("failureReason")
+            else:
+                ticket = ((resp.get("placeBets") or {}).get("ticket")) or ((resp.get("ticket")) if "ticket" in resp else None)
+                if ticket and isinstance(ticket, dict):
+                    bets_node = ((ticket.get("bets") or {}).get("nodes"))
+                    if isinstance(bets_node, list) and bets_node:
+                        placement = (bets_node[0].get("placement") or {})
+                        placement_status = placement.get("status"); failure_reason = placement.get("rejectionReason")
+    except Exception:
+        pass
 
-    stored_req = {"schema": "v1", "product_id": product_id, "stake": stake, "currency": currency, "variables": sent_variables}
+    stored_req = {"schema": used_schema or "v1", "product_id": product_id, "stake": stake, "currency": currency, "variables": sent_variables}
     _record_audit_bq(sink, bet_id=bet_id, mode=mode, product_id=product_id, selection=selection_id, stake=stake, currency=currency, payload=stored_req, response=resp, error=err, placement_status=placement_status)
     
     out = {"bet_id": bet_id, "error": err, "response": resp, "placement_status": placement_status}
