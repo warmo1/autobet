@@ -9,7 +9,6 @@ load_dotenv(dotenv_path=env_path)
 @dataclass
 class Config:
     # --- Database and Core Settings ---
-    database_url: str = os.getenv("DATABASE_URL", "sqlite:///sports_bot.db")
     paper_starting_bankroll: float = float(os.getenv("PAPER_STARTING_BANKROLL", "1000"))
     admin_token: str = os.getenv("ADMIN_TOKEN", "")
 

@@ -4,7 +4,6 @@ import subprocess
 import json
 from dotenv import load_dotenv # Keep this
 from sports.db import get_db, init_db
-# from sports.schema import init_schema # No longer needed for BQ-native commands
 
 # Core application components
 from sports.webapp import create_app
@@ -14,37 +13,18 @@ from sports.providers.tote_bets import place_audit_superfecta, place_audit_win
 from sports.providers.tote_bets import refresh_bet_status
 from sports.providers.tote_bets import audit_list_bets, sync_bets_from_api
 from sports.providers.tote_subscriptions import run_subscriber as run_pool_subscriber
-# from sports.ingest.tote_horse import ingest_horse_day # Legacy, uses connect
 from sports.ingest.tote_events import ingest_tote_events
 from sports.ingest.tote_products import ingest_products
-# from sports.ingest.weather import backfill_weather_for_date # Module removed
-# from sports.ingest.hr_kaggle_results import ... # Module removed
-# from sports.extract import export_runner_dataset # Legacy
-# from sports.features import build_features # Legacy
-# from sports.weights import train_win_model, score_win_model # Legacy
-# from sports.eval_sf import evaluate_superfecta # Legacy
-# from sports.superfecta import recommend_superfecta_for_date # Legacy
-# from sports.export_bq import export_sqlite_to_bq # Legacy
-# from sports.worklog import sync_readme, post_slack_summary # Module removed
 
 def main(argv=None):
     """Main entry point for the command-line runner."""
     load_dotenv()
 
-    # The argparse block is now inside the main function and correctly indented.
-    # The legacy db_url and connect() logic has been removed.
     p = argparse.ArgumentParser(description="Sports Betting Bot")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # --- Data Fetching Command ---
-    sp_fetch = sub.add_parser("fetch-openfootball", help="Download/update openfootball datasets")
-    sp_fetch.add_argument("--mode", required=True, choices=['init', 'update'])
-    def _cmd_fetch_openfootball(args):
-        script_path = os.path.join(os.path.dirname(__file__), '..', 'scripts', 'fetch_openfootball.sh')
-        subprocess.run(['bash', script_path, args.mode], check=True)
-    sp_fetch.set_defaults(func=_cmd_fetch_openfootball)
-
     # --- DB initialization ---
+    # Initializes the BigQuery database by creating tables and views.
     sp_init_db = sub.add_parser("init-db", help="Initialize the BigQuery database (create tables and views)")
     sp_init_db.add_argument("--force", action="store_true", help="Run without confirmation prompt.")
     def _cmd_init_db(args):
@@ -53,11 +33,11 @@ def main(argv=None):
             if confirm.lower() != 'y':
                 print("Initialization cancelled.")
                 return
-        # The init_db function already prints its own status messages.
         init_db()
     sp_init_db.set_defaults(func=_cmd_init_db)
 
     # --- Application Commands ---
+    # Runs the web dashboard.
     sp_web = sub.add_parser("web", help="Run the web dashboard")
     sp_web.add_argument("--port", type=int, default=int(os.getenv("PORT", "8010")))
     def _cmd_web(args):
@@ -65,15 +45,14 @@ def main(argv=None):
         app.run(host="0.0.0.0", port=args.port)
     sp_web.set_defaults(func=_cmd_web)
 
+    # Runs the Telegram bot.
     sp_telegram = sub.add_parser("telegram", help="Run the Telegram bot")
     def _cmd_telegram(args):
         run_bot()
     sp_telegram.set_defaults(func=_cmd_telegram)
 
-    # NOTE: Most legacy SQLite-based commands have been removed for clarity.
-    # The focus is now on BigQuery-native commands for Tote data.
-
     # --- Tote API: Events via GraphQL ---
+    # Fetches Tote events (GraphQL) and store directly in BigQuery.
     sp_tote_events = sub.add_parser("tote-events", help="Fetch Tote events (GraphQL) and store directly in BigQuery.")
     sp_tote_events.add_argument("--first", type=int, default=100, help="Number of events to fetch")
     sp_tote_events.add_argument("--since", help="Filter events since ISO8601 (e.g., 2025-09-01T00:00:00Z)")
@@ -87,7 +66,7 @@ def main(argv=None):
     sp_tote_events.set_defaults(func=_cmd_tote_events)
 
     # --- Tote API: Events via GraphQL (date range) ---
-    # This command was already BQ-native and is preserved.
+    # Fetches Tote events (GraphQL) for a date range directly into BigQuery
     sp_tote_events_range = sub.add_parser("tote-events-range", help="Fetch Tote events (GraphQL) for a date range directly into BigQuery")
     sp_tote_events_range.add_argument("--from", dest="date_from", required=True, help="Start date YYYY-MM-DD (inclusive)")
     sp_tote_events_range.add_argument("--to", dest="date_to", required=True, help="End date YYYY-MM-DD (inclusive)")
@@ -127,6 +106,7 @@ def main(argv=None):
     sp_tote_events_range.set_defaults(func=_cmd_tote_events_range)
 
     # --- Tote API: GraphQL SDL probe ---
+    # Fetches the GraphQL SDL to verify access
     sp_tote_sdl = sub.add_parser("tote-graphql-sdl", help="Fetch the GraphQL SDL to verify access")
     def _cmd_tote_sdl(args):
         client = ToteClient()
@@ -135,7 +115,7 @@ def main(argv=None):
     sp_tote_sdl.set_defaults(func=_cmd_tote_sdl)
 
     # --- Tote API: SUPERFECTA products ---
-    # This command was already BQ-native and is preserved.
+    # Fetches SUPERFECTA products and store directly in BigQuery.
     sp_tote_super = sub.add_parser("tote-superfecta", help="Fetch SUPERFECTA products and store directly in BigQuery.")
     sp_tote_super.add_argument("--date", help="ISO date for products (YYYY-MM-DD)")
     sp_tote_super.add_argument("--status", choices=["OPEN","CLOSED","UNKNOWN"], default="OPEN")
@@ -149,12 +129,12 @@ def main(argv=None):
         db = get_db() # Use the BigQuery sink
         client = ToteClient()
         print(f"Ingesting SUPERFECTA products for date='{args.date or 'today'}' status='{args.status}' directly to BigQuery...")
-        # Use the generic ingest_products function, which is BQ-aware, to ensure data lands in the correct place.
         n = ingest_products(db, client, date_iso=args.date, status=args.status, first=args.first, bet_types=["SUPERFECTA"])
         print(f"[Tote SUPERFECTA] Ingested and upserted {n} product(s) to BigQuery.")
     sp_tote_super.set_defaults(func=_cmd_tote_super)
 
     # --- Tote API: Generic products (pool values) ---
+    # Fetches products across bet types and store directly in BigQuery
     sp_tote_prods = sub.add_parser("tote-products", help="Fetch products across bet types and store directly in BigQuery")
     sp_tote_prods.add_argument("--date", help="ISO date for products (YYYY-MM-DD)")
     sp_tote_prods.add_argument("--status", choices=["OPEN","CLOSED","UNKNOWN"], default="OPEN")
@@ -171,6 +151,7 @@ def main(argv=None):
     sp_tote_prods.set_defaults(func=_cmd_tote_prods)
 
     # --- Tote API: Results (horse placements) ---
+    # Ingests horse finishing positions for a date directly to BigQuery.
     sp_tote_results = sub.add_parser("tote-results", help="Ingest horse finishing positions for a date directly to BigQuery.")
     sp_tote_results.add_argument("--date", help="ISO date (YYYY-MM-DD)")
     sp_tote_results.add_argument("--first", type=int, default=500)
@@ -178,15 +159,12 @@ def main(argv=None):
         db = get_db()
         client = ToteClient()
         print(f"Ingesting results for date='{args.date or 'today'}' by fetching CLOSED products directly to BigQuery...")
-        # The ingest_products function now handles finishing positions.
-        # We call it with status='CLOSED' to get resulted products.
         n = ingest_products(db, client, date_iso=args.date, status="CLOSED", first=args.first, bet_types=None)
         print(f"[Tote Results] Scanned {n} product(s). Check logs for finishing positions.")
     sp_tote_results.set_defaults(func=_cmd_tote_results)
 
-    # NOTE: tote-weather command removed as its module was deprecated.
-
     # --- Tote API: Backfill helper (products CLOSED + results + weather) ---
+    # Backfills a date range directly to BigQuery: CLOSED products, results, and weather.
     sp_backfill = sub.add_parser("tote-backfill", help="Backfill a date range directly to BigQuery: CLOSED products, results, and weather.")
     sp_backfill.add_argument("--from", dest="date_from", required=True, help="Start date YYYY-MM-DD (inclusive)")
     sp_backfill.add_argument("--to", dest="date_to", required=True, help="End date YYYY-MM-DD (inclusive)")
@@ -217,7 +195,6 @@ def main(argv=None):
             ds = cur.isoformat()
             progress_bar.set_description(f"Backfilling {ds}")
             try:
-                # This call now ingests products, dividends, and finishing positions.
                 n1 = ingest_products(db, client, date_iso=ds, status="CLOSED", first=args.first, bet_types=bt)
             except Exception as e:
                 print(f"\n[Backfill] {ds}: products/results ERROR: {e}")
@@ -227,10 +204,8 @@ def main(argv=None):
         print(f"[Backfill] Done. products_scanned={total_prod}")
     sp_backfill.set_defaults(func=_cmd_backfill)
 
-    # NOTE: Kaggle horse racing commands removed as their module was deprecated.
-
     # --- BigQuery maintenance: cleanup temp tables ---
-    # This command was already BQ-native and is preserved.
+    # Deletes leftover _tmp tables in the configured BigQuery dataset
     sp_bq_clean = sub.add_parser("bq-cleanup", help="Delete leftover _tmp tables in the configured BigQuery dataset")
     sp_bq_clean.add_argument("--older", type=int, default=None, help="Only delete temp tables older than N days")
     def _cmd_bq_clean(args):
@@ -247,6 +222,7 @@ def main(argv=None):
     sp_bq_clean.set_defaults(func=_cmd_bq_clean)
 
     # --- Daily Tote pipeline: ingest products/results/weather directly to BigQuery ---
+    # Runs daily pipeline for a date directly to BigQuery: products (OPEN+CLOSED), results, weather.
     sp_pipe = sub.add_parser("tote-pipeline", help="Run daily pipeline for a date directly to BigQuery: products (OPEN+CLOSED), results, weather.")
     sp_pipe.add_argument("--date", required=True, help="ISO date YYYY-MM-DD")
     sp_pipe.add_argument("--first", type=int, default=500, help="GraphQL page size per call")
@@ -264,7 +240,6 @@ def main(argv=None):
             n_open = 0
         print(f"[Pipeline] {ds}: products CLOSED...")
         try:
-            # This call now also ingests results.
             n_closed = ingest_products(db, client, date_iso=ds, status="CLOSED", first=args.first, bet_types=bt)
         except Exception as e:
             print(f"[Pipeline] {ds}: products CLOSED/results ERROR: {e}")
@@ -273,7 +248,7 @@ def main(argv=None):
     sp_pipe.set_defaults(func=_cmd_pipeline)
 
     # --- Tote: Audit Bets ---
-    # These commands now write to BigQuery's tote_audit_bets table.
+    # Places an audit-mode SUPERFECTA bet (no live placement unless configured)
     sp_audit_sf = sub.add_parser("tote-audit-superfecta", help="Place an audit-mode SUPERFECTA bet (no live placement unless configured)")
     sp_audit_sf.add_argument("--product", required=True)
     sp_audit_sf.add_argument("--sel", required=True, help="Selection string like 3-7-1-5")
@@ -286,6 +261,7 @@ def main(argv=None):
         print("[Audit SF]", res)
     sp_audit_sf.set_defaults(func=_cmd_audit_sf)
 
+    # Places an audit-mode WIN bet (no live placement unless configured)
     sp_audit_win = sub.add_parser("tote-audit-win", help="Place an audit-mode WIN bet (no live placement unless configured)")
     sp_audit_win.add_argument("--event", required=True)
     sp_audit_win.add_argument("--selection", required=True, help="Selection id for the runner")
@@ -298,6 +274,7 @@ def main(argv=None):
         print("[Audit WIN]", res)
     sp_audit_win.set_defaults(func=_cmd_audit_win)
 
+    # Refreshes Tote bet status (audit/live) by bet_id
     sp_bet_status = sub.add_parser("tote-bet-status", help="Refresh Tote bet status (audit/live) by bet_id")
     sp_bet_status.add_argument("--bet-id", required=True)
     sp_bet_status.add_argument("--post", action="store_true", help="If set, attempt to call Tote API for status")
@@ -308,6 +285,7 @@ def main(argv=None):
     sp_bet_status.set_defaults(func=_cmd_bet_status)
 
     # --- Tote subscriptions: onPoolTotalChanged listener ---
+    # Subscribes to onPoolTotalChanged and persist snapshots to BigQuery.
     sp_sub = sub.add_parser("tote-subscribe-pools", help="Subscribe to onPoolTotalChanged and persist snapshots to BigQuery.")
     sp_sub.add_argument("--duration", type=int, help="Run for N seconds then exit")
     def _cmd_sub(args):
@@ -316,6 +294,7 @@ def main(argv=None):
     sp_sub.set_defaults(func=_cmd_sub)
 
     # --- Tote audit: list bets and optional sync ---
+    # Lists audit bets from GraphQL and optionally sync outcomes to BigQuery.
     sp_list = sub.add_parser("tote-audit-bets", help="List audit bets from GraphQL and optionally sync outcomes to BigQuery.")
     sp_list.add_argument("--since", help="ISO8601 since")
     sp_list.add_argument("--until", help="ISO8601 until")
@@ -330,9 +309,9 @@ def main(argv=None):
             print(f"[Audit Bets] Synced {n} bet(s)")
     sp_list.set_defaults(func=_cmd_list)
 
-    # NOTE: Worklog command removed as its module was deprecated.
     
     # This command does not interact with the database and is preserved.
+    # Exports BigQuery schema to a CSV file
     sp_bq_schema = sub.add_parser("bq-schema-export", help="Export BigQuery schema to a CSV file")
     def _cmd_bq_schema_export(args):
         from sports.bq_schema import export_bq_schema_to_csv
