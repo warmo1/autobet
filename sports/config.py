@@ -48,4 +48,16 @@ class Config:
     bq_dataset: str = os.getenv("BQ_DATASET", "")
     bq_location: str = os.getenv("BQ_LOCATION", "EU")
 
+    # --- BigQuery client options ---
+    # Use the BigQuery Storage API for faster dataframe reads.
+    bq_use_storage_api: bool = os.getenv("BQ_USE_STORAGE_API", "true").lower() in ("1", "true", "yes", "on")
+
+    # --- Web SQL cache (applies to sql_df) ---
+    # Enable a small in-process TTL cache for repeated SELECTs.
+    web_sqldf_cache_enabled: bool = os.getenv("WEB_SQLDF_CACHE", "true").lower() in ("1", "true", "yes", "on")
+    web_sqldf_cache_ttl_s: int = int(os.getenv("WEB_SQLDF_CACHE_TTL", "30"))
+    web_sqldf_cache_max_entries: int = int(os.getenv("WEB_SQLDF_CACHE_MAX", "512"))
+    # Optional soft cap on returned rows from sql_df; 0 disables.
+    web_sqldf_max_rows: int = int(os.getenv("WEB_SQLDF_MAX_ROWS", "0"))
+
 cfg = Config()

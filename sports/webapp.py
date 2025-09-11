@@ -21,6 +21,97 @@ import math
 from collections import defaultdict
 import requests
 
+# Simple in-process TTL cache for sql_df results
+_SQLDF_CACHE_LOCK = threading.Lock()
+_SQLDF_CACHE: dict[tuple, tuple[float, pd.DataFrame]] = {}
+
+def _sqldf_cache_key(final_sql: str, params: Any) -> tuple:
+    """Build a stable cache key from SQL, params, and active dataset settings."""
+    proj = cfg.bq_project or ""
+    ds = cfg.bq_dataset or ""
+    try:
+        if isinstance(params, Mapping):
+            # Normalize mapping by sorting keys
+            kv = tuple(sorted((str(k), None if v is None else (float(v) if isinstance(v, (int, float)) else str(v))) for k, v in params.items()))
+        elif isinstance(params, (list, tuple)):
+            kv = tuple(None if v is None else (float(v) if isinstance(v, (int, float)) else str(v)) for v in params)
+        elif params is None:
+            kv = ()
+        else:
+            kv = (str(params),)
+    except Exception:
+        # Fallback to stringifying if any issue
+        kv = (str(params),)
+    return (proj, ds, final_sql, kv)
+
+def _sqldf_cache_get(key: tuple) -> Optional[pd.DataFrame]:
+    if not cfg.web_sqldf_cache_enabled:
+        return None
+    now = time.time()
+    with _SQLDF_CACHE_LOCK:
+        ent = _SQLDF_CACHE.get(key)
+        if not ent:
+            return None
+        exp, df = ent
+        if exp < now:
+            # expired; drop
+            try:
+                del _SQLDF_CACHE[key]
+            except Exception:
+                pass
+            return None
+        # Return a deep copy to avoid mutation-by-callers
+        try:
+            return df.copy(deep=True)
+        except Exception:
+            return df
+
+def _sqldf_cache_set(key: tuple, df: pd.DataFrame, ttl: int) -> None:
+    if not cfg.web_sqldf_cache_enabled or ttl <= 0:
+        return
+    exp = time.time() + ttl
+    with _SQLDF_CACHE_LOCK:
+        # Capacity guard: purge expired then trim if needed
+        if len(_SQLDF_CACHE) >= max(16, cfg.web_sqldf_cache_max_entries):
+            now = time.time()
+            # Remove expired entries first
+            expired = [k for k, (e, _) in _SQLDF_CACHE.items() if e < now]
+            for k in expired:
+                _SQLDF_CACHE.pop(k, None)
+            # If still over capacity, drop oldest entries
+            if len(_SQLDF_CACHE) >= cfg.web_sqldf_cache_max_entries:
+                oldest = sorted(_SQLDF_CACHE.items(), key=lambda it: it[1][0])[: max(1, len(_SQLDF_CACHE) - cfg.web_sqldf_cache_max_entries + 1)]
+                for k, _ in oldest:
+                    _SQLDF_CACHE.pop(k, None)
+        # Store a deep copy to isolate cache
+        try:
+            _SQLDF_CACHE[key] = (exp, df.copy(deep=True))
+        except Exception:
+            _SQLDF_CACHE[key] = (exp, df)
+
+def _sql_is_readonly(sql: str) -> bool:
+    """Best-effort check that a query is read-only (SELECT/WITH).
+
+    Strips leading comments and whitespace, then checks the first token.
+    """
+    try:
+        s = sql.strip()
+        # Remove simple leading line comments
+        lines = []
+        for line in s.splitlines():
+            ls = line.lstrip()
+            if ls.startswith("--"):
+                # skip pure comment lines
+                continue
+            lines.append(line)
+        s2 = "\n".join(lines).strip().upper()
+        # Handle parentheses around CTEs
+        while s2.startswith("("):
+            s2 = s2[1:].lstrip()
+        return s2.startswith("SELECT") or s2.startswith("WITH")
+    except Exception:
+        return False
+
 # Helper function for permutations (nPr) - not directly used in PL, but good to have
 def _permutations_count(n, r):
     if r < 0 or r > n:
@@ -223,13 +314,51 @@ def sql_df(*args, **kwargs) -> pd.DataFrame:
         sql = args[1]
         params = kwargs.get("params") or (args[2] if len(args) > 2 else None)
 
+    # Optional safety: enforce read-only queries from web layer
+    enforce_readonly = kwargs.get("read_only", True)
+    if enforce_readonly and not _sql_is_readonly(sql):
+        raise PermissionError("sql_df only allows SELECT/WITH queries from the web layer.")
+
+    cache_ttl = kwargs.get("cache_ttl")
+    if cache_ttl is None:
+        cache_ttl = max(0, int(cfg.web_sqldf_cache_ttl_s))
+
     q, qp = _build_bq_query(sql, params)
+    # Cache by final SQL + original params signature
+    ck = _sqldf_cache_key(q, params)
+    if cache_ttl > 0:
+        hit = _sqldf_cache_get(ck)
+        if hit is not None:
+            # Optional soft row cap on return
+            if cfg.web_sqldf_max_rows and cfg.web_sqldf_max_rows > 0:
+                try:
+                    return hit.head(cfg.web_sqldf_max_rows).copy(deep=True)
+                except Exception:
+                    return hit
+            return hit
+
     job_config = bigquery.QueryJobConfig(
         default_dataset=f"{cfg.bq_project}.{cfg.bq_dataset}",
         query_parameters=qp,
     )
     db = get_db()
-    return db.query(q, job_config=job_config).to_dataframe(create_bqstorage_client=False)
+    it = db.query(q, job_config=job_config)
+    # Prefer BQ Storage API if enabled; graceful fallback
+    use_bqs = bool(cfg.bq_use_storage_api)
+    try:
+        df = it.to_dataframe(create_bqstorage_client=use_bqs)
+    except Exception:
+        df = it.to_dataframe(create_bqstorage_client=False)
+
+    # Soft cap rows if configured (for safety); 0 disables
+    if cfg.web_sqldf_max_rows and cfg.web_sqldf_max_rows > 0:
+        try:
+            df = df.head(cfg.web_sqldf_max_rows)
+        except Exception:
+            pass
+
+    _sqldf_cache_set(ck, df, cache_ttl)
+    return df
 
 @app.template_filter('datetime')
 def _fmt_datetime(ts: float | int | str):

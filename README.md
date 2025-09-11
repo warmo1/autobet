@@ -38,6 +38,17 @@ Key pages:
 - `/audit/bets` – audit bets via Tote API (read-only in BQ mode)
 - `/imports` – latest import stats (raw + structured)
 
+### Performance options
+
+- BigQuery Storage API: set `BQ_USE_STORAGE_API=true` to speed dataframe fetches.
+- SQL result cache: the web app caches identical SELECT queries for a short TTL.
+  - Configure with env vars:
+    - `WEB_SQLDF_CACHE=true|false` (default true)
+    - `WEB_SQLDF_CACHE_TTL=30` (seconds; default 30)
+    - `WEB_SQLDF_CACHE_MAX=512` (max entries; default 512)
+    - `WEB_SQLDF_MAX_ROWS=0` (soft cap on returned rows; 0 disables)
+  - The cache applies only to `SELECT`/`WITH` queries. Mutating queries are blocked via `sql_df` and should use the internal BigQuery execute helper.
+
 ### Historical Tote backfill
 
 Two options to ingest past Tote data directly into BigQuery:
