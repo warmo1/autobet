@@ -35,93 +35,80 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
     # GraphQL WS handshake (try modern then legacy)
     headers = {"Authorization": f"Api-Key {cfg.tote_api_key}"}
     subprotocols = ["graphql-transport-ws", "graphql-ws"]
-    # Expanded GraphQL subscription: include additional channels that we handle/log.
-    # Keep selection sets conservative to avoid schema mismatches.
-    query = (
-        """
-subscription {
-  onPoolTotalChanged {
-    isFinalized
-    productId
-    total {
-      netAmounts {
-        currency {
-          code
-        }
-        decimalAmount
-      }
-      grossAmounts {
-        currency {
-          code
-        }
-        decimalAmount
-      }
-    }
-  }
-  onPoolDividendChanged {
-    productId
-    dividends {
-      dividend {
-        name
-        type
-        status
-        amounts {
-          decimalAmount
-          currency {
-            code
-          }
-        }
-      }
-      legs {
-        legId
-        selections {
-          id
-          finishingPosition
-        }
-      }
-    }
-  }
-  onEventResultChanged {
-    eventId
-    competitorResults {
-      competitorId
-      finishingPosition
-      status
-    }
-  }
-  onEventStatusChanged {
-    eventId
-    status
-  }
-  onCompetitorStatusChanged {
-    eventId
-    competitorId
-    status
-  }
-  onProductStatusChanged {
-    productId
-    status
-  }
-  onSelectionStatusChanged {
-    productId
-    selectionId
-    status
-  }
-  onEventUpdated {
-    eventId
-  }
-  onLinesChanged {
-    productId
-  }
-  onBetAccepted { betId }
-  onBetRejected { betId }
-  onBetFailed { betId }
-  onBetCancelled { betId }
-  onBetResulted { betId }
-  onBetSettled { betId }
-}
-"""
-    )
+    # Server enforces one root field per subscription operation.
+    # Prepare a list of single-field subscription documents we will start with unique IDs.
+    def _subs() -> list[tuple[str, str]]:
+        docs: list[tuple[str, str]] = []
+        # 1) Pool totals
+        docs.append((
+            "onPoolTotalChanged",
+            """
+            subscription { onPoolTotalChanged {
+              isFinalized
+              productId
+              total {
+                netAmounts { currency { code } decimalAmount }
+                grossAmounts { currency { code } decimalAmount }
+              }
+            } }
+            """.strip(),
+        ))
+        # 2) Dividends
+        docs.append((
+            "onPoolDividendChanged",
+            """
+            subscription { onPoolDividendChanged {
+              productId
+              dividends {
+                dividend { name type status amounts { decimalAmount currency { code } } }
+                legs { legId selections { id finishingPosition } }
+              }
+            } }
+            """.strip(),
+        ))
+        # 3) Event result
+        docs.append((
+            "onEventResultChanged",
+            "subscription { onEventResultChanged { eventId competitorResults { competitorId finishingPosition status } } }",
+        ))
+        # 4) Event status
+        docs.append((
+            "onEventStatusChanged",
+            "subscription { onEventStatusChanged { eventId status } }",
+        ))
+        # 5) Competitor status
+        docs.append((
+            "onCompetitorStatusChanged",
+            "subscription { onCompetitorStatusChanged { eventId competitorId status } }",
+        ))
+        # 6) Product status
+        docs.append((
+            "onProductStatusChanged",
+            "subscription { onProductStatusChanged { productId status } }",
+        ))
+        # 7) Selection status
+        docs.append((
+            "onSelectionStatusChanged",
+            "subscription { onSelectionStatusChanged { productId selectionId status } }",
+        ))
+        # 8) Event updated
+        docs.append((
+            "onEventUpdated",
+            "subscription { onEventUpdated { eventId } }",
+        ))
+        # 9) Lines changed
+        docs.append((
+            "onLinesChanged",
+            "subscription { onLinesChanged { productId } }",
+        ))
+        # 10-15) Bet lifecycle (lightweight payloads)
+        docs.append(("onBetAccepted", "subscription { onBetAccepted { betId } }"))
+        docs.append(("onBetRejected", "subscription { onBetRejected { betId } }"))
+        docs.append(("onBetFailed", "subscription { onBetFailed { betId } }"))
+        docs.append(("onBetCancelled", "subscription { onBetCancelled { betId } }"))
+        docs.append(("onBetResulted", "subscription { onBetResulted { betId } }"))
+        docs.append(("onBetSettled", "subscription { onBetSettled { betId } }"))
+        return docs
     started = time.time()
     # Cache product context to enrich snapshots without repeated queries
     ctx_cache: dict[str, dict] = {}
@@ -288,10 +275,19 @@ subscription {
                         m = json.loads(await ws.recv())
                         if m.get("type") in ("connection_ack", "ka"):
                             break
-                    await ws.send(json.dumps({"id": "1", "type": "subscribe", "payload": {"query": query}}))
+                    # Start multiple single-field subscriptions with unique ids
+                    for idx, (_name, qdoc) in enumerate(_subs(), start=1):
+                        try:
+                            await ws.send(json.dumps({"id": str(idx), "type": "subscribe", "payload": {"query": qdoc}}))
+                        except Exception:
+                            continue
                 else:
                     await ws.send(json.dumps({"type": "connection_init", "payload": {"authorization": f"Api-Key {cfg.tote_api_key}"}}))
-                    await ws.send(json.dumps({"id": "1", "type": "start", "payload": {"query": query}}))
+                    for idx, (_name, qdoc) in enumerate(_subs(), start=1):
+                        try:
+                            await ws.send(json.dumps({"id": str(idx), "type": "start", "payload": {"query": qdoc}}))
+                        except Exception:
+                            continue
 
                 backoff = 1.0
                 while True:
@@ -308,16 +304,23 @@ subscription {
                         msg = {"type": "raw", "raw": raw}
                     # Handle server error frames explicitly
                     t = str(msg.get("type") or "")
-                    if t in ("error", "connection_error"):
+                    if t == "connection_error":
                         try:
-                            print(f"[PoolSub] Server error frame: {msg}")
+                            print(f"[PoolSub] Connection error: {msg}")
                         except Exception:
                             pass
                         try:
                             await ws.close(code=1011)
                         except Exception:
                             pass
-                        break  # reconnect fast
+                        break  # reconnect
+                    if t == "error":
+                        # Subscription-level error (e.g., bad query). Log and continue other subs.
+                        try:
+                            print(f"[PoolSub] Subscription error: {msg}")
+                        except Exception:
+                            pass
+                        continue
                     # Normalize to a common shape
                     if t in ("next", "data"):
                         payload = (msg.get("payload") or {}).get("data") or {}
