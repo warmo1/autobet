@@ -19,6 +19,7 @@ def _record_audit_bq(
     sink,
     *,
     bet_id: str,
+    mode: str,
     product_id: str,
     selection: str,
     stake: float,
@@ -32,12 +33,12 @@ def _record_audit_bq(
     row = {
         "bet_id": bet_id,
         "ts_ms": _now_ms(),
-        "mode": "audit",
+        "mode": mode,
         "product_id": product_id,
         "selection": selection,
         "stake": float(stake),
         "currency": currency,
-        "status": placement_status or ('audit-recorded' if error is None else 'audit-error'),
+        "status": placement_status or (f'{mode}-recorded' if error is None else f'{mode}-error'),
         "response_json": json.dumps({"request": payload, "response": response}),
         "error": error,
     }
@@ -81,6 +82,7 @@ def place_audit_simple_bet(
     currency: str = "GBP",
     post: bool = True,
     client: ToteClient | None = None,
+    mode: str = "audit",
 ) -> Dict[str, Any]:
     """Audit-mode for a simple single-leg, single-selection bet (e.g., WIN). Writes to BigQuery."""
     product_leg_id = None
@@ -100,10 +102,12 @@ def place_audit_simple_bet(
 
     if not product_leg_id:
         try:
-            # Use provided client if available (respects audit/live endpoint), else default
-            client = client or ToteClient()
+            # Use a new client for this query to ensure it hits the live endpoint,
+            # as the audit endpoint may not support product queries.
+            # The 'client' parameter is for the subsequent bet placement.
+            query_client = ToteClient()
             query = "query ProductLegs($id: String){ product(id: $id){ ... on BettingProduct { legs{ nodes{ id } } } } }"
-            data = client.graphql(query, {"id": product_id})
+            data = query_client.graphql(query, {"id": product_id})
             legs = (((data.get("product") or {}).get("legs") or {}).get("nodes")) or []
             if legs:
                 product_leg_id = legs[0].get("id")
@@ -114,16 +118,45 @@ def place_audit_simple_bet(
 
     if not product_leg_id:
         err_msg = f"Could not determine productLegId for product {product_id}"
-        _record_audit_bq(sink, bet_id=bet_id, product_id=product_id, selection=selection_id, stake=stake, currency=currency,
+        _record_audit_bq(sink, bet_id=bet_id, mode=mode, product_id=product_id, selection=selection_id, stake=stake, currency=currency,
                          payload={"error": err_msg}, response=None, error=err_msg)
         return {"bet_id": bet_id, "error": err_msg}
 
-    bet_v1 = {"betId": f"bet-simple-{uuid.uuid4()}", "productId": product_id, "stake": {"currencyCode": currency, "totalAmount": float(stake)}, "legs": [{"productLegId": product_leg_id, "selections": [{"productLegSelectionID": selection_id}]}]}
+    used_product_id = product_id
+    if mode == 'audit':
+        # The audit endpoint requires a synthetic product ID format (BET_TYPE:EVENT_ID).
+        # The live product ID (UUID) is not recognized.
+        event_id_rows = _bq_query_rows(sink, "SELECT event_id, bet_type FROM tote_products WHERE product_id=@pid LIMIT 1", {"pid": product_id})
+        
+    # Get event_id and bet_type for productLegId conversion
+    event_id = None
+    bet_type_from_db = None
+    prod_info = _bq_query_rows(sink, 
+        "SELECT event_id, bet_type FROM tote_products WHERE product_id=@pid LIMIT 1",
+        {"pid": product_id} # Use original product_id to query BQ
+    )
+    if prod_info:
+        event_id = prod_info[0].get("event_id")
+        bet_type_from_db = prod_info[0].get("bet_type")
+
+        if event_id_rows:
+            event_id = event_id_rows[0].get("event_id")
+            bet_type = event_id_rows[0].get("bet_type")
+            if event_id and bet_type:
+                used_product_id = f"{bet_type.upper()}:{event_id}"
+                print(f"[AuditBet] Using synthetic product ID for audit mode: {used_product_id}")
+
+    bet_v1 = {"betId": f"bet-simple-{uuid.uuid4()}", "productId": used_product_id, "stake": {"currencyCode": currency, "totalAmount": float(stake)}, "legs": [{"productLegId": product_leg_id, "selections": [{"productLegSelectionID": selection_id}]}]}
     
     resp = None; err = None; sent_variables = None
     if post:
         try:
-            client = client or ToteClient()
+            if not client:
+                client = ToteClient()
+                # Default to audit unless explicitly live
+                if mode != 'live':
+                    client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+
             mutation_v1 = "mutation PlaceBets($input: PlaceBetsInput!) { placeBets(input:$input){ ticket{ id toteId bets{ nodes{ id toteId placement{ status rejectionReason } } } } } }"
             variables_v1 = {"input": {"ticketId": f"ticket-{uuid.uuid4()}", "bets": [bet_v1]}}
             sent_variables = variables_v1
@@ -144,7 +177,7 @@ def place_audit_simple_bet(
     except Exception: pass
 
     stored_req = {"schema": "v1", "product_id": product_id, "stake": stake, "currency": currency, "variables": sent_variables}
-    _record_audit_bq(sink, bet_id=bet_id, product_id=product_id, selection=selection_id, stake=stake, currency=currency, payload=stored_req, response=resp, error=err, placement_status=placement_status)
+    _record_audit_bq(sink, bet_id=bet_id, mode=mode, product_id=product_id, selection=selection_id, stake=stake, currency=currency, payload=stored_req, response=resp, error=err, placement_status=placement_status)
     
     out = {"bet_id": bet_id, "error": err, "response": resp, "placement_status": placement_status}
     if failure_reason: out["failure_reason"] = failure_reason
@@ -162,7 +195,7 @@ def place_audit_superfecta(
     post: bool = False,
     stake_type: str = "total",  # 'total' or 'line' for v1 schema
     placement_product_id: Optional[str] = None,
-    mode: str | None = None,
+    mode: str = "audit",
     client: ToteClient | None = None,
 ) -> Dict[str, Any]:
     """Audit-mode Superfecta bet. Supports single selection or a list (multiple bets).
@@ -213,7 +246,9 @@ def place_audit_superfecta(
     # If mapping missing, fetch live from Tote GraphQL (handles cases where selections were not yet persisted)
     if not by_number:
         try:
-            client = client or ToteClient()
+            # Use a new client for this query to ensure it hits the live endpoint.
+            # The 'client' parameter is for the subsequent bet placement.
+            query_client = ToteClient()
             query = """
             query ProductLegs($id: String){
               product(id: $id){
@@ -223,7 +258,7 @@ def place_audit_superfecta(
               }
             }
             """
-            data = client.graphql(query, {"id": product_id})
+            data = query_client.graphql(query, {"id": product_id})
             prod = data.get("product") or {}
             legs = ((prod.get("legs") or {}).get("nodes")) or []
             # Use first leg
@@ -302,6 +337,7 @@ def place_audit_superfecta(
         _record_audit_bq(
             sink,
             bet_id=bet_id,
+            mode=mode,
             product_id=product_id,
             selection=",".join(bet_lines),
             stake=stake,
@@ -314,11 +350,60 @@ def place_audit_superfecta(
     # Choose product id used for placement (may differ from the graph id)
     used_product_id = (placement_product_id or product_id)
 
+    if mode == 'audit' and not placement_product_id:
+        # The audit endpoint requires a synthetic product ID format (BET_TYPE:EVENT_ID).
+        # The live product ID (UUID) is not recognized.
+        event_id_rows = _bq_query_rows(sink, "SELECT event_id, bet_type FROM tote_products WHERE product_id=@pid LIMIT 1", {"pid": product_id})
+        if event_id_rows:
+            event_id = event_id_rows[0].get("event_id")
+            bet_type = event_id_rows[0].get("bet_type")
+            if event_id and bet_type:
+                used_product_id = f"{bet_type.upper()}:{event_id}"
+                print(f"[AuditBet] Using synthetic product ID for audit mode: {used_product_id}")
+
+    # Construct synthetic productLegId for audit mode
+    audit_product_leg_id = product_leg_id # Default to what was found/fetched (UUID)
+    if mode == 'audit' and event_id and bet_type_from_db:
+        audit_product_leg_id = f"{bet_type_from_db.upper()}:{event_id}"
+
+    # --- Helper function to convert a line string to GraphQL leg structure ---
+    def _line_to_legs(line: str) -> Optional[Dict[str, Any]]:
+        try:
+            parts = [int(x.strip()) for x in line.split('-') if x.strip()]
+            if len(parts) < 4:
+                return None
+            sels: List[Dict[str, Any]] = []
+            for pos, num in enumerate(parts[:4], start=1):
+                # For audit mode, use the runner number directly as selection ID
+                # For live mode, use the UUID from by_number
+                if mode == 'audit':
+                    audit_sel_id = str(num) # Use the runner number as string
+                else:
+                    audit_sel_id = by_number.get(int(num)) # Use the UUID from by_number
+                    if not audit_sel_id:
+                        return None # If live mode and no UUID found, fail
+
+                sels.append({"productLegSelectionID": audit_sel_id, "position": pos})
+            
+            return {
+                "productLegId": audit_product_leg_id, # Use synthetic productLegId
+                "selections": sels,
+            }
+        except (ValueError, KeyError):
+            return None
+
+    # Process legs using the helper function
+    legs = []
+    for s in bet_lines:
+        lg = _line_to_legs(s)
+        if not lg:
+            continue
+        legs.append(lg)
+
     # Build bets arrays for both schema variants
     # v2 (docs/tote_queries.graphql): PlaceBetsInput with results[]
     bets_v2: List[Dict[str, Any]] = []
-    for s in bet_lines:
-        lg = _line_to_legs(s)
+    for lg in legs: # Use the processed legs
         bet_obj = {
             "productId": used_product_id,
             "stake": {
@@ -332,8 +417,7 @@ def place_audit_superfecta(
 
     # v1 (older audit schema): ticket + bets with currencyCode/totalAmount/lineAmount
     bets_v1: List[Dict[str, Any]] = []
-    for s in bet_lines:
-        lg = _line_to_legs(s)
+    for lg in legs: # Use the processed legs
         stake_obj = {"currencyCode": currency, "lineAmount": line_stake}
         bets_v1.append({
             "betId": f"bet-superfecta-{uuid.uuid4()}",
@@ -347,7 +431,12 @@ def place_audit_superfecta(
     sent_variables = None
     if post:
         try:
-            client = client or ToteClient()
+            if not client:
+                client = ToteClient()
+                # Default to audit unless explicitly live
+                if mode != 'live':
+                    client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+
             # Try v1 (ticket) first for compatibility with audit endpoint
             mutation_v1 = """
             mutation PlaceBets($input: PlaceBetsInput!) {
@@ -443,6 +532,7 @@ def place_audit_superfecta(
     _record_audit_bq(
         sink,
         bet_id=bet_id,
+        mode=mode,
         product_id=product_id,
         selection=sel_str,
         stake=stake,
@@ -467,51 +557,54 @@ def place_audit_win(
     currency: str = "GBP",
     post: bool = False,
     client: ToteClient | None = None,
+    mode: str = "audit",
 ) -> Dict[str, Any]:
-    payload = {
-        "eventId": event_id,
-        "selectionId": selection_id,
-        "stake": f"{stake:.2f}",
-        "currency": currency,
-        "partnerId": None,
-        "audit": True,
-    }
-    resp = None
-    err = None
-    if post:
-        try:
-            client = client or ToteClient()
-            mutation = """
-            mutation PlaceBets($input: PlaceBetsInput!) {
-              placeBets(input:$input){
-                ticket{ id toteId idempotent bets{ nodes{ id toteId placement{ status } } } }
-              }
-            }
-            """
-            # TODO: Align with official WIN PlaceBetInput when confirmed
-            variables = {"input": {"ticketId": f"ticket-{uuid.uuid4()}", "bets": [{
-                "betId": f"bet-win-{uuid.uuid4()}",
-                "productId": f"WIN:{event_id}",
-                "stake": {"currencyCode": currency, "totalAmount": float(stake), "lineAmount": float(stake)},
-                "legs": [],
-            }]}}
-            resp = client.graphql_audit(mutation, variables)
-        except Exception as e:
-            err = str(e)
-    # Use synthetic product id for WIN audit record (event scoped)
-    bet_id = f"WIN:{event_id}:{_now_ms()}"
-    _record_audit_bq(
+    """
+    Places a WIN bet for a given event. This is a helper for the CLI.
+    It finds the WIN product for the event and then uses the simple bet placement logic.
+    """
+    # Find the OPEN WIN product_id for the event from BigQuery
+    win_product_rows = _bq_query_rows(
         sink,
-        bet_id=bet_id,
-        product_id=f"WIN:{event_id}",
-        selection=selection_id,
+        "SELECT product_id FROM tote_products WHERE event_id=@eid AND bet_type='WIN' AND status='OPEN' LIMIT 1",
+        {"eid": event_id}
+    )
+    
+    actual_product_id = None
+    if win_product_rows:
+        actual_product_id = win_product_rows[0].get("product_id")
+
+    bet_id = f"WIN:{event_id}:{_now_ms()}"
+
+    if not actual_product_id:
+        err_msg = f"Could not find an OPEN WIN product for event {event_id}"
+        # Record failure using the synthetic product ID for traceability
+        _record_audit_bq(
+            sink,
+            bet_id=bet_id,
+            mode=mode,
+            product_id=f"WIN:{event_id}",
+            selection=selection_id,
+            stake=stake,
+            currency=currency,
+            payload={"error": err_msg},
+            response=None,
+            error=err_msg,
+        )
+        return {"bet_id": bet_id, "error": err_msg}
+
+    # We found a product, now place the bet using the common simple bet function
+    # The client passed in will be configured by place_audit_simple_bet if it's None
+    return place_audit_simple_bet(
+        sink,
+        product_id=actual_product_id,
+        selection_id=selection_id,
         stake=stake,
         currency=currency,
-        payload=payload,
-        response=resp,
-        error=err,
+        post=post,
+        client=client,
+        mode=mode
     )
-    return {"bet_id": bet_id, "error": err, "response": resp}
 
 
 def refresh_bet_status(sink, *, bet_id: str, post: bool = False) -> Dict[str, Any]:

@@ -257,7 +257,7 @@ def main(argv=None):
     sp_audit_sf.add_argument("--post", action="store_true", help="If set, attempt to POST to Tote API in audit mode")
     def _cmd_audit_sf(args):
         db = get_db()
-        res = place_audit_superfecta(db, product_id=args.product, selection=args.sel, stake=args.stake, currency=args.currency, post=args.post)
+        res = place_audit_superfecta(db, product_id=args.product, selection=args.sel, stake=args.stake, currency=args.currency, post=args.post, mode='audit')
         print("[Audit SF]", res)
     sp_audit_sf.set_defaults(func=_cmd_audit_sf)
 
@@ -270,7 +270,7 @@ def main(argv=None):
     sp_audit_win.add_argument("--post", action="store_true")
     def _cmd_audit_win(args):
         db = get_db()
-        res = place_audit_win(db, event_id=args.event, selection_id=args.selection, stake=args.stake, currency=args.currency, post=args.post)
+        res = place_audit_win(db, event_id=args.event, selection_id=args.selection, stake=args.stake, currency=args.currency, post=args.post, mode='audit')
         print("[Audit WIN]", res)
     sp_audit_win.set_defaults(func=_cmd_audit_win)
 

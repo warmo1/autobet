@@ -26,6 +26,18 @@ function classifyAge(ts) {
   } catch (_) { return 'warn'; }
 }
 
+function classifyAgeDaily(ts) {
+  try {
+    if (!ts) return 'warn';
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return 'warn';
+    const hours = Math.floor((Date.now() - d.getTime()) / 3600000);
+    if (hours <= 24) return 'ok';
+    if (hours <= 48) return 'warn';
+    return 'err';
+  } catch (_) { return 'warn'; }
+}
+
 async function loadDataFreshness() {
   try {
     const res = await fetch('/api/status/data_freshness');
@@ -45,14 +57,14 @@ async function loadDataFreshness() {
     set('pools-last-fetch', fmtTimeAgo(ps.last));
 
     // classify mini-cards by age freshness
-    const setClass = (cardId, ts) => {
+    const setClass = (cardId, ts, classifier = classifyAge) => {
       const el = document.getElementById(cardId);
       if (!el) return;
       el.classList.remove('ok','warn','err');
-      el.classList.add(classifyAge(ts));
+      el.classList.add(classifier(ts));
     };
-    setClass('card-events', ev.last);
-    setClass('card-products', pr.last);
+    setClass('card-events', ev.last, classifyAgeDaily);
+    setClass('card-products', pr.last, classifyAgeDaily);
     setClass('card-odds', po.last);
     setClass('card-pools', ps.last);
   } catch (e) {
@@ -76,9 +88,17 @@ async function loadUpcoming() {
       const div = document.createElement('div');
       div.className = 'race-item';
       const left = document.createElement('div');
-      left.innerHTML = `<div><b>${item.event_name || item.product_id}</b></div><div class="small text-muted">${item.venue || ''} • ${item.country || ''}</div>`;
+      let sportAndVenue = item.venue || '';
+      if (item.sport) {
+        sportAndVenue = `${item.sport} • ${sportAndVenue}`;
+      }
+      left.innerHTML = `<div><b>${item.event_name || item.product_id}</b></div><div class="small text-muted">${sportAndVenue} • ${item.country || ''}</div>`;
       const right = document.createElement('div');
-      right.innerHTML = `<div>${(item.status || '').toUpperCase()}</div><div class="small text-muted">${item.start_iso || ''}</div>`;
+      let qcInfo = '';
+      if (item.avg_cov != null) {
+        qcInfo = `<div class="small text-muted">QC: ${(item.avg_cov * 100).toFixed(1)}%</div>`;
+      }
+      right.innerHTML = `<div>${(item.status || '').toUpperCase()}</div><div class="small text-muted">${item.start_iso || ''}</div>${qcInfo}`;
       div.appendChild(left);
       div.appendChild(right);
       root.appendChild(div);
@@ -111,7 +131,16 @@ async function loadGcp() {
       services.forEach(svc => {
         const tr = document.createElement('tr');
         const tdN = document.createElement('td'); tdN.textContent = svc.name; tr.appendChild(tdN);
-        const tdR = document.createElement('td'); tdR.appendChild(badge(!svc.missing && !!svc.ready)); tr.appendChild(tdR);
+        const tdR = document.createElement('td');
+        const isReady = !svc.missing && !!svc.ready;
+        tdR.appendChild(badge(isReady));
+        if (!isReady && svc.conditions) {
+            const details = document.createElement('div');
+            details.className = 'small text-muted';
+            details.textContent = JSON.stringify(svc.conditions, null, 2);
+            tdR.appendChild(details);
+        }
+        tr.appendChild(tdR);
         const tdU = document.createElement('td');
         if (svc.uri) { const a = document.createElement('a'); a.href = svc.uri; a.textContent = svc.uri; a.target = '_blank'; tdU.appendChild(a); }
         else { tdU.textContent = '—'; }

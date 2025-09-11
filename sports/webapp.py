@@ -1857,20 +1857,23 @@ def api_status_qc():
 
 @app.get("/api/status/upcoming")
 def api_status_upcoming():
-    """Return upcoming races/products in the next 60 minutes (GB) if view exists."""
+    """Return upcoming races/products in the next 4 hours if view exists."""
     upcoming = []
     try:
-        df = sql_df("SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, combos, S, roi_current, viable_now FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso")
+        # Expanded to 4 hours and includes all bet types from the view
+        df = sql_df("SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, combos, S, roi_current, viable_now FROM vw_gb_open_superfecta_next240_be ORDER BY start_iso")
         upcoming = df.to_dict("records") if not df.empty else []
     except Exception:
         try:
-            # Fallback: generic query for open superfecta next 60 minutes
+            # Fallback: generic query for open products in the next 4 hours
             now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
             df = sql_df(
-                "SELECT product_id, event_id, COALESCE(event_name, e.name) AS event_name, COALESCE(venue, e.venue) AS venue, COALESCE(e.country, currency) AS country, start_iso, status, currency \n"
-                "FROM tote_products p LEFT JOIN tote_events e USING(event_id) \n"
-                "WHERE UPPER(p.bet_type)='SUPERFECTA' AND p.status='OPEN' AND TIMESTAMP(p.start_iso) BETWEEN TIMESTAMP(@now) AND TIMESTAMP_ADD(TIMESTAMP(@now), INTERVAL 60 MINUTE) \n"
-                "ORDER BY start_iso",
+                "SELECT p.product_id, p.event_id, COALESCE(p.event_name, e.name) AS event_name, e.sport, COALESCE(p.venue, e.venue) AS venue, COALESCE(e.country, p.currency) AS country, p.start_iso, p.status, p.currency, qc.avg_cov "
+                "FROM tote_products p "
+                "LEFT JOIN tote_events e USING(event_id) "
+                "LEFT JOIN vw_qc_probable_odds_coverage qc ON p.product_id = qc.product_id "
+                "WHERE p.status='OPEN' AND TIMESTAMP(p.start_iso) BETWEEN TIMESTAMP(@now) AND TIMESTAMP_ADD(TIMESTAMP(@now), INTERVAL 4 HOUR) "
+                "ORDER BY p.start_iso",
                 params={"now": now_iso},
             )
             upcoming = df.to_dict("records") if not df.empty else []
@@ -1925,6 +1928,7 @@ def api_status_gcp():
                     "latestReadyRevision": j.get("latestReadyRevision"),
                     "ready": (conds.get("Ready") == "CONDITION_SUCCEEDED" or conds.get("Ready") == "True"),
                     "updateTime": j.get("updateTime"),
+                    "conditions": j.get("conditions", []),
                 })
         else:
             out["cloud_run"]["status_code"] = r.status_code
@@ -3176,7 +3180,7 @@ def tote_bet_page():
             client_for_placement = ToteClient()
             if mode == 'audit':
                 client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
-            res = place_audit_simple_bet(db, product_id=product_id, selection_id=selection_id, stake=stake, currency=currency, post=True, client=client_for_placement)
+            res = place_audit_simple_bet(db, mode=mode, product_id=product_id, selection_id=selection_id, stake=stake, currency=currency, post=True, client=client_for_placement)
         elif bet_type in ["SUPERFECTA", "TRIFECTA", "EXACTA"]:
             from .providers.tote_bets import place_audit_superfecta
             from .providers.tote_api import ToteClient
