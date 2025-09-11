@@ -1,0 +1,13 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    id: build-orchestrator
+    args: ["build", "-f", "autobet/sports/Dockerfile.orchestrator", "-t", "$_IMAGE_ORCHESTRATOR", "."]
+  - name: gcr.io/cloud-builders/docker
+    id: push-orchestrator
+    args: ["push", "$_IMAGE_ORCHESTRATOR"]
+substitutions:
+  _IMAGE_ORCHESTRATOR: ""
+timeout: "1800s"
+images:
+  - "$_IMAGE_ORCHESTRATOR"
+
