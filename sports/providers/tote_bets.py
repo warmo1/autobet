@@ -100,19 +100,41 @@ def place_audit_simple_bet(
     except Exception as e:
         print(f"[AuditBet] Could not get product_leg_id from DB: {e}")
 
+    # Fallback: derive leg by the chosen selection_id
     if not product_leg_id:
         try:
-            # Use a new client for this query to ensure it hits the live endpoint,
-            # as the audit endpoint may not support product queries.
-            # The 'client' parameter is for the subsequent bet placement.
-            query_client = ToteClient()
-            # For audit mode, fetch product legs from the audit endpoint to avoid ID mismatches
-            if str(mode).lower() == 'audit':
-                query_client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
-            query = "query ProductLegs($id: String){ product(id: $id){ ... on BettingProduct { legs{ nodes{ id } } } } }"
+            from google.cloud import bigquery
+            pli_df2 = sink.query(
+                "SELECT product_leg_id FROM tote_product_selections WHERE product_id=@pid AND selection_id=@sid LIMIT 1",
+                job_config=bigquery.QueryJobConfig(query_parameters=[
+                    bigquery.ScalarQueryParameter("pid", "STRING", product_id),
+                    bigquery.ScalarQueryParameter("sid", "STRING", selection_id),
+                ])
+            ).to_dataframe()
+            if not pli_df2.empty:
+                product_leg_id = pli_df2.iloc[0]['product_leg_id']
+        except Exception as e:
+            print(f"[AuditBet] DB lookup by selection failed: {e}")
+
+    if not product_leg_id:
+        # Try resolving via GraphQL on the live endpoint (discovery only)
+        try:
+            query_client = ToteClient()  # live
+            query = (
+                "query ProductLegs($id: ID!){ product(id: $id){ ... on BettingProduct { legs{ nodes{ id selections{ nodes{ id } } } } } } }"
+            )
             data = query_client.graphql(query, {"id": product_id})
             legs = (((data.get("product") or {}).get("legs") or {}).get("nodes")) or []
-            if legs:
+            # Prefer the leg that contains our selection
+            for lg in legs:
+                try:
+                    sels = ((lg.get("selections") or {}).get("nodes")) or []
+                    if any((s or {}).get("id") == selection_id for s in sels):
+                        product_leg_id = lg.get("id"); break
+                except Exception:
+                    continue
+            # If not found by selection membership, use the first leg as a fallback
+            if not product_leg_id and legs:
                 product_leg_id = legs[0].get("id")
         except Exception as e:
             print(f"[AuditBet] API fallback for product_leg_id failed: {e}")
@@ -267,12 +289,8 @@ def place_audit_superfecta(
     # If mapping missing, fetch live from Tote GraphQL (handles cases where selections were not yet persisted)
     if not by_number:
         try:
-            # Use a new client for this query to ensure it hits the live endpoint.
-            # The 'client' parameter is for the subsequent bet placement.
-            query_client = ToteClient()
-            # For audit mode, prefer the audit endpoint for product/selection discovery
-            if str(mode).lower() == 'audit':
-                query_client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+            # Always use the live endpoint for discovery (products/legs/selections)
+            query_client = ToteClient()  # live
             query = """
             query ProductLegs($id: String){
               product(id: $id){
