@@ -15,6 +15,7 @@ import traceback
 from flask import Flask, request
 from google.cloud import bigquery
 
+import pandas as pd
 from .gcp import parse_pubsub_envelope, upload_text_to_bucket
 from .config import cfg
 from .providers.tote_api import ToteClient, ToteError, rate_limited_get
@@ -64,7 +65,12 @@ def handle_pubsub() -> tuple[str, int]:
             product_id = payload.get("product_id")
             if not product_id: return ("Missing 'product_id' for task", 400)
             # This will update the tote_products table
-            ingest_products(sink, client, date_iso=None, status=None, first=1, bet_types=None, product_ids=[product_id])
+            n_ingested = ingest_products(sink, client, date_iso=None, status=None, first=1, bet_types=None, product_ids=[product_id])
+
+            # Only proceed if we actually got the product data from the API.
+            if n_ingested == 0:
+                print(f"Product {product_id} not found via API, skipping snapshot creation.")
+                return ("", 204)
 
             # Also create a snapshot from the data just ingested.
             # This makes the polling mechanism behave like a subscription for the UI.
@@ -74,7 +80,8 @@ def handle_pubsub() -> tuple[str, int]:
             ).to_dataframe()
 
             if not prod_df.empty:
-                prod = prod_df.iloc[0].to_dict()
+                # Replace pandas NaN/NaT with None before converting to dict to ensure JSON compatibility
+                prod = prod_df.where(pd.notnull(prod_df), None).iloc[0].to_dict()
                 snapshot = {k: prod.get(k) for k in ["product_id", "event_id", "bet_type", "status", "currency", "start_iso", "total_gross", "total_net", "rollover", "deduction_rate"]}
                 snapshot["ts_ms"] = int(time.time() * 1000)
                 sink.upsert_tote_pool_snapshots([snapshot])
