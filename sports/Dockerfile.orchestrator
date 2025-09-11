@@ -15,4 +15,6 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
 COPY autobet/ ./autobet/
 
 ENV FLASK_APP=autobet.sports.gcp_orchestrator:app
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "autobet.sports.gcp_orchestrator:app"]
+# Increase Gunicorn timeout to prevent 30s worker kill during heavy BigQuery jobs.
+# Use threads for some parallelism; rely on Cloud Run request timeout (300s) for hard cap.
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "8", "--timeout", "0", "autobet.sports.gcp_orchestrator:app"]

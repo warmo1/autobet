@@ -94,33 +94,47 @@ def handle_pubsub() -> tuple[str, int]:
                 return ("", 204)
             
             win_product_id = win_prod_df.iloc[0]["product_id"]
-            path = f"/v1/products/{win_product_id}/probable-odds"
-            # Derive API base root robustly from configured GraphQL URL; fallback to production hub
+            # Build candidate probable-odds endpoints from configured GraphQL base.
+            # Many partners expose REST under /partner/gateway/ as well.
             base = cfg.tote_graphql_url or ""
-            base_root = ""
+            host_root = ""
             try:
-                # Prefer stripping at /partner/... if present
                 if "/partner/" in base:
-                    base_root = base.split("/partner/")[0].rstrip("/")
+                    host_root = base.split("/partner/")[0].rstrip("/")
                 else:
-                    # Parse scheme+host as a safe default
                     from urllib.parse import urlparse
                     u = urlparse(base)
                     if u.scheme and u.netloc:
-                        base_root = f"{u.scheme}://{u.netloc}"
+                        host_root = f"{u.scheme}://{u.netloc}"
             except Exception:
-                base_root = ""
-            if not base_root:
-                base_root = "https://hub.production.racing.tote.co.uk"
-            full_url = f"{base_root}{path}"
-            try:
-                headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
-                resp = rate_limited_get(full_url, headers=headers, timeout=20)
-                resp.raise_for_status()
-            except requests.exceptions.HTTPError as http_err:
-                # Gracefully handle 403/404 errors for probable odds, as they are common.
-                print(f"Could not fetch probable odds for {win_product_id} (event: {event_id}). Status: {http_err.response.status_code}. Skipping.")
-                return ("", 204) # Return success to Pub/Sub to ack the message.
+                host_root = ""
+            if not host_root:
+                host_root = "https://hub.production.racing.tote.co.uk"
+
+            candidates = [
+                f"{host_root}/partner/gateway/v1/products/{win_product_id}/probable-odds",
+                f"{host_root}/partner/gateway/probable-odds/v1/products/{win_product_id}",
+                f"{host_root}/partner/gateway/probable-odds/v1/products/{win_product_id}/probable-odds",
+                f"{host_root}/v1/products/{win_product_id}/probable-odds",
+            ]
+
+            headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
+            resp = None
+            last_status = None
+            for url in candidates:
+                try:
+                    resp = rate_limited_get(url, headers=headers, timeout=20)
+                    if 200 <= resp.status_code < 300:
+                        break
+                    last_status = resp.status_code
+                except requests.exceptions.RequestException:
+                    last_status = None
+                    continue
+            if resp is None or not (200 <= resp.status_code < 300):
+                # Gracefully handle missing endpoints (often 403/404); skip without failing.
+                st = last_status if last_status is not None else "n/a"
+                print(f"Could not fetch probable odds for {win_product_id} (event: {event_id}). Status: {st}. Skipping.")
+                return ("", 204)
 
             rid = f"probable:{int(time.time()*1000)}:{win_product_id}"
             ts_ms = int(time.time()*1000)
