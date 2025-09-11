@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import time
 import pandas as pd
@@ -598,7 +599,12 @@ def tote_pools_page():
     base_sql = ( # noqa
         "SELECT p.product_id, UPPER(p.bet_type) AS bet_type, COALESCE(p.status,'') AS status, "
         "COALESCE(e.venue, p.venue) AS venue, UPPER(COALESCE(e.country,p.currency)) AS country, p.start_iso, "
-        "p.currency, p.total_gross, p.total_net, p.rollover, p.deduction_rate, p.event_id, COALESCE(e.name, p.event_name) AS event_name, "
+        "p.currency, "
+        "COALESCE(SAFE_CAST(p.total_gross AS FLOAT64), 0.0) AS total_gross, "
+        "COALESCE(SAFE_CAST(p.total_net AS FLOAT64), 0.0) AS total_net, "
+        "COALESCE(SAFE_CAST(p.rollover AS FLOAT64), 0.0) AS rollover, "
+        "COALESCE(SAFE_CAST(p.deduction_rate AS FLOAT64), 0.0) AS deduction_rate, "
+        "p.event_id, COALESCE(e.name, p.event_name) AS event_name, "
         "divs.c AS dividend_count, "
         "rc.going, rc.weather_temp_c, rc.weather_wind_kph, rc.weather_precip_mm "
         "FROM tote_products p "
@@ -665,11 +671,7 @@ def tote_pools_page():
             p["weather_badge"] = f"{'' if pd.isnull(t) else int(round(t))}°C {'' if pd.isnull(w) else int(round(w))}kph {'' if pd.isnull(pr) else pr:.1f}mm"
         else:
             p["weather_badge"] = None
-        # Ensure all relevant fields are present and not NaN for display
-        p["total_gross"] = f"{p.get('total_gross', 0):.2f}"
-        p["total_net"] = f"{p.get('total_net', 0):.2f}"
-        p["rollover"] = f"{p.get('rollover', 0):.2f}"
-        p["deduction_rate_display"] = f"{p.get('deduction_rate', 0) * 100:.1f}%"
+        # Do not pre-format numeric fields; templates handle formatting.
     group_totals = gt.to_dict("records") if not gt.empty else []
     return render_template( # noqa: E501
         "tote_pools.html",
@@ -2076,10 +2078,10 @@ def event_detail(event_id: str):
     products_df = sql_df(
         """
         SELECT product_id, bet_type, status, start_iso, event_id, event_name, venue,
-               COALESCE(total_gross,0) AS total_gross,
-               COALESCE(total_net,0) AS total_net,
-               COALESCE(rollover,0) AS rollover,
-               COALESCE(deduction_rate,0) AS deduction_rate -- Use deduction_rate directly
+               COALESCE(SAFE_CAST(total_gross AS FLOAT64), 0.0) AS total_gross,
+               COALESCE(SAFE_CAST(total_net AS FLOAT64), 0.0) AS total_net,
+               COALESCE(SAFE_CAST(rollover AS FLOAT64), 0.0) AS rollover,
+               COALESCE(SAFE_CAST(deduction_rate AS FLOAT64), 0.0) AS deduction_rate -- Use deduction_rate directly
         FROM tote_products
         WHERE event_id=?
         ORDER BY bet_type

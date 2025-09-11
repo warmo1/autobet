@@ -3,18 +3,18 @@ import argparse
 import subprocess
 import json
 from dotenv import load_dotenv # Keep this
-from sports.db import get_db, init_db
+from .db import get_db, init_db
 
 # Core application components
-from sports.webapp import create_app
-from sports.telegram_bot import run_bot
-from sports.providers.tote_api import ToteClient
-from sports.providers.tote_bets import place_audit_superfecta, place_audit_win
-from sports.providers.tote_bets import refresh_bet_status
-from sports.providers.tote_bets import audit_list_bets, sync_bets_from_api
-from sports.providers.tote_subscriptions import run_subscriber as run_pool_subscriber
-from sports.ingest.tote_events import ingest_tote_events
-from sports.ingest.tote_products import ingest_products
+from .webapp import create_app
+from .telegram_bot import run_bot
+from .providers.tote_api import ToteClient
+from .providers.tote_bets import place_audit_superfecta, place_audit_win
+from .providers.tote_bets import refresh_bet_status
+from .providers.tote_bets import audit_list_bets, sync_bets_from_api
+from .providers.tote_subscriptions import run_subscriber as run_pool_subscriber
+from .ingest.tote_events import ingest_tote_events
+from .ingest.tote_products import ingest_products
 
 def main(argv=None):
     """Main entry point for the command-line runner."""
