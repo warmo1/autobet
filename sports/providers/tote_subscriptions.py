@@ -51,8 +51,8 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
               isFinalized
               productId
               total {
-                netAmount { currency { code } amount }
-                grossAmount { currency { code } amount }
+                netAmount { currency amount }
+                grossAmount { currency amount }
               }
             } }
             """.strip(),
@@ -64,7 +64,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
             subscription { onPoolDividendChanged {
               productId
               dividends {
-                dividend { name type status amounts { amount currency { code } } }
+                dividend { name type status amounts { decimalAmount } }
                 legs { legId selections { id finishingPosition } }
               }
             } }
@@ -504,7 +504,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                                             amount = None
                                             if amt_nodes:
                                                 try:
-                                                    amount = float(amt_nodes[0].get("amount"))
+                                                    amount = float(amt_nodes[0].get("decimalAmount"))
                                                 except Exception:
                                                     amount = None
                                             for lg in legs:
