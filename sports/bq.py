@@ -79,7 +79,7 @@ class BigQuerySink:
 
         # vw_products_latest_totals: tote_products overlaid with latest snapshot totals (all bet types)
         sql = f"""
-        CREATE VIEW IF NOT EXISTS `{ds}.vw_products_latest_totals` AS
+        CREATE OR REPLACE VIEW `{ds}.vw_products_latest_totals` AS
         WITH latest AS (
           SELECT
             product_id,
@@ -88,6 +88,12 @@ class BigQuerySink:
             MAX(ts_ms) AS ts_ms
           FROM `{ds}.tote_pool_snapshots`
           GROUP BY product_id
+        ), pstat AS (
+          SELECT
+            product_id,
+            ARRAY_AGG(status ORDER BY ts_ms DESC LIMIT 1)[OFFSET(0)] AS latest_status
+          FROM `{ds}.tote_product_status_log`
+          GROUP BY product_id
         )
         SELECT
           p.product_id,
@@ -95,7 +101,7 @@ class BigQuerySink:
           p.event_name,
           p.venue,
           p.start_iso,
-          p.status,
+          COALESCE(pstat.latest_status, p.status) AS status,
           p.currency,
           COALESCE(l.latest_gross, p.total_gross) AS total_gross,
           COALESCE(l.latest_net, p.total_net) AS total_net,
@@ -103,7 +109,8 @@ class BigQuerySink:
           p.deduction_rate,
           p.bet_type
         FROM `{ds}.tote_products` p
-        LEFT JOIN latest l USING(product_id);
+        LEFT JOIN latest l USING(product_id)
+        LEFT JOIN pstat USING(product_id);
         """
         job = client.query(sql); job.result()
 
@@ -432,6 +439,23 @@ class BigQuerySink:
             key_expr="T.event_id=S.event_id AND T.ts_ms=S.ts_ms",
             update_set="status=S.status",
         )
+        # Also update tote_events.status to latest status from this batch
+        client = self._client_obj(); self._ensure_dataset()
+        ds = f"{self.project}.{self.dataset}"
+        sql = f"""
+        MERGE `{ds}.tote_events` T
+        USING (
+          SELECT event_id, status
+          FROM `{temp}`
+          QUALIFY ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY ts_ms DESC) = 1
+        ) S
+        ON T.event_id = S.event_id
+        WHEN MATCHED THEN UPDATE SET status = S.status
+        """
+        try:
+            client.query(sql).result()
+        except Exception:
+            pass
 
     def upsert_tote_product_status_log(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_product_status_log", rows, schema_hint={"ts_ms": "INT64"})
@@ -443,6 +467,23 @@ class BigQuerySink:
             key_expr="T.product_id=S.product_id AND T.ts_ms=S.ts_ms",
             update_set="status=S.status",
         )
+        # Mirror latest product status onto tote_products.status for UI queries
+        client = self._client_obj(); self._ensure_dataset()
+        ds = f"{self.project}.{self.dataset}"
+        sql = f"""
+        MERGE `{ds}.tote_products` T
+        USING (
+          SELECT product_id, status
+          FROM `{temp}`
+          QUALIFY ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY ts_ms DESC) = 1
+        ) S
+        ON T.product_id = S.product_id
+        WHEN MATCHED THEN UPDATE SET status = S.status
+        """
+        try:
+            client.query(sql).result()
+        except Exception:
+            pass
 
     def upsert_tote_selection_status_log(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_selection_status_log", rows, schema_hint={"ts_ms": "INT64"})

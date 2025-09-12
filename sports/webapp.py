@@ -169,6 +169,17 @@ def _maybe_start_bq_exporter():
     # Placeholder for legacy background exporter. No-op in BQ-only mode.
     return
 
+# --- Admin helpers (dev) ---
+@app.post("/api/admin/ensure_views")
+def api_admin_ensure_views():
+    """Create or refresh required views in BigQuery. Dev helper."""
+    try:
+        db = get_db()
+        db.ensure_views()
+        return app.response_class(json.dumps({"ok": True}), mimetype="application/json")
+    except Exception as e:
+        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
+
 
 def _use_bq() -> bool:
     return bool(cfg.bq_project and cfg.bq_dataset)
@@ -2285,6 +2296,17 @@ def event_detail(event_id: str):
         flash("Event not found", "error")
         return redirect(url_for("tote_events_page"))
     event = event_df.to_dict("records")[0]
+    # Overlay latest status from log if available
+    try:
+        sdf = sql_df(
+            "SELECT status FROM tote_event_status_log WHERE event_id=? ORDER BY ts_ms DESC LIMIT 1",
+            params=(event_id,),
+            cache_ttl=0,
+        )
+        if not sdf.empty and sdf.iloc[0].get("status"):
+            event["status"] = sdf.iloc[0]["status"]
+    except Exception:
+        pass
 
     # Fetch conditions
     conditions_df = sql_df("SELECT * FROM race_conditions WHERE event_id=?", params=(event_id,), cache_ttl=0)
@@ -2360,6 +2382,38 @@ def event_detail(event_id: str):
                 params=(event_id,)
             )
             runners = ([] if dfw.empty else dfw.to_dict("records"))
+        except Exception:
+            pass
+    else:
+        # Final fallback: derive runners from tote_product_selections (prefer WIN market)
+        try:
+            sels_df = sql_df(
+                """
+                WITH win_prod AS (
+                  SELECT product_id
+                  FROM tote_products
+                  WHERE event_id=@eid AND UPPER(bet_type)='WIN'
+                  LIMIT 1
+                )
+                SELECT DISTINCT
+                  CAST(s.number AS INT64) AS cloth_number,
+                  COALESCE(s.competitor, s.selection_id) AS name
+                FROM tote_product_selections s
+                JOIN tote_products p ON p.product_id = s.product_id
+                WHERE p.event_id = @eid AND (p.product_id IN (SELECT product_id FROM win_prod) OR NOT EXISTS(SELECT 1 FROM win_prod))
+                ORDER BY cloth_number
+                """,
+                params={"eid": event_id},
+                cache_ttl=0,
+            )
+            if not sels_df.empty:
+                for _, r in sels_df.iterrows():
+                    runners.append({
+                        "cloth": r.get("cloth_number"),
+                        "name": r.get("name"),
+                        "finish_pos": None,
+                        "status": None,
+                    })
         except Exception:
             pass
 
@@ -2479,81 +2533,37 @@ def api_refresh_event_pools(event_id: str):
 
 @app.post("/api/tote/refresh_odds/<event_id>")
 def api_refresh_odds(event_id: str):
-    """Fetch WIN probable odds via REST, normalize, and store to raw_tote_probable_odds.
-
-    This does not depend on Cloud Run. It targets the partner gateway using the configured
-    TOTE_GRAPHQL_URL host and Api-Key header.
-    """
+    """Fetch WIN probable odds via GraphQL, normalize, and store to raw_tote_probable_odds."""
     try:
-        # Find an OPEN WIN product for this event
+        # Find a WIN product for this event (prefer OPEN if present)
         pdf = sql_df(
-            "SELECT product_id FROM tote_products WHERE event_id=? AND UPPER(bet_type)='WIN' ORDER BY status DESC LIMIT 1",
+            "SELECT product_id FROM tote_products WHERE event_id=? AND UPPER(bet_type)='WIN' ORDER BY CASE UPPER(COALESCE(status,'')) WHEN 'OPEN' THEN 0 ELSE 1 END, start_iso LIMIT 1",
             params=(event_id,)
         )
         if pdf.empty:
             return app.response_class(json.dumps({"error": "no WIN product for event"}), mimetype="application/json", status=404)
         win_product_id = pdf.iloc[0]["product_id"]
 
-        # Build host root from configured GraphQL URL
-        base = cfg.tote_graphql_url or ""
-        host_root = ""
+        # GraphQL query for lines on a single product
+        GQL = """
+        query GetProduct($id: String!) {
+          product(id: $id) {
+            id
+            ... on BettingProduct {
+              lines { nodes { legs { lineSelections { selectionId } } odds { decimal } } }
+            }
+          }
+        }
+        """
+        from .providers.tote_api import ToteClient, ToteError
+        client = ToteClient()
         try:
-            if "/partner/" in base:
-                host_root = base.split("/partner/")[0].rstrip("/")
-            else:
-                from urllib.parse import urlparse
-                u = urlparse(base)
-                if u.scheme and u.netloc:
-                    host_root = f"{u.scheme}://{u.netloc}"
-        except Exception:
-            host_root = ""
-        if not host_root:
-            host_root = "https://hub.production.racing.tote.co.uk"
+            data = client.graphql(GQL, {"id": win_product_id})
+        except ToteError as te:
+            return app.response_class(json.dumps({"error": f"graphql: {te}"}), mimetype="application/json", status=502)
 
-        candidates = [
-            f"{host_root}/partner/gateway/probable-odds/v1/products/{win_product_id}",
-            f"{host_root}/partner/gateway/v1/products/{win_product_id}/probable-odds",
-            f"{host_root}/v1/products/{win_product_id}/probable-odds",
-        ]
-        headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
-        data = None; url_used = None
-        for url in candidates:
-            try:
-                r = requests.get(url, headers=headers, timeout=10)
-                if r.status_code == 200:
-                    data = r.json()
-                    url_used = url
-                    break
-            except Exception:
-                continue
-        if data is None:
-            return app.response_class(json.dumps({"error": "probable-odds fetch failed"}), mimetype="application/json", status=502)
-
-        # Normalize to the view's expected shape: {products:{nodes:[{id, lines:{nodes:[{legs:[{lineSelections:[{selectionId}]}], odds:{decimal}}]}}]}}
-        def _extract_lines(obj):
-            lines = []
-            if not isinstance(obj, dict):
-                return lines
-            # common shapes
-            try:
-                if isinstance(obj.get("lines"), dict) and isinstance(obj["lines"].get("nodes"), list):
-                    for ln in obj["lines"]["nodes"]:
-                        lines.append(ln)
-                elif isinstance(obj.get("lines"), list):
-                    lines.extend(obj["lines"])
-            except Exception:
-                pass
-            # nested scan
-            for k, v in list(obj.items()):
-                if isinstance(v, dict):
-                    lines.extend(_extract_lines(v))
-                elif isinstance(v, list):
-                    for it in v:
-                        if isinstance(it, dict):
-                            lines.extend(_extract_lines(it))
-            return lines
-
-        lines = _extract_lines(data)
+        prod = (data or {}).get("product") or {}
+        lines = (((prod.get("lines") or {}).get("nodes")) or []) if isinstance(prod, dict) else []
         norm_lines = []
         for ln in lines:
             try:
@@ -2561,12 +2571,9 @@ def api_refresh_odds(event_id: str):
                 legs = ln.get("legs") or []
                 sel_id = None
                 if legs:
-                    try:
-                        sels = (legs[0].get("lineSelections") or [])
-                        if sels:
-                            sel_id = sels[0].get("selectionId")
-                    except Exception:
-                        pass
+                    sels = (legs[0].get("lineSelections") or [])
+                    if sels:
+                        sel_id = sels[0].get("selectionId")
                 if sel_id and odds is not None:
                     norm_lines.append({
                         "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
@@ -2576,7 +2583,7 @@ def api_refresh_odds(event_id: str):
                 continue
 
         if not norm_lines:
-            return app.response_class(json.dumps({"error": "no lines found in response", "url": url_used}), mimetype="application/json", status=422)
+            return app.response_class(json.dumps({"error": "no lines found for product"}), mimetype="application/json", status=422)
 
         payload = {
             "products": {
