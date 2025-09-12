@@ -2596,6 +2596,113 @@ def api_refresh_odds(event_id: str):
     except Exception as e:
         return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
+@app.post("/api/tote/refresh_odds_gql")
+def api_refresh_odds_gql():
+    """Fetch probable odds via GraphQL products query and persist.
+
+    JSON body filters (all optional):
+      - date: ISO date string (YYYY-MM-DD)
+      - betTypes: list of bet type codes (defaults to ["WIN"]) 
+      - countryCodes: list of country alpha-2 codes (e.g., ["UK"]) 
+      - venues: list of venue names (strings)
+      - first: max number of products to fetch (default 50)
+
+    Writes normalized payloads into raw_tote_probable_odds for each product returned.
+    """
+    try:
+        body = {}
+        try:
+            body = request.get_json(force=True, silent=True) or {}
+        except Exception:
+            body = {}
+        date = body.get("date")
+        bet_types = body.get("betTypes") or ["WIN"]
+        country_codes = body.get("countryCodes")
+        venues = body.get("venues")
+        try:
+            first = int(body.get("first") or 50)
+        except Exception:
+            first = 50
+
+        # GraphQL: products with lines odds and selection ids (probables)
+        GQL = """
+        query GetProducts($date: Date, $betTypes: [BetTypeCode!], $countryCodes: [CountryCode!], $venues: [String!], $first: Int) {
+          products(date: $date, betTypes: $betTypes, countryCodes: $countryCodes, venues: $venues, first: $first) {
+            nodes {
+              id
+              name
+              ... on BettingProduct {
+                legs { nodes { id event { id name } } }
+                lines { nodes { legs { lineSelections { selectionId } } odds { decimal } } }
+              }
+            }
+          }
+        }
+        """
+
+        from .providers.tote_api import ToteClient
+        client = ToteClient()
+        variables = {
+            "date": date,
+            "betTypes": bet_types,
+            "countryCodes": country_codes,
+            "venues": venues,
+            "first": first,
+        }
+        data = client.graphql(GQL, variables)
+        products = (((data or {}).get("products") or {}).get("nodes") or [])
+
+        from .bq import get_bq_sink
+        sink = get_bq_sink()
+        import time as _t
+        ts_ms = int(_t.time() * 1000)
+        rows = []
+        for p in products:
+            try:
+                pid = p.get("id")
+                lines = (((p or {}).get("lines") or {}).get("nodes") or [])
+                norm_lines = []
+                for ln in lines:
+                    try:
+                        odds = ((ln.get("odds") or {}).get("decimal"))
+                        legs = ln.get("legs") or []
+                        sel_id = None
+                        if legs:
+                            sels = (legs[0].get("lineSelections") or [])
+                            if sels:
+                                sel_id = sels[0].get("selectionId")
+                        if pid and sel_id and odds is not None:
+                            norm_lines.append({
+                                "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
+                                "odds": {"decimal": float(odds)},
+                            })
+                    except Exception:
+                        continue
+                if pid and norm_lines:
+                    payload = {
+                        "products": {
+                            "nodes": [
+                                {"id": pid, "lines": {"nodes": norm_lines}}
+                            ]
+                        }
+                    }
+                    rows.append({
+                        "raw_id": f"probable:{pid}:{ts_ms}",
+                        "fetched_ts": ts_ms,
+                        "payload": json.dumps(payload),
+                        "product_id": pid,
+                    })
+            except Exception:
+                continue
+
+        if not rows:
+            return app.response_class(json.dumps({"error": "no lines found for filters"}), mimetype="application/json", status=404)
+
+        sink.upsert_raw_tote_probable_odds(rows)
+        return app.response_class(json.dumps({"ok": True, "products": len(rows)}), mimetype="application/json")
+    except Exception as e:
+        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
+
 @app.route("/api/tote/product_selections/<product_id>")
 def api_tote_product_selections(product_id: str):
     """Return selections for a given product (id, number, competitor)."""

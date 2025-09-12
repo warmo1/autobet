@@ -51,8 +51,8 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
               isFinalized
               productId
               total {
-                netAmounts { currency { code } decimalAmount }
-                grossAmounts { currency { code } decimalAmount }
+                netAmount { currency { code } amount }
+                grossAmount { currency { code } amount }
               }
             } }
             """.strip(),
@@ -64,7 +64,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
             subscription { onPoolDividendChanged {
               productId
               dividends {
-                dividend { name type status amounts { decimalAmount currency { code } } }
+                dividend { name type status amounts { amount currency { code } } }
                 legs { legId selections { id finishingPosition } }
               }
             } }
@@ -359,10 +359,17 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                             node = data["onPoolTotalChanged"]
                             if node and isinstance(node, dict):
                                 pid = node.get("productId")
-                                net_list = ((node.get("total") or {}).get("netAmounts") or [])
-                                gross_list = ((node.get("total") or {}).get("grossAmounts") or [])
-                                net = float(net_list[0].get("decimalAmount")) if net_list else None
-                                gross = float(gross_list[0].get("decimalAmount")) if gross_list else None
+                                total = (node.get("total") or {})
+                                net_node = (total.get("netAmount") or {})
+                                gross_node = (total.get("grossAmount") or {})
+                                try:
+                                    net = float(net_node.get("amount")) if (net_node and net_node.get("amount") is not None) else None
+                                except Exception:
+                                    net = None
+                                try:
+                                    gross = float(gross_node.get("amount")) if (gross_node and gross_node.get("amount") is not None) else None
+                                except Exception:
+                                    gross = None
                                 if pid:
                                     # Publish realtime update for UI consumers
                                     try:
@@ -497,7 +504,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                                             amount = None
                                             if amt_nodes:
                                                 try:
-                                                    amount = float(amt_nodes[0].get("decimalAmount"))
+                                                    amount = float(amt_nodes[0].get("amount"))
                                                 except Exception:
                                                     amount = None
                                             for lg in legs:
