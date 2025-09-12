@@ -51,8 +51,8 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
               isFinalized
               productId
               total {
-                netAmount { currency amount }
-                grossAmount { currency amount }
+                netAmount { currency stringAmount minorUnitsTotalAmount }
+                grossAmount { currency stringAmount minorUnitsTotalAmount }
               }
             } }
             """.strip(),
@@ -362,14 +362,34 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                                 total = (node.get("total") or {})
                                 net_node = (total.get("netAmount") or {})
                                 gross_node = (total.get("grossAmount") or {})
-                                try:
-                                    net = float(net_node.get("amount")) if (net_node and net_node.get("amount") is not None) else None
-                                except Exception:
-                                    net = None
-                                try:
-                                    gross = float(gross_node.get("amount")) if (gross_node and gross_node.get("amount") is not None) else None
-                                except Exception:
-                                    gross = None
+                                def _money_to_float(m):
+                                    if not isinstance(m, dict):
+                                        return None
+                                    # Prefer stringAmount if present
+                                    s = m.get("stringAmount")
+                                    if isinstance(s, str):
+                                        try:
+                                            return float(s)
+                                        except Exception:
+                                            pass
+                                    # Fallback to minorUnitsTotalAmount / 100.0
+                                    mu = m.get("minorUnitsTotalAmount")
+                                    try:
+                                        if mu is not None:
+                                            return float(mu) / 100.0
+                                    except Exception:
+                                        pass
+                                    # As a last resort, check amount/decimalAmount in case of schema variants
+                                    for k in ("amount", "decimalAmount"):
+                                        v = m.get(k)
+                                        try:
+                                            if v is not None:
+                                                return float(v)
+                                        except Exception:
+                                            continue
+                                    return None
+                                net = _money_to_float(net_node)
+                                gross = _money_to_float(gross_node)
                                 if pid:
                                     # Publish realtime update for UI consumers
                                     try:
