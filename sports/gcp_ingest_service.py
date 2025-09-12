@@ -61,6 +61,15 @@ def handle_pubsub() -> tuple[str, int]:
             bet_types = payload.get("bet_types")
             ingest_products(sink, client, date_iso=date_iso, status=status_filter, first=1000, bet_types=bet_types)
 
+        elif task == "ingest_events_for_day":
+            date_iso = payload.get("date", time.strftime("%Y-%m-%d"))
+            if date_iso == "today": date_iso = time.strftime("%Y-%m-%d")
+            since = f"{date_iso}T00:00:00Z"
+            until = f"{date_iso}T23:59:59Z"
+            n = ingest_tote_events(sink, client, since_iso=since, until_iso=until, first=1000)
+            metrics["ingested_events"] = n
+            print(f"Ingested {n} events for {date_iso}")
+
         elif task == "ingest_single_product":
             product_id = payload.get("product_id")
             if not product_id: return ("Missing 'product_id' for task", 400)

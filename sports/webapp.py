@@ -11,6 +11,7 @@ import json
 import threading
 import traceback
 import math
+import queue
 from typing import Optional, Sequence, Mapping, Any
 from google.cloud import bigquery
 from .providers.tote_bets import place_audit_superfecta
@@ -113,14 +114,44 @@ def _sql_is_readonly(sql: str) -> bool:
         return False
 
 # Helper function for permutations (nPr) - not directly used in PL, but good to have
-def _permutations_count(n, r):
-    if r < 0 or r > n:
-        return 0
-    
-    res = 1
-    for i in range(r):
-        res *= (n - i)
-    return res
+class EventBus:
+    """A simple thread-safe, in-memory event bus for real-time UI updates."""
+    def __init__(self):
+        self.subscribers = defaultdict(list)
+        self.lock = threading.Lock()
+
+    def publish(self, channel: str, data: dict):
+        """Publish an event. Called from the subscriber thread."""
+        with self.lock:
+            # Create a copy to avoid issues if a subscriber unsubscribes during iteration
+            sub_list = self.subscribers.get(channel, [])[:]
+        
+        # The queue will store a tuple of (channel, data)
+        for q in sub_list:
+            try:
+                q.put_nowait((channel, data))
+            except queue.Full:
+                # Subscriber is too slow, message is dropped.
+                # In a real-world scenario, you might log this.
+                pass
+
+    def subscribe(self, channels: list[str]) -> queue.Queue:
+        """Subscribe to one or more channels. Returns a queue to consume events."""
+        q = queue.Queue(maxsize=200)
+        with self.lock:
+            for channel in channels:
+                self.subscribers[channel].append(q)
+        return q
+
+    def unsubscribe(self, channels: list[str], q: queue.Queue):
+        """Unsubscribe a queue from channels."""
+        with self.lock:
+            for channel in channels:
+                # Use a while loop to remove all occurrences, just in case
+                while q in self.subscribers.get(channel, []):
+                    self.subscribers[channel].remove(q)
+
+event_bus = EventBus()
 
 
 app = Flask(__name__)
@@ -140,7 +171,7 @@ def _pool_subscriber_loop():
         try:
             # The subscriber loop will now use the BigQuery sink via the new db layer
             db = get_db()
-            run_subscriber(db, duration=None) # Assuming run_subscriber is adapted for a BQ sink
+            run_subscriber(db, duration=None, event_callback=event_bus.publish)
         except Exception as e:
             try:
                 print("[PoolSub] error:", e)
@@ -165,6 +196,29 @@ def _maybe_start_pool_thread():
 def _maybe_start_bq_exporter():
     # Placeholder for legacy background exporter. No-op in BQ-only mode.
     return
+
+@app.route('/stream')
+def stream():
+    """Server-Sent Events (SSE) endpoint."""
+    # Get topics from client, e.g. /stream?topic=pool_total_changed&topic=product_status_changed
+    topics = request.args.getlist('topic')
+    if not topics:
+        return Response("No topics specified.", status=400, mimetype='text/plain')
+
+    def event_generator():
+        q = event_bus.subscribe(topics)
+        try:
+            while True:
+                try:
+                    # Block with a timeout to send keep-alives
+                    channel, data = q.get(timeout=25)
+                    yield f"event: {channel}\ndata: {json.dumps(data)}\n\n"
+                except queue.Empty:
+                    yield ": keep-alive\n\n"
+        finally:
+            event_bus.unsubscribe(topics, q)
+    
+    return Response(event_generator(), mimetype='text/event-stream')
 
 
 def _use_bq() -> bool:
@@ -563,12 +617,12 @@ def tote_params_update():
 @app.route("/tote-events")
 def tote_events_page():
     """List Tote events with filters and pagination."""
-    country = (request.args.get("country") or "GB").strip().upper()
+    country = (request.args.get("country") or "").strip().upper()
     sport = (request.args.get("sport") or "").strip()
     venue = (request.args.get("venue") or "").strip()
     name = (request.args.get("name") or "").strip()
-    date_from = (request.args.get("from") or _today_iso()).strip()
-    date_to = (request.args.get("to") or _today_iso()).strip()
+    date_from = (request.args.get("from") or "").strip()
+    date_to = (request.args.get("to") or "").strip()
     limit = max(1, int(request.args.get("limit", "200") or 200))
     page = max(1, int(request.args.get("page", "1") or 1))
     offset = (page - 1) * limit
@@ -585,10 +639,7 @@ def tote_events_page():
     if date_from:
         where.append("SUBSTR(start_iso,1,10) >= ?"); params.append(date_from)
     if date_to:
-        # Ensure date_to includes the entire day by checking against the start of the next day
         where.append("SUBSTR(start_iso,1,10) <= ?"); params.append(date_to)
-    # Default to OPEN or SCHEDULED events and ascending time to show next races first
-    where.append("UPPER(status) IN ('OPEN','SCHEDULED')")
     base_sql = ( # noqa
         "SELECT event_id, name, venue, country, start_iso, sport, status, competitors_json, home, away "
         "FROM tote_events"
@@ -597,7 +648,11 @@ def tote_events_page():
     if where:
         base_sql += " WHERE " + " AND ".join(where)
         count_sql += " WHERE " + " AND ".join(where)
-    base_sql += " ORDER BY start_iso ASC LIMIT ? OFFSET ?"
+    # Sort by most recent first by default, unless a 'from' date is given to see upcoming.
+    order_by = " ORDER BY start_iso DESC"
+    if date_from:
+        order_by = " ORDER BY start_iso ASC"
+    base_sql += order_by + " LIMIT ? OFFSET ?"
     params_paged = list(params) + [limit, offset]
     # Performance: Simplified total count query.
     # Bypass cache for paged results to avoid any unexpected truncation/staleness
@@ -642,8 +697,8 @@ def tote_superfecta_page():
     # UI Improvement: Default country to GB and add a venue filter.
     country = (request.args.get("country") or os.getenv("DEFAULT_COUNTRY", "GB")).strip().upper()
     venue = (request.args.get("venue") or "").strip()
-    # Default to all statuses (OPEN+SCHEDULED etc.) unless explicitly filtered
-    status = (request.args.get("status") or "").strip().upper()
+    # Default to OPEN status unless explicitly filtered to something else.
+    status = (request.args.get("status") or "OPEN").strip().upper()
     date_from = request.args.get("from") or _today_iso()
     date_to = request.args.get("to") or _today_iso()
     limit = int(request.args.get("limit", "200") or 200)
@@ -3384,10 +3439,10 @@ def tote_bet_page():
     where = []
     params: dict[str, Any] = {}
     if country:
-        where.append("UPPER(e.country) = @country")
+        where.append("UPPER(country) = @country")
         params["country"] = country
     if venue:
-        where.append("UPPER(e.venue) LIKE UPPER(@venue)")
+        where.append("UPPER(venue) LIKE UPPER(@venue)")
         params["venue"] = f"%{venue}%"
 
     # Default to showing events in the next 24 hours.
@@ -3395,18 +3450,21 @@ def tote_bet_page():
     now = datetime.now(timezone.utc)
     start_iso = now.isoformat(timespec='seconds').replace('+00:00', 'Z')
     end_iso = (now + timedelta(hours=24)).isoformat(timespec='seconds').replace('+00:00', 'Z')
-    where.append("e.start_iso BETWEEN @start AND @end")
+    where.append("start_iso BETWEEN @start AND @end")
     params["start"] = start_iso
     params["end"] = end_iso
 
+    # Filter for events that are not yet finished.
+    where.append("status IN ('SCHEDULED', 'OPEN')")
+
     ev_sql = (
-        "SELECT DISTINCT e.event_id, e.name, e.venue, e.country, e.start_iso "
-        "FROM tote_events e JOIN tote_products p USING(event_id) WHERE p.status='OPEN'"
+        "SELECT event_id, name, venue, country, start_iso "
+        "FROM tote_events"
     )
     if where:
-        ev_sql += " AND " + " AND ".join(where)
+        ev_sql += " WHERE " + " AND ".join(where)
 
-    ev_sql += " ORDER BY e.start_iso ASC LIMIT 200"
+    ev_sql += " ORDER BY start_iso ASC LIMIT 200"
 
     events_df = sql_df(ev_sql, params=params)
     countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
