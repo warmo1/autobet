@@ -121,11 +121,6 @@ def main(argv=None):
     sp_tote_super.add_argument("--status", choices=["OPEN","CLOSED","UNKNOWN"], default="OPEN")
     sp_tote_super.add_argument("--first", type=int, default=200)
     def _cmd_tote_super(args):
-        from sports.config import cfg # Import cfg for BigQuery configuration check
-        if not (cfg.bq_project and cfg.bq_dataset):
-            print("Error: BigQuery is not configured. Set BQ_PROJECT and BQ_DATASET in your .env file.")
-            return
-
         db = get_db() # Use the BigQuery sink
         client = ToteClient()
         print(f"Ingesting SUPERFECTA products for date='{args.date or 'today'}' status='{args.status}' directly to BigQuery...")
@@ -133,20 +128,21 @@ def main(argv=None):
         print(f"[Tote SUPERFECTA] Ingested and upserted {n} product(s) to BigQuery.")
     sp_tote_super.set_defaults(func=_cmd_tote_super)
 
-    # --- Tote API: Generic products (pool values) ---
-    # Fetches products across bet types and store directly in BigQuery
-    sp_tote_prods = sub.add_parser("tote-products", help="Fetch products across bet types and store directly in BigQuery")
+    # --- Tote API: Generic products (pool values + probable odds raw) ---
+    # Fetch products across bet types and store directly in BigQuery (includes raw probable odds payloads)
+    sp_tote_prods = sub.add_parser("tote-products", help="Fetch products across bet types to BigQuery (also stores raw probable odds)")
     sp_tote_prods.add_argument("--date", help="ISO date for products (YYYY-MM-DD)")
     sp_tote_prods.add_argument("--status", choices=["OPEN","CLOSED","UNKNOWN"], default="OPEN")
     sp_tote_prods.add_argument("--first", type=int, default=500) # Default to include Jackpot and Pacepot
     sp_tote_prods.add_argument("--types", default="WIN,PLACE,EXACTA,TRIFECTA,SUPERFECTA,JACKPOT", help="Comma-separated bet types, e.g. WIN,PLACE,EXACTA,TRIFECTA,SUPERFECTA,JACKPOT")
+    sp_tote_prods.add_argument("--products", default=None, help="Comma-separated product IDs to fetch by id (skips paging)")
     def _cmd_tote_prods(args):
-        from sports.config import cfg
         bt = [s.strip().upper() for s in (args.types or '').split(',') if s.strip()]
+        prod_ids = [s.strip() for s in (args.products or '').split(',') if s.strip()] if args.products else None
         db = get_db()
         client = ToteClient()
         print(f"Ingesting products for date='{args.date or 'today'}' status='{args.status}' types='{args.types}' directly to BigQuery...")
-        n = ingest_products(db, client, date_iso=args.date, status=args.status, first=args.first, bet_types=(bt or None))
+        n = ingest_products(db, client, date_iso=args.date, status=args.status, first=args.first, bet_types=(bt or None), product_ids=prod_ids)
         print(f"[Tote Products] Ingested {n} product(s) into BigQuery")
     sp_tote_prods.set_defaults(func=_cmd_tote_prods)
 
@@ -246,6 +242,8 @@ def main(argv=None):
             n_closed = 0
         print(f"[Pipeline] {ds}: OPEN={n_open} CLOSED={n_closed}")
     sp_pipe.set_defaults(func=_cmd_pipeline)
+
+    
 
     # --- Tote: Audit Bets ---
     # Places an audit-mode SUPERFECTA bet (no live placement unless configured)

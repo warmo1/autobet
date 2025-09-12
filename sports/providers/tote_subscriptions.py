@@ -10,6 +10,7 @@ except Exception:  # pragma: no cover
     websockets = None
 
 from ..config import cfg
+from .tote_api import ToteClient  # HTTP GraphQL fallback for totals
 try:
     from ..realtime import bus as rt_bus  # optional; not required for ingest
 except Exception:  # pragma: no cover
@@ -37,6 +38,29 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
     assert websockets is not None, "websockets package not installed"
 
     # GraphQL WS handshake (try modern then legacy)
+
+    def _money_to_float(m):
+        """Safely convert a Tote Money object to a float."""
+        if not isinstance(m, dict):
+            return None
+        # Prefer decimalAmount or stringAmount for precision.
+        # Also check for 'amount' as a fallback for deprecated types.
+        for k in ("decimalAmount", "stringAmount", "amount"):
+            v = m.get(k)
+            if v is not None:
+                try:
+                    return float(v)
+                except (ValueError, TypeError):
+                    continue
+        # Fallback to minor units.
+        mu = m.get("minorUnitsTotalAmount")
+        if mu is not None:
+            try:
+                return float(mu) / 100.0
+            except (ValueError, TypeError):
+                pass
+        return None
+
     headers = {"Authorization": f"Api-Key {cfg.tote_api_key}"}
     subprotocols = ["graphql-transport-ws", "graphql-ws"]
     # Server enforces one root field per subscription operation.
@@ -51,8 +75,9 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
               isFinalized
               productId
               total {
-                netAmount { currency stringAmount minorUnitsTotalAmount }
-                grossAmount { currency stringAmount minorUnitsTotalAmount }
+                # Use only __typename within nested amounts to avoid schema drift issues.
+                netAmount { __typename }
+                grossAmount { __typename }
               }
             } }
             """.strip(),
@@ -64,7 +89,8 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
             subscription { onPoolDividendChanged {
               productId
               dividends {
-                dividend { name type status amounts { decimalAmount } }
+                # Avoid schema drift in Money shape; fetch amounts via HTTP fallback when needed
+                dividend { __typename }
                 legs { legId selections { id finishingPosition } }
               }
             } }
@@ -116,6 +142,55 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
     started = time.time()
     # Cache product context to enrich snapshots without repeated queries
     ctx_cache: dict[str, dict] = {}
+    # Lazy HTTP client for fallback fetching of pool totals
+    http_client: ToteClient | None = None
+    last_fetch_ts: dict[str, float] = {}
+
+    async def _fetch_totals_http(pid: str) -> tuple[float | None, float | None]:
+        nonlocal http_client
+        try:
+            now = time.time()
+            if now - last_fetch_ts.get(pid, 0) < 1.5:
+                return (None, None)
+            if http_client is None:
+                try:
+                    http_client = ToteClient()
+                except Exception:
+                    return (None, None)
+            query = (
+                """
+                query GetTotals($id: String!) {
+                  product(id: $id) {
+                    ... on BettingProduct {
+                      pool { total { grossAmount { decimalAmount } netAmount { decimalAmount } } }
+                    }
+                    type { ... on BettingProduct { pool { total { grossAmount { decimalAmount } netAmount { decimalAmount } } } } }
+                  }
+                }
+                """
+            )
+            # Run sync HTTP request in a thread so we don't block the event loop
+            data = await asyncio.to_thread(http_client.graphql, query, {"id": pid})
+            node = data.get("product") or {}
+            src = (node.get("type") or node) or {}
+            total = ((src.get("pool") or {}).get("total") or {})
+            g = (((total.get("grossAmount") or {}).get("decimalAmount")))
+            n = (((total.get("netAmount") or {}).get("decimalAmount")))
+            try:
+                last_fetch_ts[pid] = now
+            except Exception:
+                pass
+            try:
+                g_val = float(g) if g is not None else None
+            except Exception:
+                g_val = None
+            try:
+                n_val = float(n) if n is not None else None
+            except Exception:
+                n_val = None
+            return (n_val, g_val)
+        except Exception:
+            return (None, None)
 
     # Async queue and batching worker for BigQuery writes
     q: asyncio.Queue | None = None
@@ -362,34 +437,18 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                                 total = (node.get("total") or {})
                                 net_node = (total.get("netAmount") or {})
                                 gross_node = (total.get("grossAmount") or {})
-                                def _money_to_float(m):
-                                    if not isinstance(m, dict):
-                                        return None
-                                    # Prefer stringAmount if present
-                                    s = m.get("stringAmount")
-                                    if isinstance(s, str):
-                                        try:
-                                            return float(s)
-                                        except Exception:
-                                            pass
-                                    # Fallback to minorUnitsTotalAmount / 100.0
-                                    mu = m.get("minorUnitsTotalAmount")
-                                    try:
-                                        if mu is not None:
-                                            return float(mu) / 100.0
-                                    except Exception:
-                                        pass
-                                    # As a last resort, check amount/decimalAmount in case of schema variants
-                                    for k in ("amount", "decimalAmount"):
-                                        v = m.get(k)
-                                        try:
-                                            if v is not None:
-                                                return float(v)
-                                        except Exception:
-                                            continue
-                                    return None
                                 net = _money_to_float(net_node)
                                 gross = _money_to_float(gross_node)
+                                # If values are missing in WS schema, fetch via HTTP GraphQL as a fallback
+                                if (net is None or gross is None) and pid:
+                                    try:
+                                        n2, g2 = await _fetch_totals_http(str(pid))
+                                        if net is None:
+                                            net = n2
+                                        if gross is None:
+                                            gross = g2
+                                    except Exception:
+                                        pass
                                 if pid:
                                     # Publish realtime update for UI consumers
                                     try:
@@ -518,26 +577,89 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                                 if pid and dvs and _is_bq_sink(conn):
                                     try:
                                         rows = []
+                                        # Optional HTTP fallback for amounts if WS payload lacks them
+                                        fetched_amounts: dict[str, float] | None = None
                                         for d in dvs:
                                             legs = (d.get("legs") or [])
-                                            amt_nodes = (((d.get("dividend") or {}).get("amounts")) or [])
                                             amount = None
-                                            if amt_nodes:
-                                                try:
-                                                    amount = float(amt_nodes[0].get("decimalAmount"))
-                                                except Exception:
-                                                    amount = None
                                             for lg in legs:
                                                 sels = (lg.get("selections") or [])
                                                 for s in sels:
                                                     sel_id = s.get("id")
-                                                    if sel_id and amount is not None:
-                                                        rows.append({
-                                                            "product_id": str(pid),
-                                                            "selection": str(sel_id),
-                                                            "dividend": float(amount),
-                                                            "ts": str(ts),
-                                                        })
+                                                    if sel_id:
+                                                        # If amount present in WS, use it; otherwise, fetch via HTTP once and map per selection
+                                                        if amount is not None:
+                                                            rows.append({
+                                                                "product_id": str(pid),
+                                                                "selection": str(sel_id),
+                                                                "dividend": float(amount),
+                                                                "ts": str(ts),
+                                                            })
+                                                        else:
+                                                            if fetched_amounts is None:
+                                                                # Debounced HTTP fetch
+                                                                fetched_amounts = {}
+                                                                try:
+                                                                    # Run HTTP fetch once per message if we need amounts
+                                                                    async def _fetch_map() -> dict[str, float]:
+                                                                        nonlocal http_client
+                                                                        if http_client is None:
+                                                                            try:
+                                                                                http_client = ToteClient()
+                                                                            except Exception:
+                                                                                return {}
+                                                                        q = (
+                                                                            """
+                                                                            query GetDividends($id: String!) {
+                                                                              product(id: $id) {
+                                                                                ... on BettingProduct {
+                                                                                  result {
+                                                                                    dividends {
+                                                                                      nodes {
+                                                                                        dividend { amount { decimalAmount stringAmount minorUnitsTotalAmount } }
+                                                                                        dividendLegs { nodes { dividendSelections { nodes { id } } } }
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                }
+                                                                                type { ... on BettingProduct { result { dividends { nodes { dividend { amount { decimalAmount stringAmount minorUnitsTotalAmount } } dividendLegs { nodes { dividendSelections { nodes { id } } } } } } } } }
+                                                                              }
+                                                                            }
+                                                                            """
+                                                                        )
+                                                                        data2 = await asyncio.to_thread(http_client.graphql, q, {"id": str(pid)})
+                                                                        node2 = (data2.get("product") or {})
+                                                                        src2 = (node2.get("type") or node2) or {}
+                                                                        res = ((src2.get("result") or {}).get("dividends") or {})
+                                                                        nds = res.get("nodes") or []
+                                                                        mp: dict[str, float] = {}
+                                                                        for nd in nds:
+                                                                            try:
+                                                                                amt_obj = (((nd.get("dividend") or {}).get("amount")) or {})
+                                                                                amt_val = _money_to_float(amt_obj)
+                                                                                dlegs = ((nd.get("dividendLegs") or {}).get("nodes") or [])
+                                                                                if amt_val is not None:
+                                                                                    for dl in dlegs:
+                                                                                        dsel_nodes = ((dl.get("dividendSelections") or {}).get("nodes") or [])
+                                                                                        for dsel in dsel_nodes:
+                                                                                            sid = dsel.get("id")
+                                                                                            if sid:
+                                                                                                mp[str(sid)] = float(amt_val)
+                                                                            except Exception:
+                                                                                continue
+                                                                        return mp
+                                                                    fetched_amounts = await _fetch_map()
+                                                                except Exception:
+                                                                    fetched_amounts = {}
+                                                            if fetched_amounts:
+                                                                amt = fetched_amounts.get(str(sel_id))
+                                                                if amt is not None:
+                                                                    rows.append({
+                                                                        "product_id": str(pid),
+                                                                        "selection": str(sel_id),
+                                                                        "dividend": float(amt),
+                                                                        "ts": str(ts),
+                                                                    })
                                         if rows and q is not None:
                                             for r in rows:
                                                 await q.put(("upsert_tote_product_dividends", r))
@@ -576,17 +698,34 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                             except Exception:
                                 pass
 
-                        # onProductStatusChanged → product status log
-                        if "onProductStatusChanged" in data and _is_bq_sink(conn):
+                        # onProductStatusChanged → product status log + realtime publish (with event context)
+                        if "onProductStatusChanged" in data:
                             try:
                                 node = data["onProductStatusChanged"]
                                 pid = (node or {}).get("productId") or (node or {}).get("ProductId")
                                 st = (node or {}).get("status") or (node or {}).get("Status")
-                                if pid and st is not None and q is not None:
-                                    await q.put((
-                                        "upsert_tote_product_status_log",
-                                        {"product_id": str(pid), "ts_ms": ts, "status": str(st)},
-                                    ))
+                                if pid and st is not None:
+                                    # Enrich with product context (event_id, bet_type) for UI consumers
+                                    ctx = _get_product_ctx(str(pid)) or {}
+                                    try:
+                                        if rt_bus is not None:
+                                            rt_bus.publish(
+                                                "product_status_changed",
+                                                {
+                                                    "product_id": str(pid),
+                                                    "event_id": ctx.get("event_id"),
+                                                    "bet_type": ctx.get("bet_type"),
+                                                    "status": str(st),
+                                                    "ts_ms": ts,
+                                                },
+                                            )
+                                    except Exception:
+                                        pass
+                                    if _is_bq_sink(conn) and q is not None:
+                                        await q.put((
+                                            "upsert_tote_product_status_log",
+                                            {"product_id": str(pid), "ts_ms": ts, "status": str(st)},
+                                        ))
                             except Exception:
                                 pass
 

@@ -1943,20 +1943,22 @@ class BigQuerySink:
         job = client.query(sql)
         job.result()
 
-        # vw_tote_probable_odds: parse latest probable odds per selection from raw payloads
+        # vw_tote_probable_odds: robust parse of latest probable odds per selection from raw payloads
+        # Handles both shapes for lines.legs (array vs object with lineSelections)
         sql = f"""
         CREATE OR REPLACE VIEW `{ds}.vw_tote_probable_odds` AS
         WITH exploded AS (
           SELECT
             JSON_EXTRACT_SCALAR(prod, '$.id') AS product_id,
             r.fetched_ts,
-            JSON_EXTRACT_SCALAR(sel, '$.selectionId') AS selection_id,
+            COALESCE(
+              JSON_EXTRACT_SCALAR(line, '$.legs.lineSelections[0].selectionId'),
+              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId')
+            ) AS selection_id,
             SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds.decimal') AS FLOAT64) AS decimal_odds
           FROM `{ds}.raw_tote_probable_odds` r,
           UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
-          UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line,
-          UNNEST(JSON_EXTRACT_ARRAY(line, '$.legs')) AS leg,
-          UNNEST(JSON_EXTRACT_ARRAY(leg, '$.lineSelections')) AS sel
+          UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line
         ), latest AS (
           SELECT product_id,
                  selection_id,
@@ -1968,39 +1970,40 @@ class BigQuerySink:
         )
         SELECT
           l.product_id,
-          s.selection_id,
+          COALESCE(s.selection_id, l.selection_id) AS selection_id,
           s.number AS cloth_number,
           l.decimal_odds,
           l.ts_ms
         FROM latest l
-        JOIN `{ds}.tote_product_selections` s
+        LEFT JOIN `{ds}.tote_product_selections` s
           ON s.selection_id = l.selection_id AND s.product_id = l.product_id;
         """
         job = client.query(sql)
         job.result()
 
-        # vw_tote_probable_history: parsed stream of probable odds with timestamps
+        # vw_tote_probable_history: parsed stream of probable odds with timestamps (robust legs parsing)
         sql = f"""
         CREATE OR REPLACE VIEW `{ds}.vw_tote_probable_history` AS
         WITH exploded AS (
           SELECT
             JSON_EXTRACT_SCALAR(prod, '$.id') AS product_id,
             r.fetched_ts AS ts_ms,
-            JSON_EXTRACT_SCALAR(sel, '$.selectionId') AS selection_id,
+            COALESCE(
+              JSON_EXTRACT_SCALAR(line, '$.legs.lineSelections[0].selectionId'),
+              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId')
+            ) AS selection_id,
             SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds.decimal') AS FLOAT64) AS decimal_odds
           FROM `{ds}.raw_tote_probable_odds` r,
           UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
-          UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line,
-          UNNEST(JSON_EXTRACT_ARRAY(line, '$.legs')) AS leg,
-          UNNEST(JSON_EXTRACT_ARRAY(leg, '$.lineSelections')) AS sel
+          UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line
         )
         SELECT e.product_id,
-               s.selection_id,
+               COALESCE(s.selection_id, e.selection_id) AS selection_id,
                s.number AS cloth_number,
                e.decimal_odds,
                e.ts_ms
         FROM exploded e
-        JOIN `{ds}.tote_product_selections` s ON s.selection_id = e.selection_id AND s.product_id = e.product_id
+        LEFT JOIN `{ds}.tote_product_selections` s ON s.selection_id = e.selection_id AND s.product_id = e.product_id
         WHERE e.selection_id IS NOT NULL AND e.decimal_odds IS NOT NULL;
         """
         job = client.query(sql)

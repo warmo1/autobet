@@ -410,11 +410,24 @@ def place_audit_superfecta(
             query_client = ToteClient()  # live
             query = """
             query ProductLegs($id: String){
-              product(id: $id){
-                ... on BettingProduct {
-                  legs{ nodes{ id selections{ nodes{ id competitor{ name details{ __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } } } }
+                product(id: $id) {
+                    ... on BettingProduct {
+                        legs {
+                            nodes {
+                                id
+                                selections {
+                                    nodes {
+                                        id
+                                        eventCompetitor {
+                                            ... on HorseRacingEventCompetitor { clothNumber }
+                                            ... on GreyhoundRacingEventCompetitor { trapNumber }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-              }
             }
             """
             data = query_client.graphql(query, {"id": product_id})
@@ -427,9 +440,10 @@ def place_audit_superfecta(
                 sels = ((legs[0].get("selections") or {}).get("nodes")) or []
                 for sel in sels:
                     sid = sel.get("id")
-                    comp = (sel.get("competitor") or {})
-                    det = (comp.get("details") or {})
-                    n = det.get("clothNumber") if det.get("__typename") == "HorseDetails" else det.get("trapNumber")
+                    # Use new `eventCompetitor` structure
+                    event_comp = sel.get("eventCompetitor") or {}
+                    n = event_comp.get("clothNumber") or event_comp.get("trapNumber")
+
                     try:
                         if n is not None:
                             n_int = int(n)
@@ -442,7 +456,7 @@ def place_audit_superfecta(
                                         "leg_index": li,
                                         "product_leg_id": product_leg_id,
                                         "selection_id": sid,
-                                        "competitor": comp.get("name"),
+                                        "competitor": None, # Name is not needed for this mapping
                                         "number": n_int,
                                     }
                                 ])

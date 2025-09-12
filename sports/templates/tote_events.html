@@ -86,8 +86,10 @@
   if (!rows.length) return;
   const eventIds = rows.map(r => r.getAttribute('data-event-id')).filter(Boolean);
   // Open SSE for event status updates only (for now)
+  // Listen for both event and product status updates.
+  // We rely on the backend to enrich product updates with event_id so our event filter works.
   const qs = new URLSearchParams({
-    topics: 'event_status_changed',
+    topics: 'event_status_changed,product_status_changed',
     events: eventIds.join(',')
   });
   const es = new EventSource(`/stream?${qs.toString()}`);
@@ -109,6 +111,23 @@
       const row = document.querySelector(`tr[data-event-id="${d.event_id}"]`);
       if (!row) return;
       if (d.status !== undefined) setBadge(row, d.status);
+    }catch(e){}
+  });
+  // Heuristic: if any product for an event opens, treat the event as OPEN immediately.
+  // When the tote later emits an explicit event_status_changed, it will overwrite accordingly.
+  es.addEventListener('product_status_changed', function(ev){
+    try{
+      const d = JSON.parse(ev.data);
+      if (!d || !d.event_id) return;
+      const row = document.querySelector(`tr[data-event-id="${d.event_id}"]`);
+      if (!row) return;
+      const st = String(d.status || '').toUpperCase();
+      if (st === 'OPEN') setBadge(row, 'OPEN');
+      // If WIN market closes and we previously showed OPEN, nudge to CLOSED
+      if (st === 'CLOSED' && String(d.bet_type || '').toUpperCase() === 'WIN') {
+        const cur = row.querySelector('[data-field="status"]').textContent.trim().toUpperCase();
+        if (cur === 'OPEN') setBadge(row, 'CLOSED');
+      }
     }catch(e){}
   });
   es.onerror = function(){ /* let browser auto-reconnect */ };
