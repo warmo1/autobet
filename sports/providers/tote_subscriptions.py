@@ -10,6 +10,10 @@ except Exception:  # pragma: no cover
     websockets = None
 
 from ..config import cfg
+try:
+    from ..realtime import bus as rt_bus  # optional; not required for ingest
+except Exception:  # pragma: no cover
+    rt_bus = None
 
 
 def _now_ms() -> int:
@@ -360,6 +364,17 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                                 net = float(net_list[0].get("decimalAmount")) if net_list else None
                                 gross = float(gross_list[0].get("decimalAmount")) if gross_list else None
                                 if pid:
+                                    # Publish realtime update for UI consumers
+                                    try:
+                                        if rt_bus is not None:
+                                            rt_bus.publish("pool_total_changed", {
+                                                "product_id": str(pid),
+                                                "total_net": net,
+                                                "total_gross": gross,
+                                                "ts_ms": ts,
+                                            })
+                                    except Exception:
+                                        pass
                                     if _is_bq_sink(conn):
                                         try:
                                             ctx = _get_product_ctx(str(pid)) or {}
@@ -405,6 +420,16 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                                 eid = node.get("eventId") or node.get("EventId")
                                 status = node.get("status") or node.get("Status")
                                 if eid and status:
+                                    # Publish realtime update for UI consumers
+                                    try:
+                                        if rt_bus is not None:
+                                            rt_bus.publish("event_status_changed", {
+                                                "event_id": str(eid),
+                                                "status": str(status),
+                                                "ts_ms": ts,
+                                            })
+                                    except Exception:
+                                        pass
                                     if _is_bq_sink(conn):
                                         try:
                                             if q is not None:

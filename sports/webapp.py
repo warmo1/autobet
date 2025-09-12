@@ -20,6 +20,9 @@ import itertools
 import math
 from collections import defaultdict
 import requests
+from .realtime import bus as rt_bus
+from flask import Response, stream_with_context
+from queue import Empty
 
 # Simple in-process TTL cache for sql_df results
 _SQLDF_CACHE_LOCK = threading.Lock()
@@ -737,6 +740,77 @@ def create_app():
     except Exception:
         pass
     return app
+
+
+# --- Server-Sent Events (SSE) stream for realtime UI updates ---
+@app.route("/stream")
+def sse_stream():
+    """SSE endpoint streaming normalized updates to the client.
+
+    Query params:
+      - topics: comma-separated topics (default: event_status_changed,product_status_changed,pool_total_changed,selection_status_changed,dividend_changed,lines_changed)
+      - events: comma-separated event_ids to filter
+      - products: comma-separated product_ids to filter
+    """
+    topics_raw = (request.args.get("topics") or "").strip()
+    topics_default = [
+        "event_status_changed",
+        "product_status_changed",
+        "pool_total_changed",
+        "selection_status_changed",
+        "dividend_changed",
+        "lines_changed",
+    ]
+    topics = [t for t in (topics_raw.split(",") if topics_raw else topics_default) if t]
+    ev_ids = set([x for x in (request.args.get("events") or "").split(",") if x])
+    prod_ids = set([x for x in (request.args.get("products") or "").split(",") if x])
+
+    def _flt(topic: str, payload: dict) -> bool:
+        try:
+            if ev_ids:
+                eid = str(payload.get("event_id") or "")
+                if eid and eid in ev_ids:
+                    return True
+                # Some topics only have product_id; allow through if no event filter matched
+            if prod_ids:
+                pid = str(payload.get("product_id") or "")
+                if pid and pid in prod_ids:
+                    return True
+            # If neither filter set, allow all
+            return not ev_ids and not prod_ids
+        except Exception:
+            return True
+
+    sub = rt_bus.subscribe(topics, _flt, maxsize=1024)
+
+    @stream_with_context
+    def _gen():
+        try:
+            # Send an initial retry and hello comment
+            yield "retry: 2000\n\n"
+            last_ka = time.time()
+            while True:
+                item = sub.get(timeout=15.0)
+                now = time.time()
+                if item is None:
+                    # periodic keep-alive
+                    if now - last_ka >= 15.0:
+                        yield ": keepalive\n\n"
+                        last_ka = now
+                    continue
+                topic, payload = item
+                try:
+                    data = json.dumps(payload, ensure_ascii=False)
+                except Exception:
+                    continue
+                yield f"event: {topic}\n" + f"data: {data}\n\n"
+        finally:
+            try:
+                rt_bus.unsubscribe(sub)
+            except Exception:
+                pass
+
+    return Response(_gen(), mimetype="text/event-stream")
 
 # Removed legacy fixtures/suggestions pages
 

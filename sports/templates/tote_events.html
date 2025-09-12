@@ -47,12 +47,12 @@
       <thead><tr><th>Event</th><th>Venue</th><th>Country</th><th>Start</th><th>Status</th><th></th></tr></thead>
       <tbody>
         {% for e in events %}
-        <tr>
-          <td>{{ e.name }}</td>
+        <tr data-event-id="{{ e.event_id }}">
+          <td class="event-name">{{ e.name }}</td>
           <td>{{ e.venue }}</td>
           <td>{{ e.country }}</td>
           <td class="time-iso" data-iso="{{ e.start_iso }}">{{ e.start_iso }}</td>
-          <td>{{ e.status }}</td>
+          <td><span class="status-badge" data-field="status">{{ e.status }}</span></td>
           <td><a class="btn btn-sm btn-outline-primary" href="{{ url_for('event_detail', event_id=e.event_id) }}">View</a></td>
         </tr>
         {% else %}
@@ -76,4 +76,42 @@
   {% endif %}
 
 </div>
+{% endblock %}
+{% block scripts %}
+{{ super() }}
+<script>
+(function(){
+  // Collect visible event IDs
+  const rows = Array.from(document.querySelectorAll('tr[data-event-id]'));
+  if (!rows.length) return;
+  const eventIds = rows.map(r => r.getAttribute('data-event-id')).filter(Boolean);
+  // Open SSE for event status updates only (for now)
+  const qs = new URLSearchParams({
+    topics: 'event_status_changed',
+    events: eventIds.join(',')
+  });
+  const es = new EventSource(`/stream?${qs.toString()}`);
+  const setBadge = function(row, status){
+    const el = row.querySelector('[data-field="status"]');
+    if (!el) return;
+    el.textContent = status || '';
+    // Optional: add color by status
+    el.classList.remove('text-success','text-danger','text-muted');
+    const st = String(status || '').toUpperCase();
+    if (st === 'OPEN') el.classList.add('text-success');
+    else if (st === 'CLOSED' || st === 'ABANDONED' || st === 'RESULTED') el.classList.add('text-danger');
+    else el.classList.add('text-muted');
+  };
+  es.addEventListener('event_status_changed', function(ev){
+    try{
+      const d = JSON.parse(ev.data);
+      if (!d || !d.event_id) return;
+      const row = document.querySelector(`tr[data-event-id="${d.event_id}"]`);
+      if (!row) return;
+      if (d.status !== undefined) setBadge(row, d.status);
+    }catch(e){}
+  });
+  es.onerror = function(){ /* let browser auto-reconnect */ };
+})();
+</script>
 {% endblock %}
