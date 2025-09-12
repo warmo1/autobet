@@ -1612,13 +1612,22 @@ def api_tote_event_products(event_id: str):
     """Return OPEN products for a given event."""
     if not event_id:
         return app.response_class(json.dumps({"error": "missing event_id"}), mimetype="application/json", status=400)
-    
-    df = sql_df(
-        "SELECT product_id, bet_type, status FROM tote_products WHERE event_id=? AND status='OPEN' ORDER BY bet_type",
-        params=(event_id,),
-        cache_ttl=0,
+    # Prefer latest-totals view for freshest status; allow both OPEN and SELLING
+    sql_view = (
+        "SELECT product_id, bet_type, COALESCE(status,'') AS status "
+        "FROM vw_products_latest_totals WHERE event_id=? "
+        "AND UPPER(COALESCE(status,'')) IN ('OPEN','SELLING') ORDER BY bet_type"
     )
-    return app.response_class(json.dumps(df.to_dict("records")), mimetype="application/json")
+    try:
+        df = sql_df(sql_view, params=(event_id,), cache_ttl=0)
+    except Exception:
+        # Fallback to base table
+        df = sql_df(
+            "SELECT product_id, bet_type, status FROM tote_products WHERE event_id=? AND UPPER(COALESCE(status,'')) IN ('OPEN','SELLING') ORDER BY bet_type",
+            params=(event_id,),
+            cache_ttl=0,
+        )
+    return app.response_class(json.dumps(df.to_dict("records") if not df.empty else []), mimetype="application/json")
 
 @app.route("/api/tote/pool_snapshot/<product_id>")
 def api_tote_pool_snapshot(product_id: str):
@@ -3654,20 +3663,34 @@ def tote_bet_page():
     now = datetime.now(timezone.utc)
     start_iso = now.isoformat(timespec='seconds').replace('+00:00', 'Z')
     end_iso = (now + timedelta(hours=24)).isoformat(timespec='seconds').replace('+00:00', 'Z')
-    where.append("e.start_iso BETWEEN @start AND @end")
+    # Filter by event/product start within next 24h; use COALESCE to work with either table
+    where.append("COALESCE(e.start_iso, p.start_iso) BETWEEN @start AND @end")
     params["start"] = start_iso
     params["end"] = end_iso
 
+    # Prefer latest-totals view (mirrors latest status/totals from subscriptions),
+    # falling back to raw tote_products if the view is unavailable.
     ev_sql = (
-        "SELECT DISTINCT e.event_id, e.name, e.venue, e.country, e.start_iso "
-        "FROM tote_events e JOIN tote_products p USING(event_id) WHERE p.status='OPEN'"
+        "SELECT DISTINCT COALESCE(e.event_id, p.event_id) AS event_id, "
+        "COALESCE(e.name, p.event_name) AS name, COALESCE(e.venue, p.venue) AS venue, "
+        "UPPER(COALESCE(e.country, p.currency)) AS country, COALESCE(e.start_iso, p.start_iso) AS start_iso "
+        "FROM vw_products_latest_totals p LEFT JOIN tote_events e USING(event_id) "
+        "WHERE UPPER(COALESCE(p.status,'')) IN ('OPEN','SELLING')"
     )
     if where:
         ev_sql += " AND " + " AND ".join(where)
+    # Order by the selected alias to satisfy BigQuery's DISTINCT ordering rules
+    ev_sql += " ORDER BY start_iso ASC LIMIT 200"
 
-    ev_sql += " ORDER BY e.start_iso ASC LIMIT 200"
-
-    events_df = sql_df(ev_sql, params=params)
+    try:
+        events_df = sql_df(ev_sql, params=params)
+    except Exception:
+        # Fallback to base table if the view does not exist
+        ev_sql_fallback = ev_sql.replace(
+            "FROM vw_products_latest_totals p LEFT JOIN tote_events e USING(event_id)",
+            "FROM tote_products p LEFT JOIN tote_events e USING(event_id)"
+        )
+        events_df = sql_df(ev_sql_fallback, params=params)
     countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
     # Optional preselect by product_id
     preselect = None

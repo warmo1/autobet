@@ -100,15 +100,71 @@ def _resolve_audit_ids_for_simple(
         "SELECT number FROM tote_product_selections WHERE product_id=@pid AND selection_id=@sid LIMIT 1",
         {"pid": live_product_id, "sid": live_selection_id},
     )
-    if not sel:
-        return None
-    try:
-        runner_num = int((sel[0] or {}).get("number"))
-    except Exception:
+    runner_num = None
+    runner_name: Optional[str] = None
+    if sel:
+        try:
+            rn = (sel[0] or {}).get("number")
+            runner_num = int(rn) if rn is not None else None
+        except Exception:
+            runner_num = None
+    # Fallback: query live GraphQL to derive the runner number for this selection id
+    if runner_num is None:
+        try:
+            live_client = ToteClient()  # live
+            q = (
+                "query Product($id: String){ product(id:$id){ ... on BettingProduct { legs{ nodes{ selections{ nodes{ id eventCompetitor{ __typename ... on HorseRacingEventCompetitor{ clothNumber } ... on GreyhoundRacingEventCompetitor{ trapNumber } } competitor{ details{ __typename ... on HorseDetails{ clothNumber } ... on GreyhoundDetails{ trapNumber } } } } } } } } }"
+            )
+            d = live_client.graphql(q, {"id": live_product_id})
+            prod_node = d.get("product") or {}
+            legs = ((prod_node.get("legs") or {}).get("nodes")) or []
+            for lg in legs:
+                sels = ((lg.get("selections") or {}).get("nodes")) or []
+                for s in sels:
+                    if (s.get("id") or "") == live_selection_id:
+                        # Try modern then legacy fields
+                        evc = s.get("eventCompetitor") or {}
+                        n = None
+                        try:
+                            tnm = evc.get("__typename")
+                            if tnm == "HorseRacingEventCompetitor":
+                                n = evc.get("clothNumber")
+                            elif tnm == "GreyhoundRacingEventCompetitor":
+                                n = evc.get("trapNumber")
+                        except Exception:
+                            n = None
+                        if n is None:
+                            det = ((s.get("competitor") or {}).get("details") or {})
+                            tnm2 = det.get("__typename")
+                            if tnm2 == "HorseDetails":
+                                n = det.get("clothNumber")
+                            elif tnm2 == "GreyhoundDetails":
+                                n = det.get("trapNumber")
+                        # Capture a fallback name for matching if numbers are absent
+                        try:
+                            runner_name = (
+                                (evc.get("name") if isinstance(evc, dict) else None)
+                                or s.get("name")
+                                or ((s.get("competitor") or {}).get("name"))
+                            )
+                        except Exception:
+                            runner_name = runner_name or None
+                        try:
+                            if n is not None:
+                                runner_num = int(n)
+                        except Exception:
+                            runner_num = None
+                        break
+                if runner_num is not None:
+                    break
+        except Exception:
+            runner_num = None
+    if runner_num is None and (runner_name is None or not str(runner_name).strip()):
         return None
     # 2) Query audit endpoint for the equivalent product on that event/betType
     client = ToteClient()
     client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+    # Support both legacy competitor{details{...}} and newer eventCompetitor structures
     query = (
         "query GetEventProducts($id: String){\n"
         "  event(id: $id){\n"
@@ -118,7 +174,10 @@ def _resolve_audit_ids_for_simple(
         "        ... on BettingProduct {\n"
         "          betType { code }\n"
         "          selling { status }\n"
-        "          legs{ nodes{ id selections{ nodes{ id competitor{ name details{ __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } } } }\n"
+        "          legs{ nodes{ id selections{ nodes{ id\n"
+        "            eventCompetitor{ __typename id name entryStatus ... on HorseRacingEventCompetitor { clothNumber } ... on GreyhoundRacingEventCompetitor { trapNumber } }\n"
+        "            competitor{ name details{ __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } }\n"
+        "          } } } }\n"
         "        }\n"
         "      }\n"
         "    }\n"
@@ -135,9 +194,75 @@ def _resolve_audit_ids_for_simple(
             bt = ((n.get("betType") or {}) or {}).get("code")
             selling_status = ((n.get("selling") or {}) or {}).get("status")
             if (bt or "").upper() == (bet_type or "").upper():
-                if (selling_status or "").upper() == "OPEN":
+                ss = (selling_status or "").upper()
+                if ss in ("OPEN", "SELLING"):
                     cand = n; break
                 cand = cand or n
+        # If we couldn't find a candidate by event id, try a date/venue match via products() list
+        if not cand:
+            try:
+                # First, fetch live product context to get venue/start when event_id mapping may differ across environments
+                live_client = ToteClient()  # live
+                q_live = (
+                    "query Product($id: String){ product(id:$id){ ... on BettingProduct { betType{ code } legs{ nodes{ event{ venue{ name } scheduledStartDateTime{ iso8601 } } } } } } }"
+                )
+                d_live = live_client.graphql(q_live, {"id": live_product_id})
+                prod_live = d_live.get("product") or {}
+                bt_live = (((prod_live.get("betType") or {}).get("code")) or bet_type)
+                legs_live = ((prod_live.get("legs") or {}).get("nodes")) or []
+                v_name = None; start_iso = None
+                if legs_live:
+                    evl = (legs_live[0].get("event") or {})
+                    v_name = ((evl.get("venue") or {}).get("name"))
+                    start_iso = ((evl.get("scheduledStartDateTime") or {}).get("iso8601"))
+                # Fallback: if missing, use existing inputs
+                bt_code = (bt_live or bet_type or "").upper()
+                date_part = (start_iso or "")[:10]
+                # Query audit products for that date and bet type
+                q_audit = (
+                    "query GetProducts($date: Date, $betTypes: [BetTypeCode!], $first: Int){\n"
+                    "  products(date:$date, betTypes:$betTypes, first:$first){ nodes{ id ... on BettingProduct { betType{ code } selling{ status } legs{ nodes{ id event{ venue{ name } scheduledStartDateTime{ iso8601 } } selections{ nodes{ id eventCompetitor{ __typename ... on HorseRacingEventCompetitor{ clothNumber } ... on GreyhoundRacingEventCompetitor{ trapNumber } } competitor{ details{ __typename ... on HorseDetails{ clothNumber } ... on GreyhoundDetails{ trapNumber } } } } } } } } }\n"
+                    "}"
+                )
+                vars = {"date": date_part or None, "betTypes": [bt_code] if bt_code else None, "first": 200}
+                d_a = client.graphql(q_audit, vars)
+                nodes2 = ((d_a.get("products") or {}).get("nodes")) or []
+                # Match by venue name (case-insensitive) and exact start time if available
+                for n in nodes2:
+                    bt2 = ((n.get("betType") or {}).get("code") or "").upper()
+                    if bt2 != bt_code:
+                        continue
+                    legs2 = ((n.get("legs") or {}).get("nodes")) or []
+                    if not legs2:
+                        continue
+                    ev2 = (legs2[0].get("event") or {})
+                    v2 = ((ev2.get("venue") or {}).get("name") or "")
+                    s2 = ((ev2.get("scheduledStartDateTime") or {}).get("iso8601") or "")
+                    ok = True
+                    if v_name and v2 and (v_name.strip().lower() != v2.strip().lower()):
+                        ok = False
+                    # Allow exact match, or minute-level match, or within ~2 hours if venue matches
+                    if start_iso and s2:
+                        if start_iso == s2:
+                            pass
+                        elif start_iso[:16] == s2[:16]:  # match to minute
+                            pass
+                        else:
+                            # Last resort: accept if within ~120 minutes
+                            try:
+                                from datetime import datetime
+                                fmt = "%Y-%m-%dT%H:%M:%S%z" if "+" in s2[-6:] else "%Y-%m-%dT%H:%M:%SZ"
+                                t_live = datetime.strptime(start_iso.replace("Z","+0000"), "%Y-%m-%dT%H:%M:%S%z")
+                                t_a = datetime.strptime(s2.replace("Z","+0000"), "%Y-%m-%dT%H:%M:%S%z")
+                                delta_min = abs((t_live - t_a).total_seconds()) / 60.0
+                                if delta_min > 120:
+                                    ok = False
+                            except Exception:
+                                ok = False
+                    if ok:
+                        cand = n; break
+            except Exception:
+                cand = None
         if not cand:
             return None
         audit_pid = cand.get("id")
@@ -149,14 +274,54 @@ def _resolve_audit_ids_for_simple(
         audit_plid = leg.get("id")
         sels = ((leg.get("selections") or {}).get("nodes")) or []
         audit_sid = None
+        # First, try to match by runner number if available
         for s in sels:
-            det = ((s.get("competitor") or {}).get("details") or {})
-            n = det.get("clothNumber") if det.get("__typename") == "HorseDetails" else det.get("trapNumber")
+            # Try modern eventCompetitor fields first
+            evc = (s.get("eventCompetitor") or {})
+            n = None
             try:
-                if n is not None and int(n) == runner_num:
+                tnm = evc.get("__typename")
+                if tnm == "HorseRacingEventCompetitor":
+                    n = evc.get("clothNumber")
+                elif tnm == "GreyhoundRacingEventCompetitor":
+                    n = evc.get("trapNumber")
+            except Exception:
+                n = None
+            # Fallback to legacy competitor.details
+            if n is None:
+                det = ((s.get("competitor") or {}).get("details") or {})
+                tnm2 = det.get("__typename")
+                if tnm2 == "HorseDetails":
+                    n = det.get("clothNumber")
+                elif tnm2 == "GreyhoundDetails":
+                    n = det.get("trapNumber")
+            try:
+                if (runner_num is not None) and (n is not None) and int(n) == runner_num:
                     audit_sid = s.get("id"); break
             except Exception:
                 continue
+        # If number-based matching failed, try name-based matching
+        if not audit_sid and runner_name:
+            rn = str(runner_name).strip().lower()
+            for s in sels:
+                name_candidates = []
+                try:
+                    name_candidates.append((s.get("name") or ""))
+                except Exception:
+                    pass
+                try:
+                    name_candidates.append(((s.get("eventCompetitor") or {}).get("name") or ""))
+                except Exception:
+                    pass
+                try:
+                    name_candidates.append(((s.get("competitor") or {}).get("name") or ""))
+                except Exception:
+                    pass
+                for nm in name_candidates:
+                    if nm and str(nm).strip().lower() == rn:
+                        audit_sid = s.get("id"); break
+                if audit_sid:
+                    break
         if not (audit_pid and audit_plid and audit_sid):
             return None
         return {"product_id": audit_pid, "product_leg_id": audit_plid, "selection_id": audit_sid}
@@ -250,6 +415,11 @@ def place_audit_simple_bet(
             used_selection_id = mapped["selection_id"]
             try:
                 print(f"[AuditBet] ID mapping -> product:{used_product_id} leg:{used_product_leg_id} sel:{used_selection_id}")
+            except Exception:
+                pass
+        else:
+            try:
+                print("[AuditBet] ID mapping failed; using live IDs against audit endpoint (likely to be rejected)")
             except Exception:
                 pass
     # When querying product legs for audit, prefer the audit endpoint to avoid ID mismatches
