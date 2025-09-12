@@ -536,10 +536,10 @@ def place_audit_superfecta(
         bets_v2.append({"bet": bet_obj})
     payload_v2 = {"bets": bets_v2}
 
-    # v1 (older audit schema): ticket + bets with currencyCode/totalAmount/lineAmount
+    # v1 (ticket schema): for Superfecta use totalAmount per bet (not lineAmount)
     bets_v1: List[Dict[str, Any]] = []
     for lg in legs: # Use the processed legs
-        stake_obj = {"currencyCode": currency, "lineAmount": line_stake}
+        stake_obj = {"currencyCode": currency, "totalAmount": line_stake}
         bets_v1.append({
             "betId": f"bet-superfecta-{uuid.uuid4()}",
             "productId": used_product_id,

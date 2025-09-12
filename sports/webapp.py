@@ -1530,7 +1530,8 @@ def api_tote_event_products(event_id: str):
     
     df = sql_df(
         "SELECT product_id, bet_type, status FROM tote_products WHERE event_id=? AND status='OPEN' ORDER BY bet_type",
-        params=(event_id,)
+        params=(event_id,),
+        cache_ttl=0,
     )
     return app.response_class(json.dumps(df.to_dict("records")), mimetype="application/json")
 
@@ -1545,7 +1546,8 @@ def api_tote_pool_snapshot(product_id: str):
         ss = sql_df(
             "SELECT product_id, event_id, currency, status, start_iso, ts_ms, total_gross, total_net, rollover, deduction_rate, 'snap' AS source "
             "FROM tote_pool_snapshots WHERE product_id=? ORDER BY ts_ms DESC LIMIT 1",
-            params=(product_id,)
+            params=(product_id,),
+            cache_ttl=0,
         )
         if not ss.empty:
             return app.response_class(ss.iloc[0].to_json(), mimetype="application/json")
@@ -1553,7 +1555,8 @@ def api_tote_pool_snapshot(product_id: str):
         pdf = sql_df(
             "SELECT product_id, event_id, currency, status, start_iso, total_gross, total_net, rollover, deduction_rate, NULL AS ts_ms, 'products_fallback' AS source "
             "FROM vw_products_latest_totals WHERE product_id=?",
-            params=(product_id,)
+            params=(product_id,),
+            cache_ttl=0,
         )
         if not pdf.empty:
             return app.response_class(pdf.iloc[0].to_json(), mimetype="application/json")
@@ -2202,7 +2205,7 @@ def api_trigger_jobs():
 def event_detail(event_id: str):
     """Display details for a single event (BigQuery)."""
     # Fetch event details
-    event_df = sql_df("SELECT * FROM tote_events WHERE event_id=?", params=(event_id,))
+    event_df = sql_df("SELECT * FROM tote_events WHERE event_id=?", params=(event_id,), cache_ttl=0)
     if event_df.empty:
         # If event not found, try to get basic info from tote_products
         flash("Event not found", "error")
@@ -2210,7 +2213,7 @@ def event_detail(event_id: str):
     event = event_df.to_dict("records")[0]
 
     # Fetch conditions
-    conditions_df = sql_df("SELECT * FROM race_conditions WHERE event_id=?", params=(event_id,))
+    conditions_df = sql_df("SELECT * FROM race_conditions WHERE event_id=?", params=(event_id,), cache_ttl=0)
     conditions = None if conditions_df.empty else conditions_df.to_dict("records")[0]
 
     # Fetch historical results and runner details from hr_horse_runs.
@@ -2230,7 +2233,8 @@ def event_detail(event_id: str):
         WHERE r.event_id = ?
         ORDER BY r.finish_pos NULLS LAST, r.cloth_number ASC
         """,
-        params=(event_id,)
+        params=(event_id,),
+        cache_ttl=0,
     )
     runner_rows = runner_rows_df.to_dict("records") if not runner_rows_df.empty else []
 
@@ -2297,7 +2301,8 @@ def event_detail(event_id: str):
         WHERE event_id=?
         ORDER BY bet_type
         """,
-        params=(event_id,)
+        params=(event_id,),
+        cache_ttl=0,
     )
     products = products_df.to_dict("records") if not products_df.empty else []
     # Format deduction_rate for display and handle nulls
@@ -2326,7 +2331,8 @@ def event_detail(event_id: str):
             WHERE p.event_id = @event_id AND UPPER(p.bet_type) = 'WIN' -- Use WIN market for probable odds
             ORDER BY o.cloth_number ASC
             """,
-            params={'event_id': event_id}
+            params={'event_id': event_id},
+            cache_ttl=0,
         )
         runners_prob = rprob.to_dict("records") if not rprob.empty else []
     except Exception as e:
@@ -2335,7 +2341,7 @@ def event_detail(event_id: str):
         runners_prob = []
 
     # Fetch features
-    features_df = sql_df("SELECT * FROM vw_runner_features WHERE event_id=?", params=(event_id,))
+    features_df = sql_df("SELECT * FROM vw_runner_features WHERE event_id=?", params=(event_id,), cache_ttl=0)
     features = features_df.to_dict("records") if not features_df.empty else []
 
     return render_template(
@@ -2359,7 +2365,7 @@ def api_refresh_event_pools(event_id: str):
         if not event_id:
             return app.response_class(json.dumps({"error": "missing event_id"}), mimetype="application/json", status=400)
         # List products for the event (open + closed; we update whichever exist)
-        df = sql_df("SELECT product_id FROM tote_products WHERE event_id=?", params=(event_id,))
+        df = sql_df("SELECT product_id FROM tote_products WHERE event_id=?", params=(event_id,), cache_ttl=0)
         ids = ([] if df.empty else [r["product_id"] for _, r in df.iterrows()])
         if not ids:
             return app.response_class(json.dumps({"updated": 0}), mimetype="application/json")
@@ -2371,7 +2377,7 @@ def api_refresh_event_pools(event_id: str):
         n = ingest_products(sink, client, date_iso=None, status=None, first=len(ids), bet_types=None, product_ids=ids)
         # Create snapshots for each product (best-effort)
         try:
-            pdf = sql_df("SELECT product_id, event_id, bet_type, status, currency, start_iso, total_gross, total_net, rollover, deduction_rate FROM tote_products WHERE event_id=?", params=(event_id,))
+            pdf = sql_df("SELECT product_id, event_id, bet_type, status, currency, start_iso, total_gross, total_net, rollover, deduction_rate FROM tote_products WHERE event_id=?", params=(event_id,), cache_ttl=0)
             if not pdf.empty:
                 ts = int(time.time() * 1000)
                 rows = []
