@@ -35,14 +35,24 @@ class ToteClient:
         self.max_retries = max(0, int(max_retries))
         self.session = requests.Session()
         # Auth headers: mirror legacy working set that previously worked in production
-        key = (api_key or cfg.tote_api_key)
+        self.api_key = (api_key or cfg.tote_api_key)
+        self.auth_scheme = (cfg.tote_auth_scheme or "Api-Key").strip()
         # Use minimal header set known to work with partner gateway and avoid WAF false positives
-        self.headers = {
-            "Authorization": f"Api-Key {key}",
+        base_headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "autobet/0.1 (+tote)",
         }
+        # Primary Authorization header if scheme is not x-api-key
+        if self.auth_scheme.lower() != "x-api-key":
+            base_headers["Authorization"] = f"{self.auth_scheme} {self.api_key}"
+        else:
+            # When using x-api-key, do not set Authorization by default
+            pass
+        # Add x-api-key variants to maximize compatibility with partner WAF/routing
+        base_headers.setdefault("X-Api-Key", self.api_key)
+        base_headers.setdefault("x-api-key", self.api_key)
+        self.headers = base_headers
 
     @staticmethod
     def _normalize_gateway_url(url: str, audit: bool = False) -> str:
@@ -76,7 +86,20 @@ class ToteClient:
         for attempt in range(self.max_retries + 1):
             try:
                 _rate_limiter.acquire()
-                resp = self.session.post(url, headers=(headers_override or self.headers), json=payload, timeout=self.timeout)
+                send_headers = dict(headers_override or self.headers)
+                # Heuristic: for live gateway (non-audit), ensure x-api-key headers are present.
+                # This improves compatibility where Authorization: Api-Key is not accepted on /gateway/graphql.
+                try:
+                    u = (url or "")
+                    if "/gateway/graphql" in u and "/audit/" not in u:
+                        send_headers.setdefault("X-Api-Key", self.api_key)
+                        send_headers.setdefault("x-api-key", self.api_key)
+                        # Some partners require no Authorization header on this route; allow opt-out via env
+                        if os.getenv("TOTE_DROP_AUTH_ON_LIVE", "0").lower() in ("1","true","yes","on"):
+                            send_headers.pop("Authorization", None)
+                except Exception:
+                    pass
+                resp = self.session.post(url, headers=send_headers, json=payload, timeout=self.timeout)
                 if resp.status_code >= 400:
                     # Include a snippet of body to aid debugging of 4xx/5xx
                     snippet = ""

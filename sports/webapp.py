@@ -1902,16 +1902,13 @@ def tote_audit_superfecta_post():
     # Explicitly create a ToteClient with the correct endpoint based on the mode.
     # This ensures audit bets are sent to the audit endpoint, preventing "Failed to fund ticket" errors.
     from .providers.tote_api import ToteClient
-    client_for_placement = None
+    client_for_placement = ToteClient()
     if mode == 'audit':
         # Use the dedicated audit endpoint provided.
-        audit_endpoint = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
-        # Create a client and point its base_url to the audit endpoint.
-        client_for_placement = ToteClient()
-        client_for_placement.base_url = audit_endpoint
-    else:
-        # For 'live' mode, use the default client which points to the live endpoint.
-        client_for_placement = ToteClient()
+        client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+    elif mode == 'live':
+        # Use the partner gateway HTTP endpoint for live placement (ensure trailing slash).
+        client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/graphql/"
 
     # NOTE: Assuming place_audit_superfecta accepts a 'client' argument to use for the API call.
     res = place_audit_superfecta(db, mode=mode, product_id=pid, selection=(sel or None), selections=selections, stake=sk, currency=currency, post=post_flag, stake_type=stake_type, placement_product_id=placement_pid, client=client_for_placement)
@@ -2992,7 +2989,9 @@ def tote_live_model_page():
         db = get_db()
         from .providers.tote_api import ToteClient
         client = ToteClient()
-        if mode == 'audit':
+        if mode == 'live':
+            client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/graphql/"
+        elif mode == 'audit':
             client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
 
         res = place_audit_superfecta(db, mode=mode, product_id=product_id, selections=selections, stake=stake, post=True, client=client)
@@ -3011,10 +3010,11 @@ def tote_live_model_page():
     # --- Filters ---
     country = (request.args.get("country") or os.getenv("DEFAULT_COUNTRY", "GB")).strip().upper()
     date_filter = (request.args.get("date") or _today_iso()).strip()
+    calculate_product_id = request.args.get("calculate_product_id")
 
     # Fetch default model parameters from BigQuery
     try:
-        params_df = sql_df("SELECT * FROM tote_params ORDER BY ts_ms DESC LIMIT 1")
+        params_df = sql_df("SELECT * FROM tote_params ORDER BY ts_ms DESC LIMIT 1", cache_ttl=300)
         model_params = params_df.iloc[0].to_dict() if not params_df.empty else {}
     except Exception:
         model_params = {}
@@ -3066,7 +3066,8 @@ def tote_live_model_page():
     params = {}
 
     if country:
-        where.append("UPPER(e.country) = @country")
+        # This is more robust, as p.currency often holds the country code from ingest.
+        where.append("(UPPER(e.country) = @country OR UPPER(p.currency) = @country)")
         params["country"] = country
     
     if date_filter:
@@ -3080,56 +3081,65 @@ def tote_live_model_page():
 
     try:
         upcoming_df = sql_df(sql, params=params, cache_ttl=60)
-        # Filter out events where we couldn't find a corresponding WIN product for odds
-        if not upcoming_df.empty:
-            upcoming_df = upcoming_df[upcoming_df['win_product_id'].notna()]
     except Exception as e:
         flash(f"Query for upcoming events failed: {e}", "error")
         upcoming_df = pd.DataFrame()
 
-    results = []
-    for _, p in upcoming_df.iterrows():
-        product_id = p["product_id"]
-        # Fetch runners and probable odds
-        odds_df = sql_df(
-            "SELECT s.number, s.competitor as name, o.decimal_odds as odds FROM vw_tote_probable_odds o JOIN tote_product_selections s ON o.selection_id = s.selection_id WHERE o.product_id = ? ORDER BY s.number",
-            params=(p["win_product_id"],) # View provides the WIN product ID for odds
-        )
-        if odds_df.empty or odds_df['odds'].isnull().all():
-            continue
+    calculation_result = None
+    if calculate_product_id and not upcoming_df.empty:
+        # Find the specific product to calculate
+        product_to_calc_series = upcoming_df[upcoming_df['product_id'] == calculate_product_id]
+        if not product_to_calc_series.empty:
+            p = product_to_calc_series.iloc[0]
+            
+            if pd.isna(p.get("win_product_id")):
+                 flash(f"Cannot calculate model for {p['event_name']}: No open WIN market found to fetch probable odds.", "warning")
+            else:
+                # Fetch runners and probable odds
+                odds_df = sql_df(
+                    "SELECT s.number, s.competitor as name, o.decimal_odds as odds FROM vw_tote_probable_odds o JOIN tote_product_selections s ON o.selection_id = s.selection_id WHERE o.product_id = ? ORDER BY s.number",
+                    params=(p["win_product_id"],)
+                )
+                if odds_df.empty or odds_df['odds'].isnull().all():
+                    flash(f"Could not fetch probable odds for {p['event_name']}. Cannot run model.", "warning")
+                else:
+                    # Run the model
+                    calc_result = calculate_pl_strategy(
+                        runners=odds_df.to_dict("records"),
+                        bet_type="SUPERFECTA",
+                        bankroll=float(model_params.get("stake_per_line", 10.0) * 100), # Example bankroll
+                        key_horse_mult=2.0, # Default
+                        poor_horse_mult=0.5, # Default
+                        concentration=0.0, # Default
+                        market_inefficiency=0.1, # Default
+                        desired_profit_pct=5.0, # Default
+                        take_rate=float(p.get("deduction_rate") or model_params.get("t", 0.3)),
+                        net_rollover=float(p.get("rollover") or model_params.get("R", 0.0)),
+                        inc_self=True,
+                        div_mult=1.0,
+                        f_fix=model_params.get("f"),
+                        pool_gross_other=float(p.get("total_gross") or 0.0),
+                    )
 
-        # Run the model
-        calc_result = calculate_pl_strategy(
-            runners=odds_df.to_dict("records"),
-            bet_type="SUPERFECTA",
-            bankroll=float(model_params.get("stake_per_line", 10.0) * 100), # Example bankroll
-            key_horse_mult=2.0, # Default
-            poor_horse_mult=0.5, # Default
-            concentration=0.0, # Default
-            market_inefficiency=0.1, # Default
-            desired_profit_pct=5.0, # Default
-            take_rate=float(p.get("deduction_rate") or model_params.get("t", 0.3)),
-            net_rollover=float(p.get("rollover") or model_params.get("R", 0.0)),
-            inc_self=True,
-            div_mult=1.0,
-            f_fix=model_params.get("f"),
-            pool_gross_other=float(p.get("total_gross") or 0.0),
-        )
-
-        pl_model = calc_result.get("pl_model")
-        if pl_model and pl_model.get("best_scenario"):
-            scenario = pl_model["best_scenario"]
-            staking_plan = pl_model["staking_plan"]
-            results.append({
-                "product": p.to_dict(),
-                "scenario": scenario,
-                "staking_plan_text": "\n".join(s["line"] for s in staking_plan),
-                "total_stake": scenario.get("total_stake", 0.0)
-            })
+                    pl_model = calc_result.get("pl_model")
+                    if pl_model and pl_model.get("best_scenario"):
+                        scenario = pl_model["best_scenario"]
+                        staking_plan = pl_model["staking_plan"]
+                        calculation_result = {
+                            "product": p.to_dict(),
+                            "scenario": scenario,
+                            "staking_plan_text": "\n".join(s["line"] for s in staking_plan),
+                            "total_stake": scenario.get("total_stake", 0.0)
+                        }
+                    else:
+                        flash(f"Model did not find a profitable strategy for {p['event_name']}.", "info")
+        else:
+            flash(f"Product ID {calculate_product_id} not found in upcoming events.", "warning")
 
     return render_template(
         "tote_live_model.html",
-        results=results,
+        events=upcoming_df.to_dict("records") if not upcoming_df.empty else [],
+        calculation_result=calculation_result,
         filters={
             "country": country,
             "date": date_filter,
@@ -3445,7 +3455,7 @@ def tote_bet_page():
                 return redirect(request.referrer or url_for("tote_bet_page"))
             client_for_placement = ToteClient()
             if mode == 'live':
-                # Use the dedicated live placement endpoint.
+                # Use the partner gateway HTTP endpoint for live placement (ensure trailing slash).
                 client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/graphql/"
             elif mode == 'audit':
                 client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
@@ -3460,7 +3470,7 @@ def tote_bet_page():
             selections = [p for p in (selections_text.replace("\r","\n").replace(",","\n").split("\n")) if p.strip()]
             client_for_placement = ToteClient()
             if mode == 'live':
-                # Use the dedicated live placement endpoint.
+                # Use the partner gateway HTTP endpoint for live placement (ensure trailing slash).
                 client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/graphql/"
             elif mode == 'audit':
                 client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"

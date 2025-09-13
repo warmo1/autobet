@@ -540,7 +540,11 @@ def place_audit_simple_bet(
         try:
             if not client:
                 client = ToteClient()
-            # Executor respects live vs audit
+                # Default to audit unless explicitly live
+                if mode != 'live':
+                    client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+
+            # Helper to choose live vs audit executor explicitly
             def _exec(query: str, variables: dict):
                 if str(mode).lower() == 'live':
                     return client.graphql(query, variables)
@@ -643,24 +647,6 @@ def place_audit_superfecta(
         line_stake = float(stake)
     else:  # 'total'
         line_stake = float(stake) / num_lines if num_lines > 0 else 0.0
-
-    # Determine required positions based on product bet type (EXACTA=2, TRIFECTA=3, SUPERFECTA=4)
-    pos_required = 4
-    try:
-        row_bt = _bq_query_rows(
-            sink,
-            "SELECT UPPER(bet_type) AS bt FROM tote_products WHERE product_id=@pid LIMIT 1",
-            {"pid": product_id},
-        )
-        bt = ((row_bt[0] or {}).get("bt") if row_bt else None) or "SUPERFECTA"
-        if bt == "EXACTA":
-            pos_required = 2
-        elif bt == "TRIFECTA":
-            pos_required = 3
-        else:
-            pos_required = 4
-    except Exception:
-        pos_required = 4
 
     # Map selection strings to GraphQL legs structure using tote_product_selections
     by_number: Dict[int, str] = {}
@@ -907,10 +893,10 @@ def place_audit_superfecta(
     def _line_to_legs(line: str) -> Optional[Dict[str, Any]]:
         try:
             parts = [int(x.strip()) for x in line.split('-') if x.strip()]
-            if len(parts) < pos_required:
+            if len(parts) < 4:
                 return None
             sels: List[Dict[str, Any]] = []
-            for pos, num in enumerate(parts[:pos_required], start=1):
+            for pos, num in enumerate(parts[:4], start=1):
                 # Always use the mapped selection ID for both live and audit
                 sid = by_number_map.get(int(num))
                 if not sid:
@@ -939,7 +925,7 @@ def place_audit_superfecta(
         for s in bet_lines:
             try:
                 parts = [int(x.strip()) for x in s.split('-') if x.strip()]
-                for n in parts[:pos_required]:
+                for n in parts[:4]:
                     if n not in by_number:
                         missing.append(str(n))
             except Exception:
@@ -996,67 +982,58 @@ def place_audit_superfecta(
         try:
             if not client:
                 client = ToteClient()
-            # Helper: choose live vs audit executor explicitly
-            def _exec(query: str, variables: dict):
-                if str(mode).lower() == 'live':
-                    return client.graphql(query, variables)
-                else:
-                    return client.graphql_audit(query, variables)
-
-            # Try v1 (ticket) first for compatibility with audit endpoint
+            is_live = str(mode).lower() == 'live'
+            # Build v1 mutation per Tote docs for Superfecta
             mutation_v1 = """
             mutation PlaceBets($input: PlaceBetsInput!) {
               placeBets(input:$input){
                 ticket{
                   id
                   toteId
-                  idempotent
-                  bets{
-                    nodes{
-                      id
-                      toteId
-                      placement{ status rejectionReason }
-                    }
-                  }
+                  bets{ nodes{ id toteId placement{ status rejectionReason } } }
                 }
               }
             }
             """
             variables_v1 = {"input": {"ticketId": f"ticket-{uuid.uuid4()}", "bets": bets_v1}}
-            try:
-                resp = _exec(mutation_v1, variables_v1)
-                used_schema = "v1"
-                sent_variables = variables_v1
-            except Exception as e1:
-                # Fallback to v2 (results[])
-                mutation_v2 = """
-                mutation PlaceBets($input: PlaceBetsInput!) {
-                  placeBets(input: $input) {
-                    results { toteBetId status failureReason }
-                  }
-                }
-                """
-                variables_v2 = {"input": payload_v2}
+            # Prefer v1 for live superfecta to ensure positions are honoured
+            if is_live:
                 try:
-                    resp = _exec(mutation_v2, variables_v2)
-                    used_schema = "v2"
-                    sent_variables = variables_v2
-                except Exception as e2:
-                    err = str(e2)
+                    resp = client.graphql(mutation_v1, variables_v1)
+                    used_schema = "v1"; sent_variables = variables_v1
+                except Exception as e1:
+                    err = str(e1)
                     try:
-                        print("[AuditBet][ERROR] v1 variables:", json.dumps(variables_v1)[:400])
-                        print("[AuditBet][ERROR] v1 exception:", str(e1))
-                        print("[AuditBet][ERROR] v2 variables:", json.dumps(variables_v2)[:400])
-                        print("[AuditBet][ERROR] v2 exception:", err)
+                        print("[AuditBet][ERROR] live superfecta v1 variables:", json.dumps(variables_v1)[:400])
+                        print("[AuditBet][ERROR] live superfecta v1 exception:", err)
                     except Exception:
                         pass
             else:
-                # On success, optionally log the shape for diagnostics (without dumping full IDs unless in debug)
+                # Audit or other modes: keep v1-first with v2 fallback
                 try:
-                    if str(os.getenv("TOTE_DEBUG", "0")).lower() in ("1","true","yes","on"):
-                        print("[AuditBet][OK] v1 payload legs:", len(bets_v1[0].get("legs", [])), "selections:", len((bets_v1[0].get("legs") or [{}])[0].get("selections", [])))
-                except Exception:
-                    pass
+                    resp = client.graphql_audit(mutation_v1, variables_v1)
+                    used_schema = "v1"; sent_variables = variables_v1
+                except Exception as e1:
+                    mutation_v2 = """
+                    mutation PlaceBets($input: PlaceBetsInput!) {
+                      placeBets(input: $input) {
+                        results { toteBetId status failureReason }
+                      }
+                    }
+                    """
+                    variables_v2 = {"input": payload_v2}
+                    try:
+                        resp = client.graphql_audit(mutation_v2, variables_v2)
+                        used_schema = "v2"; sent_variables = variables_v2
+                    except Exception as e2:
+                        err = str(e2)
+                        try:
+                            print("[AuditBet][ERROR] v1 variables:", json.dumps(variables_v1)[:400])
+                            print("[AuditBet][ERROR] v1 exception:", str(e1))
+                            print("[AuditBet][ERROR] v2 variables:", json.dumps(variables_v2)[:400])
+                            print("[AuditBet][ERROR] v2 exception:", err)
+                        except Exception:
+                            pass
         except Exception as e:
             err = str(e)
             try:
