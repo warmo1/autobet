@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}Live Model Analysis{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h1>Live Model Analysis</h1>
+        <a href="{{ url_for('tote_live_model_page') }}" class="btn btn-primary">Refresh</a>
+    </div>
+
+    <p class="text-muted">
+        This page shows upcoming Superfecta events and runs the Plackett-Luce model against them using default parameters.
+        The model calculates the expected profit and generates a staking plan. You can place these bets in audit or live mode.
+    </p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    {% if not results %}
+        <div class="alert alert-info mt-4">No upcoming events found matching the criteria, or no profitable strategies were identified.</div>
+    {% else %}
+        {% for result in results %}
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>{{ result.product.event_name }} - {{ result.product.venue }}</h5>
+                <small class="text-muted">Start Time: {{ result.product.start_iso | datetime }} UTC</small>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-4">
+                        <h6>Model Output</h6>
+                        <ul class="list-group">
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                Expected Profit
+                                <span class="badge bg-primary rounded-pill">£{{ result.scenario.expected_profit | f2 }}</span>
+                            </li>
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                Lines Covered
+                                <span>{{ result.scenario.lines_covered }}</span>
+                            </li>
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                Hit Rate
+                                <span>{{ result.scenario.hit_rate | pct1 }}</span>
+                            </li>
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                Total Stake
+                                <span>£{{ result.total_stake | f2 }}</span>
+                            </li>
+                        </ul>
+                    </div>
+                    <div class="col-md-8">
+                        <h6>Staking Plan ({{ result.scenario.lines_covered }} lines)</h6>
+                        <form method="POST" action="{{ url_for('tote_live_model_page') }}">
+                            <input type="hidden" name="product_id" value="{{ result.product.product_id }}">
+                            <input type="hidden" name="stake" value="{{ result.total_stake }}">
+                            <textarea name="selections_text" class="form-control" rows="5" readonly>{{ result.staking_plan_text }}</textarea>
+                            <div class="mt-3">
+                                <button type="submit" name="mode" value="audit" class="btn btn-info">Place Bet (Audit)</button>
+                                <button type="submit" name="mode" value="live" class="btn btn-danger" onclick="return confirm('Place LIVE bet of £{{ result.total_stake | f2 }}?');">Place Bet (Live)</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    {% endif %}
+</div>
+{% endblock %}

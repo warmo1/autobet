@@ -3,7 +3,7 @@ import os
 import time
 import pandas as pd
 from datetime import date, timedelta, datetime
-from flask import Flask, render_template, request, redirect, flash, url_for, send_file
+from flask import Flask, render_template, request, redirect, flash, url_for, send_file, Response
 from .config import cfg
 from .db import get_db, init_db
 from pathlib import Path
@@ -11,18 +11,17 @@ import json
 import threading
 import traceback
 import math
+import queue
 from typing import Optional, Sequence, Mapping, Any
 from google.cloud import bigquery
 from .providers.tote_bets import place_audit_superfecta
 from .providers.tote_bets import refresh_bet_status, audit_list_bets, sync_bets_from_api
 from .gcp import publish_pubsub_message
+from .providers.pl_calcs import calculate_pl_strategy
 import itertools
 import math
 from collections import defaultdict
 import requests
-from .realtime import bus as rt_bus
-from flask import Response, stream_with_context
-from queue import Empty
 
 # Simple in-process TTL cache for sql_df results
 _SQLDF_CACHE_LOCK = threading.Lock()
@@ -116,14 +115,44 @@ def _sql_is_readonly(sql: str) -> bool:
         return False
 
 # Helper function for permutations (nPr) - not directly used in PL, but good to have
-def _permutations_count(n, r):
-    if r < 0 or r > n:
-        return 0
-    
-    res = 1
-    for i in range(r):
-        res *= (n - i)
-    return res
+class EventBus:
+    """A simple thread-safe, in-memory event bus for real-time UI updates."""
+    def __init__(self):
+        self.subscribers = defaultdict(list)
+        self.lock = threading.Lock()
+
+    def publish(self, channel: str, data: dict):
+        """Publish an event. Called from the subscriber thread."""
+        with self.lock:
+            # Create a copy to avoid issues if a subscriber unsubscribes during iteration
+            sub_list = self.subscribers.get(channel, [])[:]
+        
+        # The queue will store a tuple of (channel, data)
+        for q in sub_list:
+            try:
+                q.put_nowait((channel, data))
+            except queue.Full:
+                # Subscriber is too slow, message is dropped.
+                # In a real-world scenario, you might log this.
+                pass
+
+    def subscribe(self, channels: list[str]) -> queue.Queue:
+        """Subscribe to one or more channels. Returns a queue to consume events."""
+        q = queue.Queue(maxsize=200)
+        with self.lock:
+            for channel in channels:
+                self.subscribers[channel].append(q)
+        return q
+
+    def unsubscribe(self, channels: list[str], q: queue.Queue):
+        """Unsubscribe a queue from channels."""
+        with self.lock:
+            for channel in channels:
+                # Use a while loop to remove all occurrences, just in case
+                while q in self.subscribers.get(channel, []):
+                    self.subscribers[channel].remove(q)
+
+event_bus = EventBus()
 
 
 app = Flask(__name__)
@@ -143,7 +172,9 @@ def _pool_subscriber_loop():
         try:
             # The subscriber loop will now use the BigQuery sink via the new db layer
             db = get_db()
-            run_subscriber(db, duration=None) # Assuming run_subscriber is adapted for a BQ sink
+            # Note: run_subscriber currently manages its own realtime bus publishing.
+            # Do not pass unsupported kwargs.
+            run_subscriber(db, duration=None)
         except Exception as e:
             try:
                 print("[PoolSub] error:", e)
@@ -169,16 +200,33 @@ def _maybe_start_bq_exporter():
     # Placeholder for legacy background exporter. No-op in BQ-only mode.
     return
 
-# --- Admin helpers (dev) ---
-@app.post("/api/admin/ensure_views")
-def api_admin_ensure_views():
-    """Create or refresh required views in BigQuery. Dev helper."""
-    try:
-        db = get_db()
-        db.ensure_views()
-        return app.response_class(json.dumps({"ok": True}), mimetype="application/json")
-    except Exception as e:
-        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
+@app.route('/stream')
+def stream():
+    """Server-Sent Events (SSE) endpoint."""
+    # Get topics from client, e.g. /stream?topic=pool_total_changed&topic=product_status_changed
+    # Accept either repeated topic params (?topic=...) or a comma-separated 'topics' param
+    topics = request.args.getlist('topic')
+    if not topics:
+        topics_csv = (request.args.get('topics') or '').strip()
+        if topics_csv:
+            topics = [t for t in topics_csv.split(',') if t]
+    if not topics:
+        return Response("No topics specified.", status=400, mimetype='text/plain')
+
+    def event_generator():
+        q = event_bus.subscribe(topics)
+        try:
+            while True:
+                try:
+                    # Block with a timeout to send keep-alives
+                    channel, data = q.get(timeout=25)
+                    yield f"event: {channel}\ndata: {json.dumps(data)}\n\n"
+                except queue.Empty:
+                    yield ": keep-alive\n\n"
+        finally:
+            event_bus.unsubscribe(topics, q)
+    
+    return Response(event_generator(), mimetype='text/event-stream')
 
 
 def _use_bq() -> bool:
@@ -577,12 +625,12 @@ def tote_params_update():
 @app.route("/tote-events")
 def tote_events_page():
     """List Tote events with filters and pagination."""
-    country = (request.args.get("country") or "GB").strip().upper()
+    country = (request.args.get("country") or "").strip().upper()
     sport = (request.args.get("sport") or "").strip()
     venue = (request.args.get("venue") or "").strip()
     name = (request.args.get("name") or "").strip()
-    date_from = (request.args.get("from") or _today_iso()).strip()
-    date_to = (request.args.get("to") or _today_iso()).strip()
+    date_from = (request.args.get("from") or "").strip()
+    date_to = (request.args.get("to") or "").strip()
     limit = max(1, int(request.args.get("limit", "200") or 200))
     page = max(1, int(request.args.get("page", "1") or 1))
     offset = (page - 1) * limit
@@ -599,10 +647,7 @@ def tote_events_page():
     if date_from:
         where.append("SUBSTR(start_iso,1,10) >= ?"); params.append(date_from)
     if date_to:
-        # Ensure date_to includes the entire day by checking against the start of the next day
         where.append("SUBSTR(start_iso,1,10) <= ?"); params.append(date_to)
-    # Default to OPEN or SCHEDULED events and ascending time to show next races first
-    where.append("UPPER(status) IN ('OPEN','SCHEDULED')")
     base_sql = ( # noqa
         "SELECT event_id, name, venue, country, start_iso, sport, status, competitors_json, home, away "
         "FROM tote_events"
@@ -611,7 +656,11 @@ def tote_events_page():
     if where:
         base_sql += " WHERE " + " AND ".join(where)
         count_sql += " WHERE " + " AND ".join(where)
-    base_sql += " ORDER BY start_iso ASC LIMIT ? OFFSET ?"
+    # Sort by most recent first by default, unless a 'from' date is given to see upcoming.
+    order_by = " ORDER BY start_iso DESC"
+    if date_from:
+        order_by = " ORDER BY start_iso ASC"
+    base_sql += order_by + " LIMIT ? OFFSET ?"
     params_paged = list(params) + [limit, offset]
     # Performance: Simplified total count query.
     # Bypass cache for paged results to avoid any unexpected truncation/staleness
@@ -656,8 +705,8 @@ def tote_superfecta_page():
     # UI Improvement: Default country to GB and add a venue filter.
     country = (request.args.get("country") or os.getenv("DEFAULT_COUNTRY", "GB")).strip().upper()
     venue = (request.args.get("venue") or "").strip()
-    # Default to all statuses (OPEN+SCHEDULED etc.) unless explicitly filtered
-    status = (request.args.get("status") or "").strip().upper()
+    # Default to OPEN status unless explicitly filtered to something else.
+    status = (request.args.get("status") or "OPEN").strip().upper()
     date_from = request.args.get("from") or _today_iso()
     date_to = request.args.get("to") or _today_iso()
     limit = int(request.args.get("limit", "200") or 200)
@@ -740,6 +789,83 @@ def tote_superfecta_page():
         upcoming=(upcoming or []),
     )
 
+@app.route("/api/admin/refresh_product_status", methods=["GET","POST"])
+def api_admin_refresh_product_status():
+    """Backfill product selling status from Tote API into BigQuery.
+
+    - If `event_id` is provided (form/query/json), refresh only that event.
+    - Else refresh by `date` (YYYY-MM-DD, default today UTC) using the paginated
+      products(date:) query.
+
+    This writes rows into `tote_product_status_log` via the sink, which mirrors the
+    latest status onto `tote_products.status` used by the UI/views.
+    """
+    try:
+        payload = request.get_json(silent=True) or {}
+    except Exception:
+        payload = {}
+    date_str = (payload.get("date") or request.values.get("date") or _today_iso()).strip()
+    event_id = (payload.get("event_id") or request.values.get("event_id") or "").strip()
+    first = int(payload.get("first") or request.values.get("first") or 500)
+
+    try:
+        from .providers.tote_api import ToteClient
+        client = ToteClient()
+    except Exception as e:
+        return app.response_class(json.dumps({"ok": False, "error": f"ToteClient init failed: {e}"}), mimetype="application/json", status=500)
+
+    import time as _t
+    ts_ms = int(_t.time() * 1000)
+    rows: list[dict] = []
+
+    try:
+        if event_id:
+            q = (
+                "query GetEvent($id: String){\n"
+                "  event(id:$id){ products{ nodes{ id ... on BettingProduct { selling{ status } } } } }\n"
+                "}"
+            )
+            data = client.graphql(q, {"id": event_id})
+            nodes = (((data.get("event") or {}).get("products") or {}).get("nodes")) or []
+            for n in nodes:
+                pid = n.get("id"); st = (((n.get("selling") or {}).get("status")) or "")
+                if pid and st:
+                    rows.append({"product_id": str(pid), "ts_ms": ts_ms, "status": str(st)})
+        else:
+            q = (
+                "query GetProducts($date: Date, $first: Int, $after: String){\n"
+                "  products(date:$date, first:$first, after:$after){ pageInfo{ hasNextPage endCursor }\n"
+                "    nodes{ id ... on BettingProduct { selling{ status } } } }\n"
+                "}"
+            )
+            after = None
+            while True:
+                vars = {"date": date_str, "first": int(first)}
+                if after:
+                    vars["after"] = after
+                data = client.graphql(q, vars)
+                prod = (data.get("products") or {})
+                nodes = (prod.get("nodes") or [])
+                for n in nodes:
+                    pid = n.get("id"); st = (((n.get("selling") or {}).get("status")) or "")
+                    if pid and st:
+                        rows.append({"product_id": str(pid), "ts_ms": ts_ms, "status": str(st)})
+                pi = (prod.get("pageInfo") or {})
+                if pi.get("hasNextPage") and pi.get("endCursor"):
+                    after = pi.get("endCursor"); continue
+                break
+    except Exception as e:
+        return app.response_class(json.dumps({"ok": False, "error": f"Tote API error: {e}"}), mimetype="application/json", status=502)
+
+    if not rows:
+        return app.response_class(json.dumps({"ok": True, "updated": 0}), mimetype="application/json")
+    try:
+        db = get_db()
+        db.upsert_tote_product_status_log(rows)
+        return app.response_class(json.dumps({"ok": True, "updated": len(rows), "date": date_str or None, "event_id": event_id or None}), mimetype="application/json")
+    except Exception as e:
+        return app.response_class(json.dumps({"ok": False, "error": f"BQ upsert failed: {e}"}), mimetype="application/json", status=500)
+
 def create_app():
     """Factory for Flask app; also starts background subscribers if configured."""
     try:
@@ -751,77 +877,6 @@ def create_app():
     except Exception:
         pass
     return app
-
-
-# --- Server-Sent Events (SSE) stream for realtime UI updates ---
-@app.route("/stream")
-def sse_stream():
-    """SSE endpoint streaming normalized updates to the client.
-
-    Query params:
-      - topics: comma-separated topics (default: event_status_changed,product_status_changed,pool_total_changed,selection_status_changed,dividend_changed,lines_changed)
-      - events: comma-separated event_ids to filter
-      - products: comma-separated product_ids to filter
-    """
-    topics_raw = (request.args.get("topics") or "").strip()
-    topics_default = [
-        "event_status_changed",
-        "product_status_changed",
-        "pool_total_changed",
-        "selection_status_changed",
-        "dividend_changed",
-        "lines_changed",
-    ]
-    topics = [t for t in (topics_raw.split(",") if topics_raw else topics_default) if t]
-    ev_ids = set([x for x in (request.args.get("events") or "").split(",") if x])
-    prod_ids = set([x for x in (request.args.get("products") or "").split(",") if x])
-
-    def _flt(topic: str, payload: dict) -> bool:
-        try:
-            if ev_ids:
-                eid = str(payload.get("event_id") or "")
-                if eid and eid in ev_ids:
-                    return True
-                # Some topics only have product_id; allow through if no event filter matched
-            if prod_ids:
-                pid = str(payload.get("product_id") or "")
-                if pid and pid in prod_ids:
-                    return True
-            # If neither filter set, allow all
-            return not ev_ids and not prod_ids
-        except Exception:
-            return True
-
-    sub = rt_bus.subscribe(topics, _flt, maxsize=1024)
-
-    @stream_with_context
-    def _gen():
-        try:
-            # Send an initial retry and hello comment
-            yield "retry: 2000\n\n"
-            last_ka = time.time()
-            while True:
-                item = sub.get(timeout=15.0)
-                now = time.time()
-                if item is None:
-                    # periodic keep-alive
-                    if now - last_ka >= 15.0:
-                        yield ": keepalive\n\n"
-                        last_ka = now
-                    continue
-                topic, payload = item
-                try:
-                    data = json.dumps(payload, ensure_ascii=False)
-                except Exception:
-                    continue
-                yield f"event: {topic}\n" + f"data: {data}\n\n"
-        finally:
-            try:
-                rt_bus.unsubscribe(sub)
-            except Exception:
-                pass
-
-    return Response(_gen(), mimetype="text/event-stream")
 
 # Removed legacy fixtures/suggestions pages
 
@@ -1609,25 +1664,66 @@ def api_tote_product_runners():
 
 @app.route("/api/tote/event_products/<event_id>")
 def api_tote_event_products(event_id: str):
-    """Return OPEN products for a given event."""
+    """Return OPEN/SELLING products for a given event.
+
+    Uses latest-totals view when possible; if results look incomplete (e.g., only WIN),
+    fetches from Tote GraphQL to enrich the list so the bet page can show all types.
+    """
     if not event_id:
         return app.response_class(json.dumps({"error": "missing event_id"}), mimetype="application/json", status=400)
-    # Prefer latest-totals view for freshest status; allow both OPEN and SELLING
-    sql_view = (
-        "SELECT product_id, bet_type, COALESCE(status,'') AS status "
-        "FROM vw_products_latest_totals WHERE event_id=? "
-        "AND UPPER(COALESCE(status,'')) IN ('OPEN','SELLING') ORDER BY bet_type"
-    )
+
+    # Prefer live API for freshest product selling status; fallback to BQ if unavailable
+    rows: list[dict] = []
     try:
-        df = sql_df(sql_view, params=(event_id,), cache_ttl=0)
-    except Exception:
-        # Fallback to base table
-        df = sql_df(
-            "SELECT product_id, bet_type, status FROM tote_products WHERE event_id=? AND UPPER(COALESCE(status,'')) IN ('OPEN','SELLING') ORDER BY bet_type",
-            params=(event_id,),
-            cache_ttl=0,
+        from .providers.tote_api import ToteClient
+        client = ToteClient()
+        q = (
+            "query GetEvent($id: String){\n"
+            "  event(id:$id){ products{ nodes{ id ... on BettingProduct { betType{ code } selling{ status } } } } }\n"
+            "}"
         )
-    return app.response_class(json.dumps(df.to_dict("records") if not df.empty else []), mimetype="application/json")
+        data = client.graphql(q, {"id": event_id})
+        nodes = (((data.get("event") or {}).get("products") or {}).get("nodes")) or []
+        for n in nodes:
+            bt = (((n.get("betType") or {}).get("code")) or "").upper()
+            st = (((n.get("selling") or {}).get("status")) or "")
+            pid = n.get("id")
+            if bt and pid and (st or "").upper() in ("OPEN","SELLING"):
+                rows.append({"product_id": pid, "bet_type": bt, "status": st})
+        rows = sorted(rows, key=lambda r: (r.get('bet_type') or ''))
+    except Exception:
+        # Fallback to BQ view, then base table, relaxing status if needed
+        try:
+            vdf = sql_df(
+                "SELECT product_id, bet_type, COALESCE(status,'') AS status FROM vw_products_latest_totals "
+                "WHERE event_id=? AND UPPER(COALESCE(status,'')) IN ('OPEN','SELLING') ORDER BY bet_type",
+                params=(event_id,), cache_ttl=0,
+            )
+            rows = ([] if vdf.empty else vdf.to_dict("records"))
+        except Exception:
+            rows = []
+        if not rows:
+            try:
+                tdf = sql_df(
+                    "SELECT product_id, bet_type, COALESCE(status,'') AS status FROM tote_products "
+                    "WHERE event_id=? AND UPPER(COALESCE(status,'')) IN ('OPEN','SELLING') ORDER BY bet_type",
+                    params=(event_id,), cache_ttl=0,
+                )
+                rows = ([] if tdf.empty else tdf.to_dict("records"))
+            except Exception:
+                rows = []
+        if not rows:
+            try:
+                anydf = sql_df(
+                    "SELECT product_id, bet_type, COALESCE(status,'') AS status FROM tote_products "
+                    "WHERE event_id=? ORDER BY bet_type",
+                    params=(event_id,), cache_ttl=0,
+                )
+                rows = ([] if anydf.empty else anydf.to_dict("records"))
+            except Exception:
+                rows = []
+
+    return app.response_class(json.dumps(rows or []), mimetype="application/json")
 
 @app.route("/api/tote/pool_snapshot/<product_id>")
 def api_tote_pool_snapshot(product_id: str):
@@ -2305,17 +2401,6 @@ def event_detail(event_id: str):
         flash("Event not found", "error")
         return redirect(url_for("tote_events_page"))
     event = event_df.to_dict("records")[0]
-    # Overlay latest status from log if available
-    try:
-        sdf = sql_df(
-            "SELECT status FROM tote_event_status_log WHERE event_id=? ORDER BY ts_ms DESC LIMIT 1",
-            params=(event_id,),
-            cache_ttl=0,
-        )
-        if not sdf.empty and sdf.iloc[0].get("status"):
-            event["status"] = sdf.iloc[0]["status"]
-    except Exception:
-        pass
 
     # Fetch conditions
     conditions_df = sql_df("SELECT * FROM race_conditions WHERE event_id=?", params=(event_id,), cache_ttl=0)
@@ -2391,38 +2476,6 @@ def event_detail(event_id: str):
                 params=(event_id,)
             )
             runners = ([] if dfw.empty else dfw.to_dict("records"))
-        except Exception:
-            pass
-    else:
-        # Final fallback: derive runners from tote_product_selections (prefer WIN market)
-        try:
-            sels_df = sql_df(
-                """
-                WITH win_prod AS (
-                  SELECT product_id
-                  FROM tote_products
-                  WHERE event_id=@eid AND UPPER(bet_type)='WIN'
-                  LIMIT 1
-                )
-                SELECT DISTINCT
-                  CAST(s.number AS INT64) AS cloth_number,
-                  COALESCE(s.competitor, s.selection_id) AS name
-                FROM tote_product_selections s
-                JOIN tote_products p ON p.product_id = s.product_id
-                WHERE p.event_id = @eid AND (p.product_id IN (SELECT product_id FROM win_prod) OR NOT EXISTS(SELECT 1 FROM win_prod))
-                ORDER BY cloth_number
-                """,
-                params={"eid": event_id},
-                cache_ttl=0,
-            )
-            if not sels_df.empty:
-                for _, r in sels_df.iterrows():
-                    runners.append({
-                        "cloth": r.get("cloth_number"),
-                        "name": r.get("name"),
-                        "finish_pos": None,
-                        "status": None,
-                    })
         except Exception:
             pass
 
@@ -2542,37 +2595,81 @@ def api_refresh_event_pools(event_id: str):
 
 @app.post("/api/tote/refresh_odds/<event_id>")
 def api_refresh_odds(event_id: str):
-    """Fetch WIN probable odds via GraphQL, normalize, and store to raw_tote_probable_odds."""
+    """Fetch WIN probable odds via REST, normalize, and store to raw_tote_probable_odds.
+
+    This does not depend on Cloud Run. It targets the partner gateway using the configured
+    TOTE_GRAPHQL_URL host and Api-Key header.
+    """
     try:
-        # Find a WIN product for this event (prefer OPEN if present)
+        # Find an OPEN WIN product for this event
         pdf = sql_df(
-            "SELECT product_id FROM tote_products WHERE event_id=? AND UPPER(bet_type)='WIN' ORDER BY CASE UPPER(COALESCE(status,'')) WHEN 'OPEN' THEN 0 ELSE 1 END, start_iso LIMIT 1",
+            "SELECT product_id FROM tote_products WHERE event_id=? AND UPPER(bet_type)='WIN' ORDER BY status DESC LIMIT 1",
             params=(event_id,)
         )
         if pdf.empty:
             return app.response_class(json.dumps({"error": "no WIN product for event"}), mimetype="application/json", status=404)
         win_product_id = pdf.iloc[0]["product_id"]
 
-        # GraphQL query for lines on a single product
-        GQL = """
-        query GetProduct($id: String!) {
-          product(id: $id) {
-            id
-            ... on BettingProduct {
-              lines { nodes { legs { lineSelections { selectionId } } odds { decimal } } }
-            }
-          }
-        }
-        """
-        from .providers.tote_api import ToteClient, ToteError
-        client = ToteClient()
+        # Build host root from configured GraphQL URL
+        base = cfg.tote_graphql_url or ""
+        host_root = ""
         try:
-            data = client.graphql(GQL, {"id": win_product_id})
-        except ToteError as te:
-            return app.response_class(json.dumps({"error": f"graphql: {te}"}), mimetype="application/json", status=502)
+            if "/partner/" in base:
+                host_root = base.split("/partner/")[0].rstrip("/")
+            else:
+                from urllib.parse import urlparse
+                u = urlparse(base)
+                if u.scheme and u.netloc:
+                    host_root = f"{u.scheme}://{u.netloc}"
+        except Exception:
+            host_root = ""
+        if not host_root:
+            host_root = "https://hub.production.racing.tote.co.uk"
 
-        prod = (data or {}).get("product") or {}
-        lines = (((prod.get("lines") or {}).get("nodes")) or []) if isinstance(prod, dict) else []
+        candidates = [
+            f"{host_root}/partner/gateway/probable-odds/v1/products/{win_product_id}",
+            f"{host_root}/partner/gateway/v1/products/{win_product_id}/probable-odds",
+            f"{host_root}/v1/products/{win_product_id}/probable-odds",
+        ]
+        headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
+        data = None; url_used = None
+        for url in candidates:
+            try:
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    url_used = url
+                    break
+            except Exception:
+                continue
+        if data is None:
+            return app.response_class(json.dumps({"error": "probable-odds fetch failed"}), mimetype="application/json", status=502)
+
+        # Normalize to the view's expected shape: {products:{nodes:[{id, lines:{nodes:[{legs:[{lineSelections:[{selectionId}]}], odds:{decimal}}]}}]}}
+        def _extract_lines(obj):
+            lines = []
+            if not isinstance(obj, dict):
+                return lines
+            # common shapes
+            try:
+                if isinstance(obj.get("lines"), dict) and isinstance(obj["lines"].get("nodes"), list):
+                    for ln in obj["lines"]["nodes"]:
+                        lines.append(ln)
+                elif isinstance(obj.get("lines"), list):
+                    lines.extend(obj["lines"])
+            except Exception:
+                pass
+            # nested scan
+            for k, v in list(obj.items()):
+                if isinstance(v, dict):
+                    lines.extend(_extract_lines(v))
+                elif isinstance(v, list):
+                    for it in v:
+                        if isinstance(it, dict):
+                            lines.extend(_extract_lines(it))
+            return lines
+
+        lines = _extract_lines(data)
         norm_lines = []
         for ln in lines:
             try:
@@ -2580,9 +2677,12 @@ def api_refresh_odds(event_id: str):
                 legs = ln.get("legs") or []
                 sel_id = None
                 if legs:
-                    sels = (legs[0].get("lineSelections") or [])
-                    if sels:
-                        sel_id = sels[0].get("selectionId")
+                    try:
+                        sels = (legs[0].get("lineSelections") or [])
+                        if sels:
+                            sel_id = sels[0].get("selectionId")
+                    except Exception:
+                        pass
                 if sel_id and odds is not None:
                     norm_lines.append({
                         "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
@@ -2592,78 +2692,7 @@ def api_refresh_odds(event_id: str):
                 continue
 
         if not norm_lines:
-            # Fallback to REST probable-odds endpoints for robustness
-            try:
-                base = cfg.tote_graphql_url or ""
-                host_root = ""
-                if "/partner/" in base:
-                    host_root = base.split("/partner/")[0].rstrip("/")
-                else:
-                    from urllib.parse import urlparse
-                    u = urlparse(base)
-                    if u.scheme and u.netloc:
-                        host_root = f"{u.scheme}://{u.netloc}"
-                if not host_root:
-                    host_root = "https://hub.production.racing.tote.co.uk"
-                candidates = [
-                    f"{host_root}/partner/gateway/v1/products/{win_product_id}/probable-odds",
-                    f"{host_root}/partner/gateway/probable-odds/v1/products/{win_product_id}",
-                    f"{host_root}/partner/gateway/probable-odds/v1/products/{win_product_id}/probable-odds",
-                    f"{host_root}/v1/products/{win_product_id}/probable-odds",
-                ]
-                headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
-                import requests as _rq
-                data = None
-                for url in candidates:
-                    try:
-                        resp = _rq.get(url, headers=headers, timeout=10)
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            break
-                    except Exception:
-                        continue
-                if data:
-                    # Normalize generically (same shape as before)
-                    def _extract_lines(obj):
-                        lines = []
-                        if not isinstance(obj, dict):
-                            return lines
-                        try:
-                            if isinstance(obj.get("lines"), dict) and isinstance(obj["lines"].get("nodes"), list):
-                                lines.extend(obj["lines"]["nodes"])
-                            elif isinstance(obj.get("lines"), list):
-                                lines.extend(obj["lines"])
-                        except Exception:
-                            pass
-                        for _, v in list(obj.items()):
-                            if isinstance(v, dict):
-                                lines.extend(_extract_lines(v))
-                            elif isinstance(v, list):
-                                for it in v:
-                                    if isinstance(it, dict):
-                                        lines.extend(_extract_lines(it))
-                        return lines
-                    for ln in _extract_lines(data):
-                        try:
-                            odds = ((ln.get("odds") or {}).get("decimal"))
-                            legs = ln.get("legs") or []
-                            sel_id = None
-                            if legs:
-                                sels = (legs[0].get("lineSelections") or [])
-                                if sels:
-                                    sel_id = sels[0].get("selectionId")
-                            if sel_id and odds is not None:
-                                norm_lines.append({
-                                    "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
-                                    "odds": {"decimal": float(odds)},
-                                })
-                        except Exception:
-                            continue
-            except Exception:
-                pass
-            if not norm_lines:
-                # Return 200 with informative message to avoid noisy 422s in UI
-                return app.response_class(json.dumps({"ok": True, "product_id": win_product_id, "lines": 0, "note": "no lines available yet"}), mimetype="application/json")
+            return app.response_class(json.dumps({"error": "no lines found in response", "url": url_used}), mimetype="application/json", status=422)
 
         payload = {
             "products": {
@@ -2680,113 +2709,6 @@ def api_refresh_odds(event_id: str):
             {"raw_id": f"probable:{win_product_id}:{ts_ms}", "fetched_ts": ts_ms, "payload": json.dumps(payload), "product_id": win_product_id}
         ])
         return app.response_class(json.dumps({"ok": True, "product_id": win_product_id, "lines": len(norm_lines)}), mimetype="application/json")
-    except Exception as e:
-        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
-
-@app.post("/api/tote/refresh_odds_gql")
-def api_refresh_odds_gql():
-    """Fetch probable odds via GraphQL products query and persist.
-
-    JSON body filters (all optional):
-      - date: ISO date string (YYYY-MM-DD)
-      - betTypes: list of bet type codes (defaults to ["WIN"]) 
-      - countryCodes: list of country alpha-2 codes (e.g., ["UK"]) 
-      - venues: list of venue names (strings)
-      - first: max number of products to fetch (default 50)
-
-    Writes normalized payloads into raw_tote_probable_odds for each product returned.
-    """
-    try:
-        body = {}
-        try:
-            body = request.get_json(force=True, silent=True) or {}
-        except Exception:
-            body = {}
-        date = body.get("date")
-        bet_types = body.get("betTypes") or ["WIN"]
-        country_codes = body.get("countryCodes")
-        venues = body.get("venues")
-        try:
-            first = int(body.get("first") or 50)
-        except Exception:
-            first = 50
-
-        # GraphQL: products with lines odds and selection ids (probables)
-        GQL = """
-        query GetProducts($date: Date, $betTypes: [BetTypeCode!], $countryCodes: [CountryCode!], $venues: [String!], $first: Int) {
-          products(date: $date, betTypes: $betTypes, countryCodes: $countryCodes, venues: $venues, first: $first) {
-            nodes {
-              id
-              name
-              ... on BettingProduct {
-                legs { nodes { id event { id name } } }
-                lines { nodes { legs { lineSelections { selectionId } } odds { decimal } } }
-              }
-            }
-          }
-        }
-        """
-
-        from .providers.tote_api import ToteClient
-        client = ToteClient()
-        variables = {
-            "date": date,
-            "betTypes": bet_types,
-            "countryCodes": country_codes,
-            "venues": venues,
-            "first": first,
-        }
-        data = client.graphql(GQL, variables)
-        products = (((data or {}).get("products") or {}).get("nodes") or [])
-
-        from .bq import get_bq_sink
-        sink = get_bq_sink()
-        import time as _t
-        ts_ms = int(_t.time() * 1000)
-        rows = []
-        for p in products:
-            try:
-                pid = p.get("id")
-                lines = (((p or {}).get("lines") or {}).get("nodes") or [])
-                norm_lines = []
-                for ln in lines:
-                    try:
-                        odds = ((ln.get("odds") or {}).get("decimal"))
-                        legs = ln.get("legs") or []
-                        sel_id = None
-                        if legs:
-                            sels = (legs[0].get("lineSelections") or [])
-                            if sels:
-                                sel_id = sels[0].get("selectionId")
-                        if pid and sel_id and odds is not None:
-                            norm_lines.append({
-                                "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
-                                "odds": {"decimal": float(odds)},
-                            })
-                    except Exception:
-                        continue
-                if pid and norm_lines:
-                    payload = {
-                        "products": {
-                            "nodes": [
-                                {"id": pid, "lines": {"nodes": norm_lines}}
-                            ]
-                        }
-                    }
-                    rows.append({
-                        "raw_id": f"probable:{pid}:{ts_ms}",
-                        "fetched_ts": ts_ms,
-                        "payload": json.dumps(payload),
-                        "product_id": pid,
-                    })
-            except Exception:
-                continue
-
-        if not rows:
-            return app.response_class(json.dumps({"error": "no lines found for filters"}), mimetype="application/json", status=404)
-
-        sink.upsert_raw_tote_probable_odds(rows)
-        return app.response_class(json.dumps({"ok": True, "products": len(rows)}), mimetype="application/json")
     except Exception as e:
         return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
@@ -2951,11 +2873,11 @@ def manual_calculator_page():
     results = {}
     errors = []
 
-    manual_override_active = False
-
     if request.method == "POST":
-        # Parse inputs from form
+        # This flag is used to prevent auto-adjustment on subsequent POSTs if the user
+        # wants to stick with their manually entered (but potentially -EV) parameters.
         manual_override_active = request.form.get("manual_override_active") == "1"
+
         try:
             calc_params["num_runners"] = int(request.form.get("num_runners", calc_params["num_runners"]))
             calc_params["bet_type"] = request.form.get("bet_type", calc_params["bet_type"]).upper()
@@ -3014,283 +2936,32 @@ def manual_calculator_page():
                 errors.append(f"Not enough runners ({calc_params['num_runners']}) for {calc_params['bet_type']} (needs at least {k_perm}).")
 
         if not errors:
-            # --- Plackett-Luce Calculation ---
-            # Calculate final weights for each runner
-            runner_weights = []
-            for i, r in enumerate(calc_params["runners"]):
-                base_weight = 1.0 / r["odds"]
-                if r["is_key"]: base_weight *= calc_params["key_horse_mult"]
-                if r["is_poor"]: base_weight *= calc_params["poor_horse_mult"]
-                runner_weights.append(base_weight)
+            # Call the refactored calculation function
+            results = calculate_pl_strategy(
+                runners=calc_params["runners"],
+                bet_type=calc_params["bet_type"],
+                bankroll=calc_params["bankroll"],
+                key_horse_mult=calc_params["key_horse_mult"],
+                poor_horse_mult=calc_params["poor_horse_mult"],
+                concentration=calc_params["concentration"],
+                market_inefficiency=calc_params["market_inefficiency"],
+                desired_profit_pct=calc_params["desired_profit_pct"],
+                take_rate=calc_params["take_rate"],
+                net_rollover=calc_params["net_rollover"],
+                inc_self=calc_params["inc_self"],
+                div_mult=calc_params["div_mult"],
+                f_fix=calc_params["f_fix"],
+                pool_gross_other=calc_params["pool_gross_other"],
+            )
+            errors.extend(results.get("errors", []))
 
-            # Map runner IDs to their final weights and names
-            runners_with_strengths = [
-                {
-                    "id": i + 1,
-                    "name": calc_params["runners"][i]["name"],
-                    "strength": runner_weights[i],
-                    "odds": float(calc_params["runners"][i]["odds"]),
-                }
-                for i in range(calc_params["num_runners"])
-            ]
-            
-            # Generate all permutations and calculate PL probabilities
-            pl_permutations = []
-            for perm_tuple in itertools.permutations(runners_with_strengths, k_perm):
-                current_strength_pool = list(runners_with_strengths) # Copy to modify
-                perm_prob = 1.0
-                
-                for i, runner_details in enumerate(perm_tuple):
-                    runner_id = runner_details["id"]
-                    runner_strength = runner_details["strength"]
-                    remaining_strength_sum = sum(r['strength'] for r in current_strength_pool)
-                    if remaining_strength_sum == 0:
-                        perm_prob = 0.0 # Avoid division by zero if all remaining strengths are zero
-                        break
-                    
-                    prob_this_pos = runner_strength / remaining_strength_sum
-                    perm_prob *= prob_this_pos
-                    
-                    # Remove this runner from the pool for the next position's calculation by filtering on id
-                    current_strength_pool = [r for r in current_strength_pool if r["id"] != runner_id]
-                
-                pl_permutations.append({
-                    "line": " - ".join(str(r["name"]) for r in perm_tuple),
-                    "probability": perm_prob,
-                    "runners_detail": perm_tuple # For display/debugging
-                })
-            
-            # Sort by probability (descending)
-            pl_permutations.sort(key=lambda x: x["probability"], reverse=True)
-
-            # --- EV Optimization Loop ---
-            ev_grid = []
-            optimal_ev_scenario = None
-            max_ev = -float("inf")
-            C = len(pl_permutations)
-
-            for m in range(1, C + 1):
-                covered_lines = pl_permutations[:m]
-                S = calc_params['bankroll']
-                S_inc = S if calc_params['inc_self'] else 0.0
-                O = calc_params['pool_gross_other']
-                t = calc_params['take_rate']
-                R = calc_params['net_rollover']
-                mult = calc_params['div_mult']
-
-                # Crowd distribution parameter and effective others' money
-                mi = calc_params['market_inefficiency']
-                beta = max(0.1, 1.0 - 0.6 * mi)
-                O_effective = O * (1.0 - mi)
-
-                # Concentration -> weighting exponent
-                gamma = 1.0 + 2.0 * calc_params['concentration']
-                probs = [max(0.0, p['probability']) for p in covered_lines]
-                weights = [(p ** gamma) for p in probs]
-                sum_w = sum(weights) or 1.0
-                stakes = [S * (w / sum_w) for w in weights]
-
-                # Crowd allocation across covered lines
-                def _crowd_score(line):
-                    q = 1.0
-                    for rd in line['runners_detail']:
-                        try:
-                            od = float(rd.get('odds') or 0.0)
-                            q *= (1.0 / od) ** beta if od > 0 else 0.0
-                        except Exception:
-                            q *= 0.0
-                    return q
-                qs = [_crowd_score(line) for line in covered_lines]
-                sum_q = sum(qs) or 1.0
-
-                # Net pool and EV computation
-                net_pool_if_bet = mult * (((1.0 - t) * (O + S_inc)) + R)
-                ev_total = 0.0
-                hit_rate = 0.0
-                fshare_weighted = 0.0
-                for i, line in enumerate(covered_lines):
-                    p_i = probs[i]
-                    stake_i = stakes[i]
-                    others_i = O_effective * (qs[i] / sum_q)
-                    f_i = float(calc_params['f_fix']) if (calc_params['f_fix'] is not None) else (stake_i / (stake_i + others_i) if (stake_i + others_i) > 0 else 0.0)
-                    ev_total += p_i * f_i * net_pool_if_bet - stake_i
-                    hit_rate += p_i
-                    fshare_weighted += p_i * f_i
-
-                ev_grid.append({"lines_covered": m, "hit_rate": hit_rate, "expected_profit": ev_total})
-
-                if ev_total > max_ev:
-                    max_ev = ev_total
-                    optimal_ev_scenario = {
-                        "lines_covered": m,
-                        "hit_rate": hit_rate,
-                        "expected_profit": ev_total,
-                        "expected_return": ev_total + S,
-                        "f_share_used": (fshare_weighted / hit_rate) if hit_rate > 0 else 0.0,
-                        "net_pool_if_bet": net_pool_if_bet,
-                        "total_stake": S,
-                    }
-
-            # --- Determine Base Strategy ---
-            # Find the scenario that meets the user's desired profit with the fewest lines
-            target_profit = calc_params['bankroll'] * (calc_params['desired_profit_pct'] / 100.0)
-            target_profit_scenario = None
-            if target_profit > 0 and optimal_ev_scenario:
-                # Build a consistent scenario object (with same keys as max-EV) for the first case meeting target
-                for scenario in ev_grid:
-                    if scenario['expected_profit'] >= target_profit:
-                        hr = scenario['hit_rate']
-                        exp_ret = scenario['expected_profit'] + S
-                        # Recover f-share used for this scenario to keep fields consistent
-                        fshare = (exp_ret / (hr * optimal_ev_scenario['net_pool_if_bet'])) if hr > 0 else 0.0
-                        target_profit_scenario = {
-                            "lines_covered": scenario['lines_covered'],
-                            "hit_rate": hr,
-                            "expected_profit": scenario['expected_profit'],
-                            "expected_return": exp_ret,
-                            "f_share_used": fshare,
-                            "net_pool_if_bet": optimal_ev_scenario['net_pool_if_bet'],
-                            "total_stake": S,
-                        }
-                        break
-            
-                # The base for our adjustments is the target profit scenario, or the max EV scenario as a fallback.
-                base_scenario = target_profit_scenario if target_profit_scenario else optimal_ev_scenario
-
-            # --- Strategy Adjustment & Final Calculation ---
-            display_scenario = None
-            staking_plan = []
-            
-            if base_scenario:
-                # If the chosen base strategy is not profitable, try to find and apply an automatic adjustment.
-                if base_scenario['expected_profit'] <= 0 and not manual_override_active:
-                    S = calc_params['bankroll']
-                    S_inc = S if calc_params['inc_self'] else 0.0
-                    O = calc_params['pool_gross_other']
-                    t = calc_params['take_rate']
-                    R = calc_params['net_rollover']
-                    mult = calc_params['div_mult']
-                    net_pool_if_bet = mult * (((1.0 - t) * (O + S_inc)) + R)
-                    max_ev_lines = base_scenario['lines_covered']
-
-                    mi_orig = calc_params['market_inefficiency']
-                    possible_solutions = []
-
-                    # Find the required MI for every possible concentration level
-                    for i in range(21): # 0.0, 0.05, ..., 1.0
-                        concentration_level = i / 20.0
-                        lines_to_cover = max(1, int(round(max_ev_lines * (1.0 - concentration_level) + 1.0 * concentration_level)))
-                        if lines_to_cover > len(pl_permutations): continue
-
-                        hit_rate = sum(p['probability'] for p in pl_permutations[:lines_to_cover])
-                        if hit_rate <= 0 or O <= 0: continue
-
-                        stake_density = S / hit_rate
-                        if net_pool_if_bet <= stake_density: continue
-
-                        # Calculate MI to break even, then add a small buffer to target a slightly positive profit.
-                        required_mi = (1.0 - (net_pool_if_bet - stake_density) / O) + 0.005
-
-                        if required_mi > mi_orig and required_mi < 0.9:
-                            possible_solutions.append({
-                                "concentration": concentration_level,
-                                "market_inefficiency": required_mi
-                            })
-
-                    best_suggestion = None
-                    if possible_solutions:
-                        sol_min_mi = min(possible_solutions, key=lambda x: x['market_inefficiency'])
-                        solutions_with_conc = [s for s in possible_solutions if s['concentration'] >= 0.1]
-                        
-                        if solutions_with_conc:
-                            sol_alt = min(solutions_with_conc, key=lambda x: x['market_inefficiency'])
-                            if sol_alt['market_inefficiency'] < sol_min_mi['market_inefficiency'] + 0.05:
-                                best_suggestion = sol_alt
-                            else:
-                                best_suggestion = sol_min_mi
-                        else:
-                            best_suggestion = sol_min_mi
-                    
-                    # If a better strategy was found, apply it automatically
-                    if best_suggestion:
-                        flash(f"Original settings were -EV. Parameters auto-adjusted to find a profitable strategy: Bet Concentration set to {best_suggestion['concentration']*100:.0f}% and Market Inefficiency to {best_suggestion['market_inefficiency']*100:.1f}%. You can modify these and recalculate.", "info")
-                        calc_params['concentration'] = best_suggestion['concentration']
-                        calc_params['market_inefficiency'] = best_suggestion['market_inefficiency']
-                        manual_override_active = True
-
-                # The rest of the calculation uses either the original or the auto-adjusted calc_params
-                concentration = calc_params["concentration"]
-                base_lines_to_cover = base_scenario['lines_covered']
-                
-                # Calculate the final number of lines to cover based on concentration slider
-                final_lines_to_cover = max(1, int(round(base_lines_to_cover * (1.0 - concentration) + 1.0 * concentration)))
-                final_covered_lines = pl_permutations[:final_lines_to_cover]
-
-                # Recompute EV/stakes for the final displayed scenario using gamma weighting and crowd allocation
-                S = calc_params['bankroll']
-                S_inc = S if calc_params['inc_self'] else 0.0
-                O = calc_params['pool_gross_other']
-                t = calc_params['take_rate']
-                R = calc_params['net_rollover']
-                mult = calc_params['div_mult']
-                mi = calc_params['market_inefficiency']
-                beta = max(0.1, 1.0 - 0.6 * mi)
-                O_effective = O * (1.0 - mi)
-                gamma = 1.0 + 2.0 * concentration
-
-                probs_f = [max(0.0, p['probability']) for p in final_covered_lines]
-                weights_f = [(p ** gamma) for p in probs_f]
-                sum_wf = sum(weights_f) or 1.0
-                stakes_f = [S * (w / sum_wf) for w in weights_f]
-                def _crowd_score(line):
-                    q = 1.0
-                    for rd in line['runners_detail']:
-                        try:
-                            od = float(rd.get('odds') or 0.0)
-                            q *= (1.0 / od) ** beta if od > 0 else 0.0
-                        except Exception:
-                            q *= 0.0
-                    return q
-                qs_f = [_crowd_score(line) for line in final_covered_lines]
-                sum_qf = sum(qs_f) or 1.0
-                net_pool_if_bet = mult * (((1.0 - t) * (O + S_inc)) + R)
-
-                expected_return = 0.0
-                expected_profit = 0.0
-                final_hit_rate = 0.0
-                fshare_weighted = 0.0
-                staking_plan = []
-                for i, line in enumerate(final_covered_lines):
-                    p_i = probs_f[i]
-                    stake_i = stakes_f[i]
-                    others_i = O_effective * (qs_f[i] / sum_qf)
-                    f_i = float(calc_params['f_fix']) if (calc_params['f_fix'] is not None) else (stake_i / (stake_i + others_i) if (stake_i + others_i) > 0 else 0.0)
-                    expected_return += p_i * f_i * net_pool_if_bet
-                    expected_profit += p_i * f_i * net_pool_if_bet - stake_i
-                    final_hit_rate += p_i
-                    fshare_weighted += p_i * f_i
-                    entry = dict(line)
-                    entry['stake'] = stake_i
-                    staking_plan.append(entry)
-
-                display_scenario = {
-                    "lines_covered": final_lines_to_cover,
-                    "hit_rate": final_hit_rate,
-                    "expected_profit": expected_profit,
-                    "expected_return": expected_return,
-                    "f_share_used": (fshare_weighted / final_hit_rate) if final_hit_rate > 0 else 0.0,
-                    "net_pool_if_bet": net_pool_if_bet,
-                    "total_stake": S,
-                }
-            
-            results["pl_model"] = {
-                "best_scenario": display_scenario,           # final scenario after concentration slider
-                "base_scenario": base_scenario,               # chosen base (target-profit or max-EV)
-                "optimal_ev_scenario": optimal_ev_scenario,   # true max-EV across m
-                "staking_plan": staking_plan,
-                "ev_grid": ev_grid,
-                "total_possible_lines": C,
-            }
+            # Handle auto-adjustment feedback
+            if results.get("auto_adjusted_params") and not manual_override_active:
+                adj = results["auto_adjusted_params"]
+                flash(f"Original settings were -EV. Parameters auto-adjusted to find a profitable strategy: Bet Concentration set to {adj['concentration']*100:.0f}% and Market Inefficiency to {adj['market_inefficiency']*100:.1f}%. You can modify these and recalculate.", "info")
+                calc_params['concentration'] = adj['concentration']
+                calc_params['market_inefficiency'] = adj['market_inefficiency']
+                manual_override_active = True
 
     return render_template(
         "manual_calculator.html",
@@ -3300,6 +2971,172 @@ def manual_calculator_page():
         bet_types=["WIN", "EXACTA", "TRIFECTA", "SUPERFECTA"],
         manual_override_active=manual_override_active,
     )
+
+@app.route("/tote/live-model", methods=["GET", "POST"])
+def tote_live_model_page():
+    """
+    Shows upcoming events, runs the PL model on them, and allows placing bets.
+    """
+    if request.method == "POST":
+        # Handle bet placement
+        product_id = request.form.get("product_id")
+        stake = float(request.form.get("stake", "0"))
+        selections_text = request.form.get("selections_text", "")
+        mode = request.form.get("mode", "audit")
+
+        if not all([product_id, stake > 0, selections_text]):
+            flash("Missing product, stake, or selections for bet placement.", "error")
+            return redirect(url_for("tote_live_model_page"))
+
+        selections = [s.strip() for s in selections_text.splitlines() if s.strip()]
+        db = get_db()
+        from .providers.tote_api import ToteClient
+        client = ToteClient()
+        if mode == 'audit':
+            client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+
+        res = place_audit_superfecta(db, mode=mode, product_id=product_id, selections=selections, stake=stake, post=True, client=client)
+        
+        err_msg = res.get("error")
+        if err_msg:
+            flash(f"Bet placement error: {err_msg}", "error")
+        else:
+            st = res.get("placement_status")
+            msg = f"Bet placement for {product_id} status: {st}"
+            flash(msg, "success" if str(st).upper() in ("PLACED", "ACCEPTED") else "warning")
+        return redirect(url_for("tote_live_model_page"))
+
+    # GET: Display model results for upcoming events
+
+    # --- Filters ---
+    country = (request.args.get("country") or os.getenv("DEFAULT_COUNTRY", "GB")).strip().upper()
+    date_filter = (request.args.get("date") or _today_iso()).strip()
+
+    # Fetch default model parameters from BigQuery
+    try:
+        params_df = sql_df("SELECT * FROM tote_params ORDER BY ts_ms DESC LIMIT 1")
+        model_params = params_df.iloc[0].to_dict() if not params_df.empty else {}
+    except Exception:
+        model_params = {}
+    
+    # --- Filter Options ---
+    try:
+        countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+        country_options = countries_df['country'].tolist() if not countries_df.empty else []
+    except Exception:
+        country_options = []
+
+    # --- Fetch upcoming events based on filters ---
+    sql = """
+        SELECT
+          p.product_id,
+          p.event_id,
+          p.event_name,
+          p.venue,
+          e.country,
+          p.start_iso,
+          p.status,
+          p.currency,
+          p.total_gross,
+          p.total_net,
+          p.rollover,
+          p.deduction_rate,
+          w.product_id AS win_product_id
+        FROM
+          vw_products_latest_totals p
+        LEFT JOIN tote_events e ON p.event_id = e.event_id
+        LEFT JOIN (
+          SELECT product_id, event_id
+          FROM (
+            SELECT
+              w.product_id,
+              w.event_id,
+              ROW_NUMBER() OVER(PARTITION BY w.event_id ORDER BY w.product_id) AS rn
+            FROM vw_products_latest_totals w
+            WHERE UPPER(w.bet_type) = 'WIN' AND w.status = 'OPEN'
+          )
+          WHERE rn = 1
+        ) w ON w.event_id = p.event_id
+    """
+    
+    where = [
+        "UPPER(p.bet_type) = 'SUPERFECTA'",
+        "p.status = 'OPEN'",
+    ]
+    params = {}
+
+    if country:
+        where.append("UPPER(e.country) = @country")
+        params["country"] = country
+    
+    if date_filter:
+        where.append("SUBSTR(p.start_iso, 1, 10) = @date")
+        params["date"] = date_filter
+
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    
+    sql += " ORDER BY p.start_iso ASC"
+
+    try:
+        upcoming_df = sql_df(sql, params=params, cache_ttl=60)
+        # Filter out events where we couldn't find a corresponding WIN product for odds
+        if not upcoming_df.empty:
+            upcoming_df = upcoming_df[upcoming_df['win_product_id'].notna()]
+    except Exception as e:
+        flash(f"Query for upcoming events failed: {e}", "error")
+        upcoming_df = pd.DataFrame()
+
+    results = []
+    for _, p in upcoming_df.iterrows():
+        product_id = p["product_id"]
+        # Fetch runners and probable odds
+        odds_df = sql_df(
+            "SELECT s.number, s.competitor as name, o.decimal_odds as odds FROM vw_tote_probable_odds o JOIN tote_product_selections s ON o.selection_id = s.selection_id WHERE o.product_id = ? ORDER BY s.number",
+            params=(p["win_product_id"],) # View provides the WIN product ID for odds
+        )
+        if odds_df.empty or odds_df['odds'].isnull().all():
+            continue
+
+        # Run the model
+        calc_result = calculate_pl_strategy(
+            runners=odds_df.to_dict("records"),
+            bet_type="SUPERFECTA",
+            bankroll=float(model_params.get("stake_per_line", 10.0) * 100), # Example bankroll
+            key_horse_mult=2.0, # Default
+            poor_horse_mult=0.5, # Default
+            concentration=0.0, # Default
+            market_inefficiency=0.1, # Default
+            desired_profit_pct=5.0, # Default
+            take_rate=float(p.get("deduction_rate") or model_params.get("t", 0.3)),
+            net_rollover=float(p.get("rollover") or model_params.get("R", 0.0)),
+            inc_self=True,
+            div_mult=1.0,
+            f_fix=model_params.get("f"),
+            pool_gross_other=float(p.get("total_gross") or 0.0),
+        )
+
+        pl_model = calc_result.get("pl_model")
+        if pl_model and pl_model.get("best_scenario"):
+            scenario = pl_model["best_scenario"]
+            staking_plan = pl_model["staking_plan"]
+            results.append({
+                "product": p.to_dict(),
+                "scenario": scenario,
+                "staking_plan_text": "\n".join(s["line"] for s in staking_plan),
+                "total_stake": scenario.get("total_stake", 0.0)
+            })
+
+    return render_template(
+        "tote_live_model.html",
+        results=results,
+        filters={
+            "country": country,
+            "date": date_filter,
+        },
+        country_options=country_options,
+    )
+
 
 @app.route("/api/tote/bet_status")
 def api_tote_bet_status():
@@ -3607,7 +3444,10 @@ def tote_bet_page():
                 flash("A runner/selection must be chosen for a WIN/PLACE bet.", "error")
                 return redirect(request.referrer or url_for("tote_bet_page"))
             client_for_placement = ToteClient()
-            if mode == 'audit':
+            if mode == 'live':
+                # Use the dedicated live placement endpoint.
+                client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/graphql/"
+            elif mode == 'audit':
                 client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
             res = place_audit_simple_bet(db, mode=mode, product_id=product_id, selection_id=selection_id, stake=stake, currency=currency, post=True, client=client_for_placement)
         elif bet_type in ["SUPERFECTA", "TRIFECTA", "EXACTA"]:
@@ -3619,7 +3459,10 @@ def tote_bet_page():
                 return redirect(request.referrer or url_for("tote_bet_page"))
             selections = [p for p in (selections_text.replace("\r","\n").replace(",","\n").split("\n")) if p.strip()]
             client_for_placement = ToteClient()
-            if mode == 'audit':
+            if mode == 'live':
+                # Use the dedicated live placement endpoint.
+                client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/graphql/"
+            elif mode == 'audit':
                 client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
             res = place_audit_superfecta(db, mode=mode, product_id=product_id, selections=selections, stake=stake, currency=currency, post=True, stake_type="total", client=client_for_placement)
         else:
@@ -3652,10 +3495,10 @@ def tote_bet_page():
     where = []
     params: dict[str, Any] = {}
     if country:
-        where.append("UPPER(e.country) = @country")
+        where.append("UPPER(country) = @country")
         params["country"] = country
     if venue:
-        where.append("UPPER(e.venue) LIKE UPPER(@venue)")
+        where.append("UPPER(venue) LIKE UPPER(@venue)")
         params["venue"] = f"%{venue}%"
 
     # Default to showing events in the next 24 hours.
@@ -3663,34 +3506,23 @@ def tote_bet_page():
     now = datetime.now(timezone.utc)
     start_iso = now.isoformat(timespec='seconds').replace('+00:00', 'Z')
     end_iso = (now + timedelta(hours=24)).isoformat(timespec='seconds').replace('+00:00', 'Z')
-    # Filter by event/product start within next 24h; use COALESCE to work with either table
-    where.append("COALESCE(e.start_iso, p.start_iso) BETWEEN @start AND @end")
+    where.append("start_iso BETWEEN @start AND @end")
     params["start"] = start_iso
     params["end"] = end_iso
 
-    # Prefer latest-totals view (mirrors latest status/totals from subscriptions),
-    # falling back to raw tote_products if the view is unavailable.
+    # Filter for events that are not yet finished.
+    where.append("status IN ('SCHEDULED', 'OPEN')")
+
     ev_sql = (
-        "SELECT DISTINCT COALESCE(e.event_id, p.event_id) AS event_id, "
-        "COALESCE(e.name, p.event_name) AS name, COALESCE(e.venue, p.venue) AS venue, "
-        "UPPER(COALESCE(e.country, p.currency)) AS country, COALESCE(e.start_iso, p.start_iso) AS start_iso "
-        "FROM vw_products_latest_totals p LEFT JOIN tote_events e USING(event_id) "
-        "WHERE UPPER(COALESCE(p.status,'')) IN ('OPEN','SELLING')"
+        "SELECT event_id, name, venue, country, start_iso "
+        "FROM tote_events"
     )
     if where:
-        ev_sql += " AND " + " AND ".join(where)
-    # Order by the selected alias to satisfy BigQuery's DISTINCT ordering rules
+        ev_sql += " WHERE " + " AND ".join(where)
+
     ev_sql += " ORDER BY start_iso ASC LIMIT 200"
 
-    try:
-        events_df = sql_df(ev_sql, params=params)
-    except Exception:
-        # Fallback to base table if the view does not exist
-        ev_sql_fallback = ev_sql.replace(
-            "FROM vw_products_latest_totals p LEFT JOIN tote_events e USING(event_id)",
-            "FROM tote_products p LEFT JOIN tote_events e USING(event_id)"
-        )
-        events_df = sql_df(ev_sql_fallback, params=params)
+    events_df = sql_df(ev_sql, params=params)
     countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
     # Optional preselect by product_id
     preselect = None

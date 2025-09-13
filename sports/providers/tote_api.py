@@ -23,41 +23,70 @@ class ToteClient:
     - cfg.tote_graphql_url: HTTPS GraphQL endpoint base (required)
     """
 
-    def __init__(self, *, timeout: float = 15.0, max_retries: int = 2) -> None:
-        if not cfg.tote_graphql_url:
+    def __init__(self, *, timeout: float = 15.0, max_retries: int = 2, base_url: Optional[str] = None, api_key: Optional[str] = None) -> None:
+        if not (base_url or cfg.tote_graphql_url):
             raise ToteError("TOTE_GRAPHQL_URL is not configured")
-        if not cfg.tote_api_key:
+        if not (api_key or cfg.tote_api_key):
             raise ToteError("TOTE_API_KEY is not configured")
-        # Normalize base URL. Some deployments expose HTTP GraphQL at /partner/graphql/
-        # while WebSocket subscriptions live at /partner/connections/graphql/.
-        base = (cfg.tote_graphql_url or "").rstrip("/")
-        if "/connections/graphql" in base:
-            try:
-                # Rewrite WS connections URL to HTTP gateway GraphQL endpoint
-                base = base.replace("/connections/graphql", "/gateway/graphql")
-            except Exception:
-                pass
-        self.base_url = base
+        # Use configured or provided HTTP GraphQL endpoint; normalize to gateway path.
+        base_in = (base_url or cfg.tote_graphql_url or "").rstrip("/")
+        self.base_url = self._normalize_gateway_url(base_in, audit=False)
         self.timeout = timeout
         self.max_retries = max(0, int(max_retries))
         self.session = requests.Session()
+        # Auth headers: mirror legacy working set that previously worked in production
+        key = (api_key or cfg.tote_api_key)
+        # Use minimal header set known to work with partner gateway and avoid WAF false positives
         self.headers = {
-            "Authorization": f"Api-Key {cfg.tote_api_key}",
-            "x-api-key": cfg.tote_api_key,
-            "X-API-Key": cfg.tote_api_key,
-            "x-partner-api-key": cfg.tote_api_key,
+            "Authorization": f"Api-Key {key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "autobet/0.1 (+tote)"
+            "User-Agent": "autobet/0.1 (+tote)",
         }
 
-    def _post_json(self, url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    @staticmethod
+    def _normalize_gateway_url(url: str, audit: bool = False) -> str:
+        """Normalize known Tote endpoints to gateway graphql endpoints.
+
+        - connections/graphql -> gateway/graphql
+        - add /audit/ when audit=True (if not explicitly provided)
+        """
+        if not url:
+            return url
+        u = url.rstrip("/")
+        try:
+            if "/connections/graphql" in u:
+                u = u.replace("/connections/graphql", "/gateway/graphql")
+            # Ensure we are on /gateway/graphql, preserving any /partner prefix
+            if not u.endswith("/graphql"):
+                # Common case: already /gateway/graphql or /gateway/audit/graphql
+                pass
+            # Inject audit segment if needed and not present
+            if audit:
+                if "/audit/graphql" not in u:
+                    u = u.replace("/gateway/graphql", "/gateway/audit/graphql")
+        except Exception:
+            pass
+        return u
+
+    # (No custom header builder; use the fixed, known-good header set above.)
+
+    def _post_json(self, url: str, payload: Dict[str, Any], *, headers_override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         last_err: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
                 _rate_limiter.acquire()
-                resp = self.session.post(url, headers=self.headers, json=payload, timeout=self.timeout)
-                resp.raise_for_status()
+                resp = self.session.post(url, headers=(headers_override or self.headers), json=payload, timeout=self.timeout)
+                if resp.status_code >= 400:
+                    # Include a snippet of body to aid debugging of 4xx/5xx
+                    snippet = ""
+                    try:
+                        t = resp.text or ""
+                        snippet = (": " + t[:300].replace("\n"," ")) if t else ""
+                    except Exception:
+                        snippet = ""
+                    raise requests.HTTPError(f"{resp.status_code} Client Error: {resp.reason} for url: {url}{snippet}")
+                # OK
                 return resp.json()
             except Exception as e:
                 last_err = e
@@ -77,6 +106,11 @@ class ToteClient:
     # For audit endpoint compatibility (some deployments separate audit path).
     # If no separate endpoint, reuse the same.
     def graphql_audit(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Preserve legacy behavior: use the current client's base_url and headers.
+
+        Callers that need a distinct audit endpoint should set `client.base_url`
+        before calling this method (as existing code already does in webapp paths).
+        """
         return self.graphql(query, variables)
 
     def graphql_sdl(self) -> str:

@@ -251,29 +251,16 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
             pass
 
     def _get_product_ctx(pid: str) -> dict | None:
+        """Return product context from the in-memory cache.
+
+        This is a cache-only lookup. The _refresh_ctx_cache_periodically task is
+        responsible for populating the cache, which prevents N+1 query storms on BQ.
+        """
         if not _is_bq_sink(conn):
             return None
         if not pid:
             return None
-        if pid in ctx_cache:
-            return ctx_cache.get(pid)
-        try:
-            from google.cloud import bigquery  # type: ignore
-            job_cfg = bigquery.QueryJobConfig(query_parameters=[
-                bigquery.ScalarQueryParameter("pid", "STRING", pid)
-            ])
-            rs = conn.query(
-                "SELECT event_id, UPPER(bet_type) AS bet_type, currency, start_iso FROM tote_products WHERE product_id=@pid LIMIT 1",
-                job_config=job_cfg,
-            )
-            df = rs.to_dataframe(create_bqstorage_client=False)
-            if not df.empty:
-                row = df.iloc[0].to_dict()
-                ctx_cache[pid] = row
-                return row
-        except Exception:
-            return None
-        return None
+        return ctx_cache.get(pid)
 
     async def _refresh_ctx_cache_periodically():
         if not _is_bq_sink(conn):
@@ -281,11 +268,11 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
         # Initial warm load and periodic refresh
         while not stop_event.is_set():
             try:
-                # Load products in the last ~36 hours (today + yesterday typically)
+                # Load products in the last ~36 hours from the view with the latest totals.
                 sql = (
                     """
                     SELECT product_id, event_id, UPPER(bet_type) AS bet_type, currency, start_iso
-                    FROM tote_products
+                    FROM vw_products_latest_totals
                     WHERE SAFE.PARSE_TIMESTAMP('%Y-%m-%dT%H:%M:%SZ', start_iso) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 36 HOUR)
                     """
                 )
@@ -519,9 +506,15 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                                     if _is_bq_sink(conn):
                                         try:
                                             if q is not None:
+                                                # Log the status change for historical record.
                                                 await q.put((
                                                     "upsert_tote_event_status_log",
                                                     {"event_id": str(eid), "ts_ms": ts, "status": str(status)},
+                                                ))
+                                                # Also update the main events table for UI freshness.
+                                                await q.put((
+                                                    "upsert_tote_events",
+                                                    {"event_id": str(eid), "status": str(status)},
                                                 ))
                                         except Exception:
                                             pass
