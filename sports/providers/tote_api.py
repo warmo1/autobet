@@ -9,6 +9,7 @@ import os
 import threading
 
 from ..config import cfg
+from urllib.parse import urljoin
 
 
 class ToteError(RuntimeError):
@@ -28,9 +29,20 @@ class ToteClient:
             raise ToteError("TOTE_GRAPHQL_URL is not configured")
         if not (api_key or cfg.tote_api_key):
             raise ToteError("TOTE_API_KEY is not configured")
-        # Use configured or provided HTTP GraphQL endpoint; normalize to gateway path.
+        # Prefer the gateway endpoint for HTTP GraphQL queries; many partners
+        # expose products/events on /gateway/graphql while /connections/graphql
+        # is primarily for WebSocket subscriptions. Do not auto-swap away from
+        # gateway for POST queries.
         base_in = (base_url or cfg.tote_graphql_url or "").rstrip("/")
-        self.base_url = self._normalize_gateway_url(base_in, audit=False)
+        if "/gateway/graphql" in base_in:
+            self.base_url = base_in
+        elif "/connections/graphql" in base_in:
+            self.base_url = base_in.replace("/connections/graphql", "/gateway/graphql")
+        else:
+            self.base_url = base_in
+        # Avoid 301/302 redirect that can downgrade POST->GET by ensuring trailing slash
+        if self.base_url.endswith("/graphql"):
+            self.base_url += "/"
         self.timeout = timeout
         self.max_retries = max(0, int(max_retries))
         self.session = requests.Session()
@@ -43,41 +55,16 @@ class ToteClient:
             "Accept": "application/json",
             "User-Agent": "autobet/0.1 (+tote)",
         }
-        # Primary Authorization header if scheme is not x-api-key
-        if self.auth_scheme.lower() != "x-api-key":
+        # Primary Authorization header only when explicitly requested via scheme
+        # Default behavior is to rely on X-Api-Key which aligns with most partner setups
+        if self.auth_scheme and self.auth_scheme.lower() not in ("x-api-key", "none"):
             base_headers["Authorization"] = f"{self.auth_scheme} {self.api_key}"
-        else:
-            # When using x-api-key, do not set Authorization by default
-            pass
         # Add x-api-key variants to maximize compatibility with partner WAF/routing
         base_headers.setdefault("X-Api-Key", self.api_key)
         base_headers.setdefault("x-api-key", self.api_key)
         self.headers = base_headers
 
-    @staticmethod
-    def _normalize_gateway_url(url: str, audit: bool = False) -> str:
-        """Normalize known Tote endpoints to gateway graphql endpoints.
-
-        - connections/graphql -> gateway/graphql
-        - add /audit/ when audit=True (if not explicitly provided)
-        """
-        if not url:
-            return url
-        u = url.rstrip("/")
-        try:
-            if "/connections/graphql" in u:
-                u = u.replace("/connections/graphql", "/gateway/graphql")
-            # Ensure we are on /gateway/graphql, preserving any /partner prefix
-            if not u.endswith("/graphql"):
-                # Common case: already /gateway/graphql or /gateway/audit/graphql
-                pass
-            # Inject audit segment if needed and not present
-            if audit:
-                if "/audit/graphql" not in u:
-                    u = u.replace("/gateway/graphql", "/gateway/audit/graphql")
-        except Exception:
-            pass
-        return u
+    # No alternate URL swapping for HTTP GraphQL; stick to gateway
 
     # (No custom header builder; use the fixed, known-good header set above.)
 
@@ -87,19 +74,39 @@ class ToteClient:
             try:
                 _rate_limiter.acquire()
                 send_headers = dict(headers_override or self.headers)
-                # Heuristic: for live gateway (non-audit), ensure x-api-key headers are present.
-                # This improves compatibility where Authorization: Api-Key is not accepted on /gateway/graphql.
+                # Heuristic: for partner live endpoints, prefer x-api-key only unless explicitly configured.
                 try:
                     u = (url or "")
-                    if "/gateway/graphql" in u and "/audit/" not in u:
-                        send_headers.setdefault("X-Api-Key", self.api_key)
-                        send_headers.setdefault("x-api-key", self.api_key)
-                        # Some partners require no Authorization header on this route; allow opt-out via env
-                        if os.getenv("TOTE_DROP_AUTH_ON_LIVE", "0").lower() in ("1","true","yes","on"):
-                            send_headers.pop("Authorization", None)
+                    drop_auth = False
+                    # Prefer x-api-key only on non-audit endpoints to mirror production behavior
+                    if "/audit/" not in u:
+                        # Keep Authorization on live only if explicitly requested
+                        keep = os.getenv("TOTE_KEEP_AUTH_ON_LIVE", "0").lower() in ("1","true","yes","on")
+                        drop_auth = not keep
+                    # Also drop if explicitly requested via legacy toggle
+                    if os.getenv("TOTE_DROP_AUTH_ON_LIVE", "0").lower() in ("1","true","yes","on"):
+                        drop_auth = True
+                    # Drop Authorization header if requested
+                    if drop_auth:
+                        send_headers.pop("Authorization", None)
+                    # Ensure x-api-key headers are present
+                    send_headers.setdefault("X-Api-Key", self.api_key)
+                    send_headers.setdefault("x-api-key", self.api_key)
                 except Exception:
                     pass
                 resp = self.session.post(url, headers=send_headers, json=payload, timeout=self.timeout)
+                # Handle redirects explicitly (301/302/303/307/308)
+                if 300 <= resp.status_code < 400:
+                    loc = resp.headers.get("Location")
+                    if loc:
+                        try:
+                            target = urljoin(url + ("/" if not url.endswith("/") else ""), loc)
+                            resp = self.session.post(target, headers=send_headers, json=payload, timeout=self.timeout)
+                        except Exception as e:
+                            last_err = e
+                            raise
+                    else:
+                        raise requests.HTTPError(f"{resp.status_code} Redirect without Location for url: {url}")
                 if resp.status_code >= 400:
                     # Include a snippet of body to aid debugging of 4xx/5xx
                     snippet = ""
@@ -109,8 +116,18 @@ class ToteClient:
                     except Exception:
                         snippet = ""
                     raise requests.HTTPError(f"{resp.status_code} Client Error: {resp.reason} for url: {url}{snippet}")
-                # OK
-                return resp.json()
+                # OK – parse JSON or raise a descriptive error
+                try:
+                    return resp.json()
+                except Exception:
+                    ctype = resp.headers.get("Content-Type", "")
+                    t = None
+                    try:
+                        t = resp.text or ""
+                    except Exception:
+                        t = ""
+                    snippet = (t[:300].replace("\n"," ") if t else "")
+                    raise requests.HTTPError(f"Invalid JSON (Content-Type: {ctype}) for url: {resp.url}: {snippet}")
             except Exception as e:
                 last_err = e
                 # simple backoff
@@ -123,7 +140,9 @@ class ToteClient:
         payload = {"query": query, "variables": variables or {}}
         data = self._post_json(url, payload)
         if isinstance(data, dict) and data.get("errors"):
-            raise ToteError(json.dumps(data.get("errors")))
+            errs = data.get("errors")
+            # Raise including endpoint used; do not swap to connections for HTTP GraphQL
+            raise ToteError(f"GraphQL errors on {url}: {json.dumps(errs)}")
         return (data.get("data") if isinstance(data, dict) else data) or {}
 
     # For audit endpoint compatibility (some deployments separate audit path).

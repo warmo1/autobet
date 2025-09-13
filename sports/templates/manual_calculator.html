@@ -286,6 +286,37 @@
                 <p class="text-muted small">Remember, these calculations are based on the inputs you provide. Real-world results can vary due to many factors, including the actual finishing order, changes in pool size, and the distribution of other bettors' stakes.</p>
             </div>
         </div>
+        {% if product %}
+        {% if place_lines_count and place_lines_count > 0 %}
+        <div class="card mb-4 border-primary">
+            <div class="card-header bg-primary text-white">
+                <h4>Place Bet: {{ product.event_name }} — {{ product.venue }}</h4>
+                <div class="small">Start: {{ product.start_iso | datetime }} UTC • Product: {{ product.product_id }} • {{ product.currency }}</div>
+            </div>
+            <div class="card-body">
+                {% with pl_res = results.pl_model, best = results.pl_model.best_scenario %}
+                {% if best %}
+                <form method="POST" action="{{ url_for('tote_live_model_page') }}">
+                    <input type="hidden" name="product_id" value="{{ product.product_id }}">
+                    <input type="hidden" name="stake" value="{{ best.total_stake }}">
+                    <label class="form-label">Lines to place ({{ place_lines_count }})</label>
+                    <textarea name="selections_text" class="form-control" rows="5" readonly>{{ place_lines_text }}</textarea>
+                    <input type="hidden" name="lines_json" value='{{ place_lines | tojson }}'>
+                    <div class="mt-3">
+                        <button type="submit" name="mode" value="audit" class="btn btn-info">Place Bet (Audit)</button>
+                        <button type="submit" name="mode" value="live" class="btn btn-danger" onclick="return confirm('Place LIVE bet of £{{ best.total_stake | round(2) }}?');">Place Bet (Live)</button>
+                    </div>
+                </form>
+                {% else %}
+                <div class="alert alert-warning">No profitable strategy found. Adjust parameters above and Recalculate.</div>
+                {% endif %}
+                {% endwith %}
+            </div>
+        </div>
+        {% else %}
+        <div class="alert alert-warning">No non-zero lines to place with the current stake. Increase bankroll or adjust parameters, then Recalculate.</div>
+        {% endif %}
+        {% endif %}
     {% endif %}
 </div>
 

@@ -2969,6 +2969,228 @@ def manual_calculator_page():
         manual_override_active=manual_override_active,
     )
 
+@app.route("/tote/calculator/<product_id>", methods=["GET", "POST"])
+def tote_product_calculator_page(product_id: str):
+    """Pre-populated manual calculator for a specific product.
+
+    - GET: Prefills runners from WIN probable odds for the product's event and product context
+      (take rate, rollover, pool size). Runs an initial calculation.
+    - POST: Re-runs the calculation with adjusted parameters from the form.
+    """
+    # Load product context (prefer view, fallback to base table)
+    psql = (
+        "SELECT p.product_id, p.event_id, p.event_name, COALESCE(e.venue, p.venue) AS venue, "
+        "COALESCE(e.country, p.currency) AS country, p.start_iso, COALESCE(p.status,'') AS status, p.currency, "
+        "p.total_gross, p.total_net, p.rollover, p.deduction_rate, UPPER(p.bet_type) AS bet_type "
+        "FROM vw_products_latest_totals p LEFT JOIN tote_events e USING(event_id) WHERE p.product_id=?"
+    )
+    try:
+        pdf = sql_df(psql, params=(product_id,), cache_ttl=0)
+    except Exception:
+        psql2 = psql.replace("vw_products_latest_totals p", "tote_products p")
+        pdf = sql_df(psql2, params=(product_id,), cache_ttl=0)
+    if pdf.empty:
+        flash("Unknown product id", "error")
+        return redirect(url_for("tote_live_model_page"))
+    prod = pdf.iloc[0].to_dict()
+
+    # Defaults (tote_params) for t, f, stake_per_line, R
+    try:
+        params_df = sql_df("SELECT * FROM tote_params ORDER BY updated_ts DESC, ts_ms DESC LIMIT 1", cache_ttl=300)
+        model_params = params_df.iloc[0].to_dict() if not params_df.empty else {}
+    except Exception:
+        model_params = {}
+
+    # Build initial calc params or parse from POST
+    calc_params = {
+        "num_runners": 8,
+        "bet_type": "SUPERFECTA",
+        "runners": [],
+        "bankroll": float(model_params.get("stake_per_line", 0.1) * 100.0),
+        "key_horse_mult": 2.0,
+        "poor_horse_mult": 0.5,
+        "concentration": 0.0,
+        "market_inefficiency": 0.10,
+        "desired_profit_pct": 5.0,
+        "take_rate": float(prod.get("deduction_rate") or model_params.get("t", 0.30) or 0.30),
+        "net_rollover": float(prod.get("rollover") or model_params.get("R", 0.0) or 0.0),
+        "inc_self": True,
+        "div_mult": 1.0,
+        # Default: do not force f-share; user can override via form
+        "f_fix": None,
+        "pool_gross_other": float(prod.get("total_gross") or 0.0),
+    }
+
+    errors: list[str] = []
+    results: dict = {}
+
+    if request.method == "POST":
+        manual_override_active = request.form.get("manual_override_active") == "1"
+        try:
+            calc_params["num_runners"] = int(request.form.get("num_runners", calc_params["num_runners"]))
+            calc_params["bet_type"] = request.form.get("bet_type", calc_params["bet_type"]).upper()
+            calc_params["bankroll"] = float(request.form.get("bankroll", calc_params["bankroll"]))
+            calc_params["key_horse_mult"] = float(request.form.get("key_horse_mult", calc_params["key_horse_mult"]))
+            calc_params["poor_horse_mult"] = float(request.form.get("poor_horse_mult", calc_params["poor_horse_mult"]))
+            conc_raw = float(request.form.get("concentration", calc_params["concentration"]))
+            mi_raw = float(request.form.get("market_inefficiency", calc_params["market_inefficiency"]))
+            calc_params["concentration"] = conc_raw / 100.0 if conc_raw > 1.0 else conc_raw
+            calc_params["market_inefficiency"] = mi_raw / 100.0 if mi_raw > 1.0 else mi_raw
+            calc_params["desired_profit_pct"] = float(request.form.get("desired_profit_pct", calc_params["desired_profit_pct"]))
+            tr_raw = float(request.form.get("take_rate", calc_params["take_rate"]))
+            calc_params["take_rate"] = tr_raw / 100.0 if tr_raw > 1.0 else tr_raw
+            calc_params["net_rollover"] = float(request.form.get("net_rollover", calc_params["net_rollover"]))
+            calc_params["inc_self"] = request.form.get("inc_self") == "1"
+            calc_params["div_mult"] = float(request.form.get("div_mult", calc_params["div_mult"]))
+            calc_params["f_fix"] = float(request.form.get("f_fix")) if request.form.get("f_fix") else None
+            calc_params["pool_gross_other"] = float(request.form.get("pool_gross_other", calc_params["pool_gross_other"]))
+
+            # Parse runners grid from form
+            runners_from_form = []
+            for i in range(calc_params["num_runners"]):
+                odds = float(request.form.get(f"runner_odds_{i}", "10.0"))
+                if odds <= 1.0:
+                    errors.append(f"Runner {i+1} odds must be greater than 1.0.")
+                runners_from_form.append({
+                    "name": request.form.get(f"runner_name_{i}", f"Runner {i+1}"),
+                    "odds": odds,
+                    "is_key": request.form.get(f"runner_key_{i}") == "on",
+                    "is_poor": request.form.get(f"runner_poor_{i}") == "on",
+                })
+            calc_params["runners"] = runners_from_form
+        except Exception as e:
+            errors.append(f"Invalid input: {e}")
+
+        # Minimal validation
+        k_map = {"WIN": 1, "EXACTA": 2, "TRIFECTA": 3, "SUPERFECTA": 4}
+        k_perm = k_map.get(calc_params["bet_type"], 4)
+        if calc_params["num_runners"] < k_perm:
+            errors.append(f"Not enough runners ({calc_params['num_runners']}) for {calc_params['bet_type']}")
+
+        if not errors:
+            results = calculate_pl_strategy(
+                runners=calc_params["runners"],
+                bet_type=calc_params["bet_type"],
+                bankroll=calc_params["bankroll"],
+                key_horse_mult=calc_params["key_horse_mult"],
+                poor_horse_mult=calc_params["poor_horse_mult"],
+                concentration=calc_params["concentration"],
+                market_inefficiency=calc_params["market_inefficiency"],
+                desired_profit_pct=calc_params["desired_profit_pct"],
+                take_rate=calc_params["take_rate"],
+                net_rollover=calc_params["net_rollover"],
+                inc_self=calc_params["inc_self"],
+                div_mult=calc_params["div_mult"],
+                f_fix=calc_params["f_fix"],
+                pool_gross_other=calc_params["pool_gross_other"],
+            )
+    else:
+        # GET: Prefill runners from WIN probable odds (latest) for the event
+        try:
+            # Find an open WIN product for the same event
+            wdf = sql_df(
+                """
+                SELECT product_id
+                FROM (
+                  SELECT w.product_id, ROW_NUMBER() OVER() rn
+                  FROM vw_products_latest_totals w
+                  WHERE w.event_id=@eid AND UPPER(w.bet_type)='WIN' AND UPPER(COALESCE(w.status,'')) IN ('OPEN','SELLING')
+                ) WHERE rn=1
+                """,
+                params={"eid": prod.get("event_id")},
+            )
+        except Exception:
+            wdf = sql_df(
+                "SELECT product_id FROM tote_products WHERE event_id=? AND UPPER(bet_type)='WIN' ORDER BY status DESC LIMIT 1",
+                params=(prod.get("event_id"),),
+            )
+        win_pid = wdf.iloc[0]["product_id"] if not wdf.empty else None
+        runners = []
+        if win_pid:
+            try:
+                odf = sql_df(
+                    """
+                    SELECT s.number AS cloth, COALESCE(s.competitor, CAST(s.number AS STRING)) AS name, CAST(o.decimal_odds AS FLOAT64) AS odds
+                    FROM vw_tote_probable_odds o 
+                    JOIN tote_product_selections s ON o.selection_id = s.selection_id 
+                    WHERE o.product_id = ?
+                    ORDER BY CAST(s.number AS INT64)
+                    """,
+                    params=(win_pid,),
+                )
+                for _, r in odf.iterrows():
+                    try:
+                        name = str(r.get("name") or f"#{r.get('cloth')}")
+                        odds = float(r.get("odds") or 0.0)
+                        if odds and odds > 1.0:
+                            runners.append({"name": name, "odds": odds, "is_key": False, "is_poor": False})
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+        if not runners:
+            # Fallback: load runner list without odds
+            try:
+                sdf = sql_df(
+                    "SELECT number AS cloth, COALESCE(competitor, CAST(number AS STRING)) AS name FROM tote_product_selections WHERE product_id=? ORDER BY CAST(number AS INT64)",
+                    params=(product_id,),
+                )
+                for _, r in sdf.iterrows():
+                    runners.append({"name": str(r.get("name") or f"#{r.get('cloth')}") , "odds": 10.0, "is_key": False, "is_poor": False})
+            except Exception:
+                pass
+        if runners:
+            calc_params["runners"] = runners
+            calc_params["num_runners"] = len(runners)
+        # Run an initial calculation with defaults
+        if runners:
+            results = calculate_pl_strategy(
+                runners=calc_params["runners"],
+                bet_type=calc_params["bet_type"],
+                bankroll=calc_params["bankroll"],
+                key_horse_mult=calc_params["key_horse_mult"],
+                poor_horse_mult=calc_params["poor_horse_mult"],
+                concentration=calc_params["concentration"],
+                market_inefficiency=calc_params["market_inefficiency"],
+                desired_profit_pct=calc_params["desired_profit_pct"],
+                take_rate=calc_params["take_rate"],
+                net_rollover=calc_params["net_rollover"],
+                inc_self=calc_params["inc_self"],
+                div_mult=calc_params["div_mult"],
+                f_fix=calc_params["f_fix"],
+                pool_gross_other=calc_params["pool_gross_other"],
+            )
+
+    # Build placeable lines list from results (ignore £0.00 lines)
+    place_lines: list[str] = []
+    place_items: list[dict] = []
+    if results and isinstance(results, dict):
+        pl = results.get("pl_model") or {}
+        plan = pl.get("staking_plan") or []
+        for s in plan:
+            try:
+                amt = float(s.get("stake") or 0.0)
+                if round(amt + 1e-9, 2) > 0.0:
+                    ln = s.get("line")
+                    if ln:
+                        place_lines.append(ln)
+                        place_items.append({"line": ln, "stake": round(amt, 2)})
+            except Exception:
+                pass
+
+    return render_template(
+        "manual_calculator.html",
+        calc_params=calc_params,
+        results=results,
+        errors=errors,
+        bet_types=["WIN", "EXACTA", "TRIFECTA", "SUPERFECTA"],
+        manual_override_active=True,
+        product=prod,
+        place_lines_text="\n".join(place_lines),
+        place_lines_count=len(place_lines),
+        place_lines=place_items,
+    )
+
 @app.route("/tote/live-model", methods=["GET", "POST"])
 def tote_live_model_page():
     """
@@ -2986,6 +3208,26 @@ def tote_live_model_page():
             return redirect(url_for("tote_live_model_page"))
 
         selections = [s.strip() for s in selections_text.splitlines() if s.strip()]
+        # Optional: per-line stake amounts (JSON [{line, stake}])
+        line_amounts = None
+        try:
+            lines_json = request.form.get("lines_json")
+            if lines_json:
+                arr = json.loads(lines_json)
+                if isinstance(arr, list):
+                    m = {}
+                    for it in arr:
+                        try:
+                            ln = (it.get("line") if isinstance(it, dict) else None)
+                            amt = float(it.get("stake")) if isinstance(it, dict) and it.get("stake") is not None else None
+                            if ln and amt is not None and amt > 0:
+                                m[str(ln).strip()] = round(amt, 2)
+                        except Exception:
+                            continue
+                    if m:
+                        line_amounts = m
+        except Exception:
+            line_amounts = None
         db = get_db()
         from .providers.tote_api import ToteClient
         client = ToteClient()
@@ -2994,7 +3236,16 @@ def tote_live_model_page():
         elif mode == 'audit':
             client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
 
-        res = place_audit_superfecta(db, mode=mode, product_id=product_id, selections=selections, stake=stake, post=True, client=client)
+        res = place_audit_superfecta(
+            db,
+            mode=mode,
+            product_id=product_id,
+            selections=selections,
+            stake=stake,
+            post=True,
+            client=client,
+            line_amounts=line_amounts,
+        )
         
         err_msg = res.get("error")
         if err_msg:
@@ -3010,6 +3261,7 @@ def tote_live_model_page():
     # --- Filters ---
     country = (request.args.get("country") or os.getenv("DEFAULT_COUNTRY", "GB")).strip().upper()
     date_filter = (request.args.get("date") or _today_iso()).strip()
+    venue_filter = (request.args.get("venue") or "").strip()
     calculate_product_id = request.args.get("calculate_product_id")
 
     # Fetch default model parameters from BigQuery
@@ -3025,6 +3277,28 @@ def tote_live_model_page():
         country_options = countries_df['country'].tolist() if not countries_df.empty else []
     except Exception:
         country_options = []
+    # Venue options based on filters (country/date) for convenience
+    try:
+        v_sql = (
+            "SELECT DISTINCT COALESCE(e.venue, p.venue) AS venue "
+            "FROM vw_products_latest_totals p LEFT JOIN tote_events e USING(event_id) "
+            "WHERE UPPER(p.bet_type)='SUPERFECTA'"
+        )
+        v_params: list[object] = []
+        if country:
+            if country == "GB":
+                v_sql += " AND (UPPER(e.country)=? OR UPPER(p.currency)=?)"; v_params.extend([country, "GBP"])
+            elif country in ("IE", "IRL", "IRELAND"):
+                v_sql += " AND (UPPER(e.country)=? OR UPPER(p.currency)=?)"; v_params.extend([country, "EUR"])
+            else:
+                v_sql += " AND UPPER(e.country)=?"; v_params.append(country)
+        if date_filter:
+            v_sql += " AND SUBSTR(p.start_iso,1,10)=?"; v_params.append(date_filter)
+        v_sql += " ORDER BY venue"
+        venues_df = sql_df(v_sql, params=tuple(v_params))
+        venue_options = venues_df['venue'].dropna().tolist() if not venues_df.empty else []
+    except Exception:
+        venue_options = []
 
     # --- Fetch upcoming events based on filters ---
     sql = """
@@ -3053,7 +3327,7 @@ def tote_live_model_page():
               w.event_id,
               ROW_NUMBER() OVER(PARTITION BY w.event_id ORDER BY w.product_id) AS rn
             FROM vw_products_latest_totals w
-            WHERE UPPER(w.bet_type) = 'WIN' AND w.status = 'OPEN'
+            WHERE UPPER(w.bet_type) = 'WIN' AND UPPER(COALESCE(w.status,'')) IN ('OPEN','SELLING')
           )
           WHERE rn = 1
         ) w ON w.event_id = p.event_id
@@ -3061,18 +3335,28 @@ def tote_live_model_page():
     
     where = [
         "UPPER(p.bet_type) = 'SUPERFECTA'",
-        "p.status = 'OPEN'",
+        "UPPER(COALESCE(p.status,'')) IN ('OPEN','SELLING','UNKNOWN')",
     ]
     params = {}
 
     if country:
-        # This is more robust, as p.currency often holds the country code from ingest.
-        where.append("(UPPER(e.country) = @country OR UPPER(p.currency) = @country)")
+        # Prefer event country; also accept common currency proxies (GB->GBP, IE->EUR)
         params["country"] = country
+        if country == "GB":
+            where.append("(UPPER(e.country) = @country OR UPPER(p.currency) = @currency_proxy)")
+            params["currency_proxy"] = "GBP"
+        elif country in ("IE", "IRL", "IRELAND"):
+            where.append("(UPPER(e.country) = @country OR UPPER(p.currency) = @currency_proxy)")
+            params["currency_proxy"] = "EUR"
+        else:
+            where.append("UPPER(e.country) = @country")
     
     if date_filter:
         where.append("SUBSTR(p.start_iso, 1, 10) = @date")
         params["date"] = date_filter
+    if venue_filter:
+        where.append("UPPER(COALESCE(e.venue, p.venue)) LIKE @venue")
+        params["venue"] = f"%{venue_filter.upper()}%"
 
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -3082,8 +3366,13 @@ def tote_live_model_page():
     try:
         upcoming_df = sql_df(sql, params=params, cache_ttl=60)
     except Exception as e:
-        flash(f"Query for upcoming events failed: {e}", "error")
-        upcoming_df = pd.DataFrame()
+        # Fallback to base table if the view is missing
+        try:
+            sql_fb = sql.replace("vw_products_latest_totals", "tote_products")
+            upcoming_df = sql_df(sql_fb, params=params, cache_ttl=30)
+        except Exception as e2:
+            flash(f"Query for upcoming events failed: {e2}", "error")
+            upcoming_df = pd.DataFrame()
 
     calculation_result = None
     if calculate_product_id and not upcoming_df.empty:
@@ -3117,19 +3406,33 @@ def tote_live_model_page():
                         net_rollover=float(p.get("rollover") or model_params.get("R", 0.0)),
                         inc_self=True,
                         div_mult=1.0,
-                        f_fix=model_params.get("f"),
+                        # Let the model compute f-share automatically unless user overrides
+                        f_fix=None,
                         pool_gross_other=float(p.get("total_gross") or 0.0),
                     )
 
                     pl_model = calc_result.get("pl_model")
                     if pl_model and pl_model.get("best_scenario"):
                         scenario = pl_model["best_scenario"]
-                        staking_plan = pl_model["staking_plan"]
+                        staking_plan = pl_model.get("staking_plan") or []
+                        # Filter out zero-stake lines (rounded to 2dp) for placement
+                        filtered_lines = []
+                        weighted_lines = []
+                        for s in staking_plan:
+                            try:
+                                amt = float(s.get("stake") or 0.0)
+                                if round(amt + 1e-9, 2) > 0.0:
+                                    ln = s.get("line")
+                                    filtered_lines.append(ln)
+                                    weighted_lines.append({"line": ln, "stake": round(amt, 2)})
+                            except Exception:
+                                pass
                         calculation_result = {
                             "product": p.to_dict(),
                             "scenario": scenario,
-                            "staking_plan_text": "\n".join(s["line"] for s in staking_plan),
-                            "total_stake": scenario.get("total_stake", 0.0)
+                            "staking_plan_text": "\n".join(filtered_lines),
+                            "total_stake": scenario.get("total_stake", 0.0),
+                            "weighted_lines": weighted_lines,
                         }
                     else:
                         flash(f"Model did not find a profitable strategy for {p['event_name']}.", "info")
@@ -3143,8 +3446,10 @@ def tote_live_model_page():
         filters={
             "country": country,
             "date": date_filter,
+            "venue": venue_filter,
         },
         country_options=country_options,
+        venue_options=venue_options,
     )
 
 

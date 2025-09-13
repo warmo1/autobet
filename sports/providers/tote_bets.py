@@ -626,6 +626,7 @@ def place_audit_superfecta(
     placement_product_id: Optional[str] = None,
     mode: str = "audit",
     client: ToteClient | None = None,
+    line_amounts: Optional[Dict[str, float]] = None,  # optional per-line stake mapping
 ) -> Dict[str, Any]:
     """Audit-mode Superfecta bet. Supports single selection or a list (multiple bets).
 
@@ -643,10 +644,18 @@ def place_audit_superfecta(
     # Calculate per-line stake
     num_lines = len(bet_lines)
     line_stake = 0.0
-    if (stake_type or "total").lower() == "line":
+    use_weighted = bool(line_amounts)
+    if use_weighted:
+        # sanitize mapping keys
+        try:
+            line_amounts = {str(k).strip(): float(v) for k, v in (line_amounts or {}).items() if k and v is not None}
+        except Exception:
+            line_amounts = {str(k): float(v) for k, v in (line_amounts or {}).items() if v is not None}
+    if (stake_type or "total").lower() == "line" and not use_weighted:
         line_stake = float(stake)
-    else:  # 'total'
-        line_stake = float(stake) / num_lines if num_lines > 0 else 0.0
+    else:
+        # 'total' split evenly only when no weighted stakes provided
+        line_stake = (float(stake) / num_lines) if (num_lines > 0 and not use_weighted) else 0.0
 
     # Map selection strings to GraphQL legs structure using tote_product_selections
     by_number: Dict[int, str] = {}
@@ -952,11 +961,18 @@ def place_audit_superfecta(
     # Build bets arrays for both schema variants
     # v2 (docs/tote_queries.graphql): PlaceBetsInput with results[]
     bets_v2: List[Dict[str, Any]] = []
-    for lg in legs: # Use the processed legs
+    for idx, lg in enumerate(legs): # Use the processed legs
+        ln_str = bet_lines[idx] if idx < len(bet_lines) else None
+        amt = line_stake
+        if use_weighted and ln_str is not None:
+            try:
+                amt = float((line_amounts or {}).get(ln_str, 0.0))
+            except Exception:
+                amt = 0.0
         bet_obj = {
             "productId": used_product_id,
             "stake": {
-                "amount": {"decimalAmount": line_stake},
+                "amount": {"decimalAmount": amt},
                 "currency": currency,
             },
             "legs": [lg] if lg else [],
@@ -964,10 +980,24 @@ def place_audit_superfecta(
         bets_v2.append({"bet": bet_obj})
     payload_v2 = {"bets": bets_v2}
 
-    # v1 (ticket schema): for Superfecta use totalAmount per bet (not lineAmount)
+    # v1 (ticket schema): Superfecta stake uses totalAmount by default (toggle to lineAmount via env)
     bets_v1: List[Dict[str, Any]] = []
-    for lg in legs: # Use the processed legs
-        stake_obj = {"currencyCode": currency, "totalAmount": line_stake}
+    stake_field_env = (os.getenv("TOTE_SUPERFECTA_STAKE_FIELD", "totalAmount").strip().lower())
+    # Force per-line stake field when weighted amounts are provided
+    stake_field = ("lineamount" if use_weighted else stake_field_env)
+    for idx, lg in enumerate(legs): # Use the processed legs
+        ln_str = bet_lines[idx] if idx < len(bet_lines) else None
+        amt = line_stake
+        if use_weighted and ln_str is not None:
+            try:
+                amt = float((line_amounts or {}).get(ln_str, 0.0))
+            except Exception:
+                amt = 0.0
+        stake_obj = {"currencyCode": currency}
+        if stake_field == "lineamount":
+            stake_obj["lineAmount"] = amt
+        else:
+            stake_obj["totalAmount"] = amt
         bets_v1.append({
             "betId": f"bet-superfecta-{uuid.uuid4()}",
             "productId": used_product_id,
@@ -985,12 +1015,12 @@ def place_audit_superfecta(
             is_live = str(mode).lower() == 'live'
             # Build v1 mutation per Tote docs for Superfecta
             mutation_v1 = """
-            mutation PlaceBets($input: PlaceBetsInput!) {
+            mutation PlaceSuperfectaBet($input: PlaceBetsInput!) {
               placeBets(input:$input){
                 ticket{
                   id
                   toteId
-                  bets{ nodes{ id toteId placement{ status rejectionReason } } }
+                  bets{ nodes{ id toteId betType{ code } placement{ status rejectionReason legs{ productLegId selections{ productLegSelectionID position } } } } }
                 }
               }
             }
@@ -999,6 +1029,13 @@ def place_audit_superfecta(
             # Prefer v1 for live superfecta to ensure positions are honoured
             if is_live:
                 try:
+                    # Emit debug of the exact mutation + variables for comparison with docs
+                    try:
+                        print("[LiveSuperfecta][DEBUG] mutation:")
+                        print(mutation_v1.strip())
+                        print("[LiveSuperfecta][DEBUG] variables:", json.dumps(variables_v1, indent=2)[:2000])
+                    except Exception:
+                        pass
                     resp = client.graphql(mutation_v1, variables_v1)
                     used_schema = "v1"; sent_variables = variables_v1
                 except Exception as e1:
@@ -1057,10 +1094,52 @@ def place_audit_superfecta(
                 if ticket and isinstance(ticket, dict):
                     bets_node = ((ticket.get("bets") or {}).get("nodes"))
                     if isinstance(bets_node, list) and bets_node:
+                        try:
+                            # Log how many bets Tote created on the ticket for visibility
+                            print(f"[LiveSuperfecta][DEBUG] ticket.toteId={ticket.get('toteId') or ticket.get('id')} bets_count={len(bets_node)}")
+                            btcode = ((bets_node[0].get('betType') or {}).get('code'))
+                            if btcode:
+                                print(f"[LiveSuperfecta][DEBUG] betType.code={btcode}")
+                            # Also log positions returned on placement legs
+                            pls = ((bets_node[0].get('placement') or {}).get('legs')) or []
+                            if pls:
+                                positions = []
+                                try:
+                                    for lg in pls:
+                                        for s in (lg.get('selections') or []):
+                                            positions.append(s.get('position'))
+                                except Exception:
+                                    positions = []
+                                if positions:
+                                    print(f"[LiveSuperfecta][DEBUG] placement.positions={positions}")
+                        except Exception:
+                            pass
                         placement = (bets_node[0].get("placement") or {})
                         placement_status = placement.get("status")
                         # Rejection reason (if available on placement)
                         failure_reason = placement.get("rejectionReason") or failure_reason
+                        # Optional: fetch full ticket details to validate server-side interpretation
+                        try:
+                            tid = ticket.get("toteId") or ticket.get("id")
+                            if tid and str(mode).lower() == 'live':
+                                client2 = client or ToteClient()
+                                q = """
+                                query Ticket($id: ID!){
+                                  ticket(id:$id){ id toteId bets{ nodes{ id toteId betType{ code } placement{ status legs{ productLegId selections{ productLegSelectionID position } } } } } }
+                                }
+                                """
+                                d2 = client2.graphql(q, {"id": tid})
+                                t2 = (d2.get("ticket") or {})
+                                nodes2 = ((t2.get("bets") or {}).get("nodes")) or []
+                                if nodes2:
+                                    try:
+                                        bt2 = ((nodes2[0].get('betType') or {}).get('code'))
+                                        pos2 = [s.get('position') for lg in ((nodes2[0].get('placement') or {}).get('legs') or []) for s in (lg.get('selections') or [])]
+                                        print(f"[LiveSuperfecta][TRACE] server betType.code={bt2} positions={pos2}")
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
     except Exception:
         placement_status = None
     # Record synthetic audit entry (for multiples, join selections)
@@ -1077,6 +1156,7 @@ def place_audit_superfecta(
         "stake": stake,
         "currency": currency,
         "variables": sent_variables,
+        "mutation": (mutation_v1.strip() if 'mutation_v1' in locals() else None),
     }
     bet_id = f"{product_id}:{_now_ms()}"
     _record_audit_bq(
