@@ -25,7 +25,7 @@ def _is_bq_sink(obj) -> bool:
     return hasattr(obj, "upsert_tote_pool_snapshots") and hasattr(obj, "upsert_tote_events")
 
 
-async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) -> None:
+async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, event_callback=None) -> None:
     """Subscribe to Tote WS channels and persist snapshots + logs.
 
     Key improvements:
@@ -79,6 +79,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                 netAmount { __typename }
                 grossAmount { __typename }
               }
+              carryIn { grossAmount { decimalAmount } }
             } }
             """.strip(),
         ))
@@ -421,12 +422,25 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                             node = data["onPoolTotalChanged"]
                             if node and isinstance(node, dict):
                                 pid = node.get("productId")
+                                # Try to read amounts from the payload; fall back to HTTP fetch if needed
                                 total = (node.get("total") or {})
-                                net_node = (total.get("netAmount") or {})
-                                gross_node = (total.get("grossAmount") or {})
-                                net = _money_to_float(net_node)
-                                gross = _money_to_float(gross_node)
-                                # If values are missing in WS schema, fetch via HTTP GraphQL as a fallback
+                                net_list = (total.get("netAmounts") or [])
+                                gross_list = (total.get("grossAmounts") or [])
+                                # Prefer explicit decimal amounts if present
+                                try:
+                                    net = float(net_list[0].get("decimalAmount")) if (net_list and net_list[0].get("decimalAmount") is not None) else None
+                                except Exception:
+                                    net = None
+                                try:
+                                    gross = float(gross_list[0].get("decimalAmount")) if (gross_list and gross_list[0].get("decimalAmount") is not None) else None
+                                except Exception:
+                                    gross = None
+                                # Fallback to singular Money objects
+                                if net is None:
+                                    net = _money_to_float((total.get("netAmount") or {}))
+                                if gross is None:
+                                    gross = _money_to_float((total.get("grossAmount") or {}))
+                                # If values are still missing, fetch via HTTP GraphQL as a fallback
                                 if (net is None or gross is None) and pid:
                                     try:
                                         n2, g2 = await _fetch_totals_http(str(pid))
@@ -436,6 +450,11 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                                             gross = g2
                                     except Exception:
                                         pass
+                                # Carry-in rollover amount (if present)
+                                try:
+                                    rollover = float(((node.get("carryIn") or {}).get("grossAmount") or {}).get("decimalAmount") or 0.0)
+                                except Exception:
+                                    rollover = 0.0
                                 if pid:
                                     # Publish realtime update for UI consumers
                                     try:
@@ -464,8 +483,20 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                                                         "ts_ms": ts,
                                                         "total_gross": gross,
                                                         "total_net": net,
+                                                        "rollover": rollover,
                                                     },
                                                 ))
+                                                if event_callback:
+                                                    event_callback("pool_total_changed", dict(
+                                                        product_id=str(pid),
+                                                        total_gross=gross,
+                                                        total_net=net,
+                                                        rollover=rollover,
+                                                        currency=(ctx.get("currency") or (net_list[0].get("currency") or {}).get("code") if net_list else None),
+                                                        ts_ms=ts,
+                                                    ))
+                                        except asyncio.QueueFull:
+                                            pass
                                         except Exception:
                                             pass
                                     else:
@@ -516,6 +547,13 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                                                     "upsert_tote_events",
                                                     {"event_id": str(eid), "status": str(status)},
                                                 ))
+                                                if event_callback:
+                                                    event_callback(
+                                                        "event_status_changed",
+                                                        {"event_id": str(eid), "status": str(status), "ts_ms": ts},
+                                                    )
+                                        except asyncio.QueueFull:
+                                            pass
                                         except Exception:
                                             pass
                                     else:
@@ -697,6 +735,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                                 node = data["onProductStatusChanged"]
                                 pid = (node or {}).get("productId") or (node or {}).get("ProductId")
                                 st = (node or {}).get("status") or (node or {}).get("Status")
+<<<<<<< HEAD
                                 if pid and st is not None:
                                     # Enrich with product context (event_id, bet_type) for UI consumers
                                     ctx = _get_product_ctx(str(pid)) or {}
@@ -719,6 +758,20 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
                                             "upsert_tote_product_status_log",
                                             {"product_id": str(pid), "ts_ms": ts, "status": str(st)},
                                         ))
+                                    if event_callback:
+                                        # Also publish via injected callback (used by webapp SSE bus)
+                                        event_callback(
+                                            "product_status_changed",
+                                            {
+                                                "product_id": str(pid),
+                                                "event_id": ctx.get("event_id"),
+                                                "bet_type": ctx.get("bet_type"),
+                                                "status": str(st),
+                                                "ts_ms": ts,
+                                            },
+                                        )
+                            except asyncio.QueueFull:
+                                pass
                             except Exception:
                                 pass
 
@@ -810,18 +863,18 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None) ->
         pass
 
 
-def run_subscriber(conn, *, audit: bool = False, duration: Optional[int] = None):
+def run_subscriber(conn, *, audit: bool = False, duration: Optional[int] = None, event_callback=None):
     url = cfg.tote_subscriptions_url or "wss://hub.production.racing.tote.co.uk/partner/connections/graphql/"
     if websockets is None:
         raise RuntimeError("websockets is not installed; pip install websockets")
     try:
-        asyncio.run(_subscribe_pools(url, conn, duration=duration))
+        asyncio.run(_subscribe_pools(url, conn, duration=duration, event_callback=event_callback))
     except RuntimeError:
         # Fallback for environments with an existing loop policy
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(_subscribe_pools(url, conn, duration=duration))
+            loop.run_until_complete(_subscribe_pools(url, conn, duration=duration, event_callback=event_callback))
         finally:
             try:
                 loop.close()

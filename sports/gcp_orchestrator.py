@@ -255,6 +255,40 @@ def scan_and_publish_probable_sweep():
         pass
     return f"Published {n} probable odds jobs.", 200
 
+def publish_daily_event_ingest():
+    """Publishes a job to ingest all of today's events."""
+    project_id = os.getenv("GCP_PROJECT") or cfg.bq_project
+    topic_id = os.getenv("PUBSUB_TOPIC_ID", "ingest-jobs")
+    if not project_id:
+        return "GCP_PROJECT not set", 500
+
+    job = {"task": "ingest_events_for_day", "date": "today"}
+    publish_pubsub_message(project_id, topic_id, job)
+
+    # Log run
+    try:
+        sink = get_bq_sink()
+        now_ms = int(time.time() * 1000)
+        sink.upsert_ingest_job_runs([
+            {
+                "job_id": f"orchestrator-{uuid.uuid4().hex}",
+                "component": "orchestrator",
+                "task": "daily-event-ingest-trigger",
+                "status": "OK",
+                "started_ts": now_ms,
+                "ended_ts": now_ms,
+                "duration_ms": 0,
+                "payload_json": json.dumps(job),
+                "error": None,
+                "metrics_json": json.dumps({"published_count": 1}),
+            }
+        ])
+    except Exception:
+        pass
+
+    return "Published daily event ingest job.", 200
+
+
 @app.post("/")
 def handle_scheduler() -> tuple[str, int]:
     """Entrypoint for Cloud Scheduler hitting this service via HTTP."""
@@ -274,6 +308,8 @@ def handle_scheduler() -> tuple[str, int]:
             return scan_and_publish_results_jobs()
         elif job_name == "probable-odds-sweep":
             return scan_and_publish_probable_sweep()
+        elif job_name == "daily-event-ingest":
+            return publish_daily_event_ingest()
         else:
             return (f"Unknown job_name: {job_name}", 400)
     except Exception as e:

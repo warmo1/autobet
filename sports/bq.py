@@ -289,7 +289,7 @@ class BigQuerySink:
                 "comp=S.comp",
                 "home=S.home",
                 "away=S.away",
-                "competitors_json=S.competitors_json",
+                "competitors_json=COALESCE(S.competitors_json, T.competitors_json)",
                 "source=S.source",
             ]),
         )

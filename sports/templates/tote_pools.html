@@ -66,15 +66,15 @@
       <tbody>
         {% for p in products %}
         <tr>
-          <td><span class="text-nowrap">{{ p.start_iso[:10] }} {{ p.start_iso[11:16] }}</span></td>
+          <td data-product-id="{{ p.product_id }}"><span class="text-nowrap">{{ p.start_iso[:10] }} {{ p.start_iso[11:16] }}</span></td>
           <td>{{ p.bet_type }}</td>
           <td><a href="{{ url_for('event_detail', event_id=p.event_id) }}">{{ p.event_name }}</a></td>
           <td>{{ p.venue }}</td>
           <td>{{ p.country }}</td>
-          <td>{{ p.status }}</td>
-          <td class="text-end">{{ p.total_gross | f0 }}</td>
-          <td class="text-end">{{ p.total_net | f0 }}</td>
-          <td class="text-end">{{ p.rollover | f0 }}</td>
+          <td data-field="status">{{ p.status }}</td>
+          <td class="text-end"><span data-field="total_gross">{{ p.total_gross | f0 }}</span></td>
+          <td class="text-end"><span data-field="total_net">{{ p.total_net | f0 }}</span></td>
+          <td class="text-end"><span data-field="rollover">{{ p.rollover | f0 }}</span></td>
           <td class="text-end">{{ p.deduction_rate | pct1 }}</td>
           <td class="text-end">{{ p.dividend_count }}</td>
         </tr>
@@ -96,4 +96,53 @@
   </div>
 
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const productRows = new Map();
+    document.querySelectorAll('td[data-product-id]').forEach(cell => {
+        productRows.set(cell.dataset.productId, cell.closest('tr'));
+    });
+
+    if (productRows.size === 0) return;
+
+    const es = new EventSource("{{ url_for('stream') }}?topic=pool_total_changed&topic=product_status_changed");
+
+    const formatters = {
+        f0: (val) => parseFloat(val).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 }),
+    };
+
+    const updateCell = (row, field, value, formatter) => {
+        const cell = row.querySelector(`[data-field="${field}"]`);
+        if (cell) {
+            cell.textContent = formatter ? formatter(value) : value;
+            // Flash effect
+            cell.style.transition = 'none';
+            cell.style.backgroundColor = '#fdffc4';
+            setTimeout(() => {
+                cell.style.transition = 'background-color 0.5s ease';
+                cell.style.backgroundColor = '';
+            }, 150);
+        }
+    };
+
+    es.addEventListener('pool_total_changed', (e) => {
+        const data = JSON.parse(e.data);
+        const row = productRows.get(data.product_id);
+        if (row) {
+            if (data.total_gross !== null) updateCell(row, 'total_gross', data.total_gross, formatters.f0);
+            if (data.total_net !== null) updateCell(row, 'total_net', data.total_net, formatters.f0);
+            if (data.rollover !== null) updateCell(row, 'rollover', data.rollover, formatters.f0);
+        }
+    });
+
+    es.addEventListener('product_status_changed', (e) => {
+        const data = JSON.parse(e.data);
+        const row = productRows.get(data.product_id);
+        if (row) {
+            updateCell(row, 'status', data.status);
+        }
+    });
+});
+</script>
 {% endblock %}

@@ -166,15 +166,14 @@ def _today_iso() -> str:
 # --- Background: pool subscription (optional) ---
 _pool_thread_started = False
 
-def _pool_subscriber_loop():
-    from .providers.tote_subscriptions import run_subscriber
-    while True:
-        try:
-            # The subscriber loop will now use the BigQuery sink via the new db layer
-            db = get_db()
-            # Note: run_subscriber currently manages its own realtime bus publishing.
-            # Do not pass unsupported kwargs.
-            run_subscriber(db, duration=None)
+    def _pool_subscriber_loop():
+        from .providers.tote_subscriptions import run_subscriber
+        while True:
+            try:
+                # The subscriber loop will now use the BigQuery sink via the new db layer
+                db = get_db()
+            # Pass the local SSE event bus so the subscriber can publish UI updates
+            run_subscriber(db, duration=None, event_callback=event_bus.publish)
         except Exception as e:
             try:
                 print("[PoolSub] error:", e)
