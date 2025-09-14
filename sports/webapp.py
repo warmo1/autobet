@@ -11,7 +11,6 @@ import json
 import threading
 import traceback
 import math
-import queue
 from typing import Optional, Sequence, Mapping, Any
 from google.cloud import bigquery
 from .providers.tote_bets import place_audit_superfecta
@@ -20,7 +19,6 @@ from .gcp import publish_pubsub_message
 from .providers.pl_calcs import calculate_pl_strategy
 import itertools
 import math
-from collections import defaultdict
 import requests
 
 # Simple in-process TTL cache for sql_df results
@@ -114,45 +112,7 @@ def _sql_is_readonly(sql: str) -> bool:
     except Exception:
         return False
 
-# Helper function for permutations (nPr) - not directly used in PL, but good to have
-class EventBus:
-    """A simple thread-safe, in-memory event bus for real-time UI updates."""
-    def __init__(self):
-        self.subscribers = defaultdict(list)
-        self.lock = threading.Lock()
-
-    def publish(self, channel: str, data: dict):
-        """Publish an event. Called from the subscriber thread."""
-        with self.lock:
-            # Create a copy to avoid issues if a subscriber unsubscribes during iteration
-            sub_list = self.subscribers.get(channel, [])[:]
-        
-        # The queue will store a tuple of (channel, data)
-        for q in sub_list:
-            try:
-                q.put_nowait((channel, data))
-            except queue.Full:
-                # Subscriber is too slow, message is dropped.
-                # In a real-world scenario, you might log this.
-                pass
-
-    def subscribe(self, channels: list[str]) -> queue.Queue:
-        """Subscribe to one or more channels. Returns a queue to consume events."""
-        q = queue.Queue(maxsize=200)
-        with self.lock:
-            for channel in channels:
-                self.subscribers[channel].append(q)
-        return q
-
-    def unsubscribe(self, channels: list[str], q: queue.Queue):
-        """Unsubscribe a queue from channels."""
-        with self.lock:
-            for channel in channels:
-                # Use a while loop to remove all occurrences, just in case
-                while q in self.subscribers.get(channel, []):
-                    self.subscribers[channel].remove(q)
-
-event_bus = EventBus()
+from .realtime import bus as event_bus
 
 
 app = Flask(__name__)
@@ -213,17 +173,17 @@ def stream():
         return Response("No topics specified.", status=400, mimetype='text/plain')
 
     def event_generator():
-        q = event_bus.subscribe(topics)
+        sub = event_bus.subscribe(topics)
         try:
             while True:
-                try:
-                    # Block with a timeout to send keep-alives
-                    channel, data = q.get(timeout=25)
-                    yield f"event: {channel}\ndata: {json.dumps(data)}\n\n"
-                except queue.Empty:
+                item = sub.get(timeout=25)
+                if item is None:
                     yield ": keep-alive\n\n"
+                else:
+                    channel, data = item
+                    yield f"event: {channel}\ndata: {json.dumps(data)}\n\n"
         finally:
-            event_bus.unsubscribe(topics, q)
+            event_bus.unsubscribe(sub)
     
     return Response(event_generator(), mimetype='text/event-stream')
 
