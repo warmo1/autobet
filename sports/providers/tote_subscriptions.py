@@ -735,7 +735,6 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                 node = data["onProductStatusChanged"]
                                 pid = (node or {}).get("productId") or (node or {}).get("ProductId")
                                 st = (node or {}).get("status") or (node or {}).get("Status")
-<<<<<<< HEAD
                                 if pid and st is not None:
                                     # Enrich with product context (event_id, bet_type) for UI consumers
                                     ctx = _get_product_ctx(str(pid)) or {}
