@@ -7,6 +7,7 @@ source "$SCRIPT_DIR/_common.sh"
 
 usage(){
   echo "Usage: $0 --project <PROJECT> --region <REGION> --service <NAME> --topic <TOPIC> [--sa <SERVICE_ACCOUNT>]" >&2
+  echo "  --sa is used for BOTH the Cloud Run service account and the Pub/Sub push auth service account (if provided)." >&2
 }
 
 PROJECT="${BQ_PROJECT:-}"
@@ -33,12 +34,19 @@ echo "Enabling APIs..."
 gcloud services enable run.googleapis.com pubsub.googleapis.com --project "$PROJECT"
 
 echo "Deploying Cloud Run service $SERVICE in $REGION..."
-gcloud run deploy "$SERVICE" \
-  --project "$PROJECT" \
-  --region "$REGION" \
-  --source "$SCRIPT_DIR/.." \
-  --set-env-vars BQ_WRITE_ENABLED=true,BQ_PROJECT="$PROJECT",BQ_DATASET="${BQ_DATASET}",BQ_LOCATION="${BQ_LOCATION}",TOTE_API_KEY="${TOTE_API_KEY:-}",TOTE_GRAPHQL_URL="${TOTE_GRAPHQL_URL:-}" \
+DEPLOY_ARGS=(
+  gcloud run deploy "$SERVICE"
+  --project "$PROJECT"
+  --region "$REGION"
+  --source "$SCRIPT_DIR/.."
+  --set-env-vars BQ_WRITE_ENABLED=true,BQ_PROJECT="$PROJECT",BQ_DATASET="${BQ_DATASET}",BQ_LOCATION="${BQ_LOCATION}",TOTE_API_KEY="${TOTE_API_KEY:-}",TOTE_GRAPHQL_URL="${TOTE_GRAPHQL_URL:-}"
   --allow-unauthenticated=false
+)
+if [[ -n "$SA" ]]; then
+  echo "Using service account for Cloud Run: $SA"
+  DEPLOY_ARGS+=(--service-account "$SA")
+fi
+"${DEPLOY_ARGS[@]}"
 
 SRV_URL=$(gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format='value(status.url)')
 echo "Service URL: $SRV_URL"
@@ -64,4 +72,3 @@ else
 fi
 
 echo "Done. Publish a test job with publish_all_today.sh using --topic $TOPIC"
-

@@ -179,3 +179,6 @@ override.tf.json
 # Ignore CLI configuration files
 .terraformrc
 terraform.rc
+
+# Local service account key for webapp (do not commit)
+autobet-webapp-credentials.json

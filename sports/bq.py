@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from typing import Iterable, Mapping, Any
 
 from .config import cfg
@@ -24,7 +25,31 @@ class BigQuerySink:
             except Exception as e:
                 raise RuntimeError("google-cloud-bigquery not installed") from e
             self._bq = bigquery
-            self._client = bigquery.Client(project=self.project, location=self.location)
+            # Prefer explicit service account credentials if provided to avoid
+            # accidental reliance on user ADC tokens that may require reauth.
+            creds = None
+            try:
+                # 1) JSON content in env
+                sa_json_env = os.getenv("GCP_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+                if sa_json_env:
+                    from google.oauth2 import service_account  # type: ignore
+                    info = json.loads(sa_json_env)
+                    creds = service_account.Credentials.from_service_account_info(info)
+                else:
+                    # 2) File path in env
+                    sa_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+                    if sa_path and os.path.exists(sa_path):
+                        from google.oauth2 import service_account  # type: ignore
+                        creds = service_account.Credentials.from_service_account_file(sa_path)
+            except Exception:
+                # Fall back to ADC below
+                creds = None
+
+            if creds is not None:
+                self._client = bigquery.Client(project=self.project, credentials=creds, location=self.location)
+            else:
+                # Fall back to Application Default Credentials (gcloud auth, metadata, etc.)
+                self._client = bigquery.Client(project=self.project, location=self.location)
         return self._client
 
     def query(self, sql: str, **kwargs):
