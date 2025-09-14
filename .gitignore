@@ -182,3 +182,15 @@ terraform.rc
 
 # Local service account key for webapp (do not commit)
 autobet-webapp-credentials.json
+
+# Broader patterns to avoid committing credentials (service accounts, secrets)
+# Adjust as needed for your environment; these target common SA filenames/paths.
+secrets/**
+.secrets/**
+credentials/**
+**/service-account*.json
+**/service_account*.json
+**/*-service-account.json
+**/*-service_account.json
+**/*-sa.json
+**/*-credentials.json
