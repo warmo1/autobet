@@ -1904,11 +1904,13 @@ def tote_audit_superfecta_post():
     from .providers.tote_api import ToteClient
     client_for_placement = ToteClient()
     if mode == 'audit':
-        # Use the dedicated audit endpoint provided.
-        client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+        # Use configured audit endpoint if provided; otherwise leave as default
+        if cfg.tote_audit_graphql_url:
+            client_for_placement.base_url = cfg.tote_audit_graphql_url.strip()
     elif mode == 'live':
-        # Use the partner gateway HTTP endpoint for live placement (ensure trailing slash).
-        client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/graphql/"
+        # Use configured live endpoint as-is
+        if cfg.tote_graphql_url:
+            client_for_placement.base_url = cfg.tote_graphql_url.strip()
 
     # NOTE: Assuming place_audit_superfecta accepts a 'client' argument to use for the API call.
     res = place_audit_superfecta(db, mode=mode, product_id=pid, selection=(sel or None), selections=selections, stake=sk, currency=currency, post=post_flag, stake_type=stake_type, placement_product_id=placement_pid, client=client_for_placement)
@@ -3232,9 +3234,11 @@ def tote_live_model_page():
         from .providers.tote_api import ToteClient
         client = ToteClient()
         if mode == 'live':
-            client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/graphql/"
+            if cfg.tote_graphql_url:
+                client.base_url = cfg.tote_graphql_url.strip()
         elif mode == 'audit':
-            client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+            if cfg.tote_audit_graphql_url:
+                client.base_url = cfg.tote_audit_graphql_url.strip()
 
         res = place_audit_superfecta(
             db,
@@ -3760,10 +3764,11 @@ def tote_bet_page():
                 return redirect(request.referrer or url_for("tote_bet_page"))
             client_for_placement = ToteClient()
             if mode == 'live':
-                # Use the partner gateway HTTP endpoint for live placement (ensure trailing slash).
-                client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/graphql/"
+                if cfg.tote_graphql_url:
+                    client_for_placement.base_url = cfg.tote_graphql_url.strip()
             elif mode == 'audit':
-                client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+                if cfg.tote_audit_graphql_url:
+                    client_for_placement.base_url = cfg.tote_audit_graphql_url.strip()
             res = place_audit_simple_bet(db, mode=mode, product_id=product_id, selection_id=selection_id, stake=stake, currency=currency, post=True, client=client_for_placement)
         elif bet_type in ["SUPERFECTA", "TRIFECTA", "EXACTA"]:
             from .providers.tote_bets import place_audit_superfecta
@@ -3775,10 +3780,11 @@ def tote_bet_page():
             selections = [p for p in (selections_text.replace("\r","\n").replace(",","\n").split("\n")) if p.strip()]
             client_for_placement = ToteClient()
             if mode == 'live':
-                # Use the partner gateway HTTP endpoint for live placement (ensure trailing slash).
-                client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/graphql/"
+                if cfg.tote_graphql_url:
+                    client_for_placement.base_url = cfg.tote_graphql_url.strip()
             elif mode == 'audit':
-                client_for_placement.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+                if cfg.tote_audit_graphql_url:
+                    client_for_placement.base_url = cfg.tote_audit_graphql_url.strip()
             res = place_audit_superfecta(db, mode=mode, product_id=product_id, selections=selections, stake=stake, currency=currency, post=True, stake_type="total", client=client_for_placement)
         else:
             flash(f"Bet type '{bet_type}' is not currently supported on this page.", "error")

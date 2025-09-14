@@ -29,71 +29,33 @@ class ToteClient:
             raise ToteError("TOTE_GRAPHQL_URL is not configured")
         if not (api_key or cfg.tote_api_key):
             raise ToteError("TOTE_API_KEY is not configured")
-        # Prefer the gateway endpoint for HTTP GraphQL queries; many partners
-        # expose products/events on /gateway/graphql while /connections/graphql
-        # is primarily for WebSocket subscriptions. Do not auto-swap away from
-        # gateway for POST queries.
-        base_in = (base_url or cfg.tote_graphql_url or "").rstrip("/")
-        if "/gateway/graphql" in base_in:
-            self.base_url = base_in
-        elif "/connections/graphql" in base_in:
-            self.base_url = base_in.replace("/connections/graphql", "/gateway/graphql")
-        else:
-            self.base_url = base_in
-        # Avoid 301/302 redirect that can downgrade POST->GET by ensuring trailing slash
-        if self.base_url.endswith("/graphql"):
-            self.base_url += "/"
+        # Use the configured URL exactly as provided (main branch behavior)
+        # Do not mutate or add trailing slashes; some frontends are strict.
+        self.base_url = (base_url or cfg.tote_graphql_url or "").strip()
         self.timeout = timeout
         self.max_retries = max(0, int(max_retries))
         self.session = requests.Session()
         # Auth headers: mirror legacy working set that previously worked in production
         self.api_key = (api_key or cfg.tote_api_key)
         self.auth_scheme = (cfg.tote_auth_scheme or "Api-Key").strip()
-        # Use minimal header set known to work with partner gateway and avoid WAF false positives
-        base_headers = {
+        # Match main branch auth: Authorization header only.
+        self.headers = {
+            "Authorization": f"{self.auth_scheme} {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "autobet/0.1 (+tote)",
         }
-        # Primary Authorization header only when explicitly requested via scheme
-        # Default behavior is to rely on X-Api-Key which aligns with most partner setups
-        if self.auth_scheme and self.auth_scheme.lower() not in ("x-api-key", "none"):
-            base_headers["Authorization"] = f"{self.auth_scheme} {self.api_key}"
-        # Add x-api-key variants to maximize compatibility with partner WAF/routing
-        base_headers.setdefault("X-Api-Key", self.api_key)
-        base_headers.setdefault("x-api-key", self.api_key)
-        self.headers = base_headers
 
     # No alternate URL swapping for HTTP GraphQL; stick to gateway
 
     # (No custom header builder; use the fixed, known-good header set above.)
 
-    def _post_json(self, url: str, payload: Dict[str, Any], *, headers_override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _post_json(self, url: str, payload: Dict[str, Any], *, headers_override: Optional[Dict[str, Any]] = None, keep_auth: Optional[bool] = None) -> Dict[str, Any]:
         last_err: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
                 _rate_limiter.acquire()
                 send_headers = dict(headers_override or self.headers)
-                # Heuristic: for partner live endpoints, prefer x-api-key only unless explicitly configured.
-                try:
-                    u = (url or "")
-                    drop_auth = False
-                    # Prefer x-api-key only on non-audit endpoints to mirror production behavior
-                    if "/audit/" not in u:
-                        # Keep Authorization on live only if explicitly requested
-                        keep = os.getenv("TOTE_KEEP_AUTH_ON_LIVE", "0").lower() in ("1","true","yes","on")
-                        drop_auth = not keep
-                    # Also drop if explicitly requested via legacy toggle
-                    if os.getenv("TOTE_DROP_AUTH_ON_LIVE", "0").lower() in ("1","true","yes","on"):
-                        drop_auth = True
-                    # Drop Authorization header if requested
-                    if drop_auth:
-                        send_headers.pop("Authorization", None)
-                    # Ensure x-api-key headers are present
-                    send_headers.setdefault("X-Api-Key", self.api_key)
-                    send_headers.setdefault("x-api-key", self.api_key)
-                except Exception:
-                    pass
                 resp = self.session.post(url, headers=send_headers, json=payload, timeout=self.timeout)
                 # Handle redirects explicitly (301/302/303/307/308)
                 if 300 <= resp.status_code < 400:
@@ -135,10 +97,10 @@ class ToteClient:
                     time.sleep(0.5 * (2 ** attempt))
         raise ToteError(str(last_err) if last_err else "request failed")
 
-    def graphql(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def graphql(self, query: str, variables: Optional[Dict[str, Any]] = None, *, keep_auth: Optional[bool] = None) -> Dict[str, Any]:
         url = self.base_url
         payload = {"query": query, "variables": variables or {}}
-        data = self._post_json(url, payload)
+        data = self._post_json(url, payload, keep_auth=keep_auth)
         if isinstance(data, dict) and data.get("errors"):
             errs = data.get("errors")
             # Raise including endpoint used; do not swap to connections for HTTP GraphQL
@@ -148,12 +110,23 @@ class ToteClient:
     # For audit endpoint compatibility (some deployments separate audit path).
     # If no separate endpoint, reuse the same.
     def graphql_audit(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Preserve legacy behavior: use the current client's base_url and headers.
+        """Use audit credentials/URL if configured, matching main behavior.
 
-        Callers that need a distinct audit endpoint should set `client.base_url`
-        before calling this method (as existing code already does in webapp paths).
+        - If cfg.tote_audit_graphql_url is set, call that endpoint for audit.
+        - If cfg.tote_audit_api_key is set, use it (and scheme) for Authorization.
+        Fallback to the regular endpoint/key when audit-specific are absent.
         """
-        return self.graphql(query, variables)
+        url = (cfg.tote_audit_graphql_url or self.base_url).strip()
+        audit_key = (cfg.tote_audit_api_key or self.api_key)
+        audit_scheme = (cfg.tote_audit_auth_scheme or self.auth_scheme)
+        headers = dict(self.headers)
+        headers["Authorization"] = f"{audit_scheme} {audit_key}"
+        payload = {"query": query, "variables": variables or {}}
+        data = self._post_json(url, payload, headers_override=headers)
+        if isinstance(data, dict) and data.get("errors"):
+            errs = data.get("errors")
+            raise ToteError(f"GraphQL errors on {url}: {json.dumps(errs)}")
+        return (data.get("data") if isinstance(data, dict) else data) or {}
 
     def graphql_sdl(self) -> str:
         """Return schema SDL. Tries introspection; falls back to GET ?sdl on gateway.
@@ -262,17 +235,13 @@ class ToteClient:
             # Fallback to GET ?sdl
             sdl_url = self.base_url
             # Ensure we are targeting the gateway endpoint
-            if "/gateway/graphql" not in sdl_url:
-                try:
-                    sdl_url = sdl_url.replace("/graphql", "/gateway/graphql")
-                except Exception:
-                    pass
+            # Keep URL unmodified to avoid CloudFront 403s on some partners
             if "?" in sdl_url:
                 sdl_url = sdl_url + "&sdl"
             else:
                 sdl_url = sdl_url + "?sdl"
             resp = self.session.get(sdl_url, headers={
-                "Authorization": f"Api-Key {cfg.tote_api_key}",
+                "Authorization": f"{self.auth_scheme} {self.api_key}",
                 "Accept": "text/plain, text/graphql, */*",
             }, timeout=self.timeout)
             resp.raise_for_status()

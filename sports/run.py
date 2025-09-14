@@ -288,7 +288,8 @@ def main(argv=None):
         db = get_db()
         from .config import cfg
         client = ToteClient()
-        client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+        if cfg.tote_audit_graphql_url:
+            client.base_url = cfg.tote_audit_graphql_url.strip()
         res = place_audit_superfecta(db, product_id=args.product, selection=args.sel, stake=args.stake, currency=args.currency, post=args.post, client=client)
         print("[Audit SF]", res)
     sp_audit_sf.set_defaults(func=_cmd_audit_sf)
@@ -304,7 +305,8 @@ def main(argv=None):
         db = get_db()
         from .config import cfg
         client = ToteClient()
-        client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+        if cfg.tote_audit_graphql_url:
+            client.base_url = cfg.tote_audit_graphql_url.strip()
         res = place_audit_win(db, event_id=args.event, selection_id=args.selection, stake=args.stake, currency=args.currency, post=args.post, client=client)
         print("[Audit WIN]", res)
     sp_audit_win.set_defaults(func=_cmd_audit_win)
@@ -317,7 +319,8 @@ def main(argv=None):
         db = get_db()
         from .config import cfg
         client = ToteClient()
-        client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/graphql/"
+        if cfg.tote_graphql_url:
+            client.base_url = cfg.tote_graphql_url.strip()
         res = refresh_bet_status(db, bet_id=args.bet_id, post=args.post, client=client)
         print("[Bet Status]", res)
     sp_bet_status.set_defaults(func=_cmd_bet_status)
@@ -344,7 +347,8 @@ def main(argv=None):
     def _cmd_list(args):
         from .config import cfg
         client = ToteClient()
-        client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/graphql/"
+        if cfg.tote_graphql_url:
+            client.base_url = cfg.tote_graphql_url.strip()
         data = audit_list_bets(client, since_iso=args.since, until_iso=args.until, first=args.first)
         print(json.dumps(data, indent=2)[:2000])
         if args.sync:

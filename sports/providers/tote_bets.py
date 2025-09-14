@@ -542,12 +542,15 @@ def place_audit_simple_bet(
                 client = ToteClient()
                 # Default to audit unless explicitly live
                 if mode != 'live':
-                    client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+                    from ..config import cfg
+                    if cfg.tote_audit_graphql_url:
+                        client.base_url = cfg.tote_audit_graphql_url.strip()
 
             # Helper to choose live vs audit executor explicitly
             def _exec(query: str, variables: dict):
                 if str(mode).lower() == 'live':
-                    return client.graphql(query, variables)
+                    # Keep Authorization for live placement to satisfy auth
+                    return client.graphql(query, variables, keep_auth=True)
                 else:
                     return client.graphql_audit(query, variables)
 
@@ -596,7 +599,9 @@ def place_audit_simple_bet(
                 if isinstance(results, list) and results:
                     placement_status = results[0].get("status"); failure_reason = results[0].get("failureReason")
             else:
-                ticket = ((resp.get("placeBets") or {}).get("ticket")) or ((resp.get("ticket")) if "ticket" in resp else None)
+                # Support both sync and async payload containers
+                container = (resp.get("placeBets") or resp.get("placeBetsAsync") or resp)
+                ticket = (container.get("ticket") if isinstance(container, dict) else None) or ((resp.get("ticket")) if "ticket" in resp else None)
                 if ticket and isinstance(ticket, dict):
                     bets_node = ((ticket.get("bets") or {}).get("nodes"))
                     if isinstance(bets_node, list) and bets_node:
@@ -1013,10 +1018,22 @@ def place_audit_superfecta(
             if not client:
                 client = ToteClient()
             is_live = str(mode).lower() == 'live'
-            # Build v1 mutation per Tote docs for Superfecta
+            # Build v1 mutation per Tote docs for Superfecta (sync)
             mutation_v1 = """
             mutation PlaceSuperfectaBet($input: PlaceBetsInput!) {
               placeBets(input:$input){
+                ticket{
+                  id
+                  toteId
+                  bets{ nodes{ id toteId betType{ code } placement{ status rejectionReason legs{ productLegId selections{ productLegSelectionID position } } } } }
+                }
+              }
+            }
+            """
+            # Build v1 async mutation for large multi-bet tickets
+            mutation_v1_async = """
+            mutation PlaceSuperfectaBetAsync($input: PlaceBetsAsyncInput!) {
+              placeBetsAsync(input:$input){
                 ticket{
                   id
                   toteId
@@ -1032,11 +1049,18 @@ def place_audit_superfecta(
                     # Emit debug of the exact mutation + variables for comparison with docs
                     try:
                         print("[LiveSuperfecta][DEBUG] mutation:")
-                        print(mutation_v1.strip())
+                        # Choose which mutation to log based on sync/async decision
+                        print((mutation_v1_async if (len(bets_v1) > 100 or str(os.getenv("TOTE_USE_ASYNC","0")).lower() in ("1","true","yes","on")) else mutation_v1).strip())
                         print("[LiveSuperfecta][DEBUG] variables:", json.dumps(variables_v1, indent=2)[:2000])
                     except Exception:
                         pass
-                    resp = client.graphql(mutation_v1, variables_v1)
+                    # Use async endpoint when exceeding sync limit (100 bets) or when forced via env toggle
+                    use_async = (len(bets_v1) > 100) or (str(os.getenv("TOTE_USE_ASYNC","0")).lower() in ("1","true","yes","on"))
+                    if use_async:
+                        print("[LiveSuperfecta][INFO] Using async endpoint due to large bet count")
+                        resp = client.graphql(mutation_v1_async, variables_v1, keep_auth=True)
+                    else:
+                        resp = client.graphql(mutation_v1, variables_v1, keep_auth=True)
                     used_schema = "v1"; sent_variables = variables_v1
                 except Exception as e1:
                     err = str(e1)
@@ -1090,7 +1114,9 @@ def place_audit_superfecta(
                     placement_status = results[0].get("status")
                     failure_reason = results[0].get("failureReason")
             else:
-                ticket = ((resp.get("placeBets") or {}).get("ticket")) or ((resp.get("ticket")) if "ticket" in resp else None)
+                # Support both sync and async payload containers
+                container = (resp.get("placeBets") or resp.get("placeBetsAsync") or resp)
+                ticket = (container.get("ticket") if isinstance(container, dict) else None) or ((resp.get("ticket")) if "ticket" in resp else None)
                 if ticket and isinstance(ticket, dict):
                     bets_node = ((ticket.get("bets") or {}).get("nodes"))
                     if isinstance(bets_node, list) and bets_node:
@@ -1258,7 +1284,9 @@ def refresh_bet_status(sink, *, bet_id: str, post: bool = False) -> Dict[str, An
         if resp_json:
             d = json.loads(resp_json)
             resp = d.get("response") or {}
-            ticket = (resp.get("placeBets") or {}).get("ticket")
+            # Handle both sync and async placement payloads
+            container = (resp.get("placeBets") or resp.get("placeBetsAsync") or resp)
+            ticket = (container.get("ticket") if isinstance(container, dict) else None)
             if ticket and isinstance(ticket, dict):
                 nodes = (ticket.get("bets") or {}).get("nodes") or []
                 if nodes:
@@ -1284,7 +1312,8 @@ def refresh_bet_status(sink, *, bet_id: str, post: bool = False) -> Dict[str, An
             if str(mode).lower() == "audit":
                 status_payload = client.graphql_audit(query, {"id": provider_id})
             else:
-                status_payload = client.graphql(query, {"id": provider_id})
+                # Keep Authorization for live status checks to avoid 401s
+                status_payload = client.graphql(query, {"id": provider_id}, keep_auth=True)
         except Exception as e:
             err = str(e)
 
