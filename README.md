@@ -17,8 +17,9 @@ pip install -r requirements.txt
 cp .env.example .env
 # edit .env: TOTE_API_KEY, TOTE_GRAPHQL_URL, and BQ_* variables
 # authenticate to GCP (choose one):
-#  - gcloud: gcloud auth application-default login
-#  - service account: export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
+#  - gcloud ADC (dev): gcloud auth application-default login
+#  - service account path: export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
+#  - service account inline JSON: export GCP_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
 ```
 
 ### Web dashboard (BigQuery-only)
@@ -27,7 +28,7 @@ cp .env.example .env
 python -m sports.run web
 # open http://localhost:8010
 ```
-The dashboard reads directly from BigQuery. Ensure `BQ_PROJECT` and `BQ_DATASET` are set and you are authenticated.
+The dashboard reads directly from BigQuery. Ensure `BQ_PROJECT` and `BQ_DATASET` are set and you are authenticated. The app now prefers a service account if either `GOOGLE_APPLICATION_CREDENTIALS` (path) or `GCP_SERVICE_ACCOUNT_JSON` (inline JSON) is set; otherwise it falls back to Application Default Credentials.
 
 Key pages:
 - `/tote-superfecta` – list of SUPERFECTA products (with upcoming 60m widget)
