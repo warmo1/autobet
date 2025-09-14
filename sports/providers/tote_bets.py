@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Optional, Dict, Any, List
+import os
 import uuid
 
 from ..config import cfg
@@ -13,6 +14,14 @@ from .tote_api import ToteClient
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _dbg(msg: str) -> None:
+    try:
+        if str(os.getenv("TOTE_DEBUG", "0")).lower() in ("1","true","yes","on"):
+            print(f"[AuditMapDBG] {msg}")
+    except Exception:
+        pass
 
 
 def _record_audit_bq(
@@ -78,37 +87,108 @@ def _resolve_audit_ids_for_simple(
     *,
     live_product_id: str,
     live_selection_id: str,
+    trace: Optional[List[str]] = None,
 ) -> Optional[dict]:
     """Translate live product + selection IDs to audit-side IDs using event+betType and cloth/trap number.
 
     Returns dict with keys: product_id, product_leg_id, selection_id; or None if not resolved.
     """
     # 1) From BQ, find event_id, bet_type and the runner number for the chosen selection on live
+    _dbg(f"map_simple: live_product_id={live_product_id}, live_selection_id={live_selection_id}")
+    if trace is not None:
+        trace.append(f"live_product_id={live_product_id}; live_selection_id={live_selection_id}")
     prod = _bq_query_rows(
         sink,
         "SELECT event_id, bet_type FROM tote_products WHERE product_id=@pid LIMIT 1",
         {"pid": live_product_id},
     )
     if not prod:
+        _dbg("no tote_products row for live product")
+        if trace is not None:
+            trace.append("tote_products lookup returned 0 rows for live product")
         return None
     event_id = (prod[0] or {}).get("event_id")
     bet_type = (prod[0] or {}).get("bet_type")
     if not event_id or not bet_type:
+        _dbg(f"missing event_id/bet_type from BQ: event_id={event_id}, bet_type={bet_type}")
+        if trace is not None:
+            trace.append(f"missing event_id or bet_type from BQ: event_id={event_id}, bet_type={bet_type}")
         return None
     sel = _bq_query_rows(
         sink,
         "SELECT number FROM tote_product_selections WHERE product_id=@pid AND selection_id=@sid LIMIT 1",
         {"pid": live_product_id, "sid": live_selection_id},
     )
-    if not sel:
-        return None
-    try:
-        runner_num = int((sel[0] or {}).get("number"))
-    except Exception:
+    runner_num = None
+    runner_name: Optional[str] = None
+    if sel:
+        try:
+            rn = (sel[0] or {}).get("number")
+            runner_num = int(rn) if rn is not None else None
+        except Exception:
+            runner_num = None
+    _dbg(f"runner_num from BQ: {runner_num}")
+    if trace is not None:
+        trace.append(f"runner_num from DB: {runner_num}")
+    # Fallback: query live GraphQL to derive the runner number for this selection id
+    if runner_num is None:
+        try:
+            live_client = ToteClient()  # live
+            q = (
+                "query Product($id: String){ product(id:$id){ ... on BettingProduct { legs{ nodes{ selections{ nodes{ id eventCompetitor{ __typename ... on HorseRacingEventCompetitor{ clothNumber } ... on GreyhoundRacingEventCompetitor{ trapNumber } } competitor{ details{ __typename ... on HorseDetails{ clothNumber } ... on GreyhoundDetails{ trapNumber } } } } } } } } }"
+            )
+            d = live_client.graphql(q, {"id": live_product_id})
+            prod_node = d.get("product") or {}
+            legs = ((prod_node.get("legs") or {}).get("nodes")) or []
+            for lg in legs:
+                sels = ((lg.get("selections") or {}).get("nodes")) or []
+                for s in sels:
+                    if (s.get("id") or "") == live_selection_id:
+                        # Try modern then legacy fields
+                        evc = s.get("eventCompetitor") or {}
+                        n = None
+                        try:
+                            tnm = evc.get("__typename")
+                            if tnm == "HorseRacingEventCompetitor":
+                                n = evc.get("clothNumber")
+                            elif tnm == "GreyhoundRacingEventCompetitor":
+                                n = evc.get("trapNumber")
+                        except Exception:
+                            n = None
+                        if n is None:
+                            det = ((s.get("competitor") or {}).get("details") or {})
+                            tnm2 = det.get("__typename")
+                            if tnm2 == "HorseDetails":
+                                n = det.get("clothNumber")
+                            elif tnm2 == "GreyhoundDetails":
+                                n = det.get("trapNumber")
+                        # Capture a fallback name for matching if numbers are absent
+                        try:
+                            runner_name = (
+                                (evc.get("name") if isinstance(evc, dict) else None)
+                                or s.get("name")
+                                or ((s.get("competitor") or {}).get("name"))
+                            )
+                        except Exception:
+                            runner_name = runner_name or None
+                        try:
+                            if n is not None:
+                                runner_num = int(n)
+                        except Exception:
+                            runner_num = None
+                        break
+                if runner_num is not None:
+                    break
+        except Exception:
+            runner_num = None
+    if runner_num is None and (runner_name is None or not str(runner_name).strip()):
+        _dbg("could not derive runner number or name from live GraphQL; aborting")
+        if trace is not None:
+            trace.append("could not derive runner number or name from live GraphQL")
         return None
     # 2) Query audit endpoint for the equivalent product on that event/betType
     client = ToteClient()
-    client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+    # Support both legacy competitor{details{...}} and newer eventCompetitor structures
     query = (
         "query GetEventProducts($id: String){\n"
         "  event(id: $id){\n"
@@ -118,7 +198,10 @@ def _resolve_audit_ids_for_simple(
         "        ... on BettingProduct {\n"
         "          betType { code }\n"
         "          selling { status }\n"
-        "          legs{ nodes{ id selections{ nodes{ id competitor{ name details{ __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } } } }\n"
+        "          legs{ nodes{ id selections{ nodes{ id\n"
+        "            eventCompetitor{ __typename id name entryStatus ... on HorseRacingEventCompetitor { clothNumber } ... on GreyhoundRacingEventCompetitor { trapNumber } }\n"
+        "            competitor{ name details{ __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } }\n"
+        "          } } } }\n"
         "        }\n"
         "      }\n"
         "    }\n"
@@ -126,41 +209,229 @@ def _resolve_audit_ids_for_simple(
         "}"
     )
     try:
-        data = client.graphql(query, {"id": event_id})
+        _dbg(f"query audit event products for event_id={event_id}")
+        data = client.graphql_audit(query, {"id": event_id})
         ev = (data or {}).get("event") or {}
         nodes = ((ev.get("products") or {}).get("nodes")) or []
+        _dbg(f"audit event products returned {len(nodes)} nodes")
+        if trace is not None:
+            trace.append(f"audit event(id) returned {len(nodes)} products")
         # pick matching betType; prefer OPEN
         cand = None
         for n in nodes:
             bt = ((n.get("betType") or {}) or {}).get("code")
             selling_status = ((n.get("selling") or {}) or {}).get("status")
             if (bt or "").upper() == (bet_type or "").upper():
-                if (selling_status or "").upper() == "OPEN":
+                ss = (selling_status or "").upper()
+                if ss in ("OPEN", "SELLING"):
                     cand = n; break
                 cand = cand or n
+        # If we couldn't find a candidate by event id, try a date/venue match via products() list
         if not cand:
+            _dbg("no audit product via event(id); trying products(date, betTypes) match by venue/time")
+            try:
+                # First, fetch live product context to get venue/start when event_id mapping may differ across environments
+                live_client = ToteClient()  # live
+                q_live = (
+                    "query Product($id: String){ product(id:$id){ ... on BettingProduct { betType{ code } legs{ nodes{ event{ venue{ name } scheduledStartDateTime{ iso8601 } } } } } } }"
+                )
+                d_live = live_client.graphql(q_live, {"id": live_product_id})
+                prod_live = d_live.get("product") or {}
+                bt_live = (((prod_live.get("betType") or {}).get("code")) or bet_type)
+                legs_live = ((prod_live.get("legs") or {}).get("nodes")) or []
+                v_name = None; start_iso = None
+                if legs_live:
+                    evl = (legs_live[0].get("event") or {})
+                    v_name = ((evl.get("venue") or {}).get("name"))
+                    start_iso = ((evl.get("scheduledStartDateTime") or {}).get("iso8601"))
+                _dbg(f"live context: venue={v_name}, start_iso={start_iso}, bt={bt_live}")
+                if trace is not None:
+                    trace.append(f"live product context: venue={v_name}, start={start_iso}, bet_type={bt_live}")
+                # Fallback: if missing, use existing inputs
+                bt_code = (bt_live or bet_type or "").upper()
+                date_part = (start_iso or "")[:10]
+                # Query audit products for that date and bet type
+                q_audit = (
+                    "query GetProducts($date: Date, $betTypes: [BetTypeCode!], $first: Int){\n"
+                    "  products(date:$date, betTypes:$betTypes, first:$first){ nodes{ id ... on BettingProduct { betType{ code } selling{ status } legs{ nodes{ id event{ venue{ name } scheduledStartDateTime{ iso8601 } } selections{ nodes{ id eventCompetitor{ __typename ... on HorseRacingEventCompetitor{ clothNumber } ... on GreyhoundRacingEventCompetitor{ trapNumber } } competitor{ details{ __typename ... on HorseDetails{ clothNumber } ... on GreyhoundDetails{ trapNumber } } } } } } } } }\n"
+                    "}"
+                )
+                vars = {"date": date_part or None, "betTypes": [bt_code] if bt_code else None, "first": 200}
+                _dbg(f"query audit products for date={date_part}, betTypes={[bt_code] if bt_code else None}")
+                d_a = client.graphql_audit(q_audit, vars)
+                nodes2 = ((d_a.get("products") or {}).get("nodes")) or []
+                _dbg(f"audit products returned {len(nodes2)} candidates for betType {bt_code}")
+                if trace is not None:
+                    trace.append(f"audit products(date, betTypes) candidates: {len(nodes2)}")
+                # Match by venue name (case-insensitive) and exact start time if available
+                for n in nodes2:
+                    bt2 = ((n.get("betType") or {}).get("code") or "").upper()
+                    if bt2 != bt_code:
+                        continue
+                    legs2 = ((n.get("legs") or {}).get("nodes")) or []
+                    if not legs2:
+                        continue
+                    ev2 = (legs2[0].get("event") or {})
+                    v2 = ((ev2.get("venue") or {}).get("name") or "")
+                    s2 = ((ev2.get("scheduledStartDateTime") or {}).get("iso8601") or "")
+                    ok = True
+                    if v_name and v2 and (v_name.strip().lower() != v2.strip().lower()):
+                        ok = False
+                    # Allow exact match, or minute-level match, or within ~2 hours if venue matches
+                    if start_iso and s2:
+                        if start_iso == s2:
+                            pass
+                        elif start_iso[:16] == s2[:16]:  # match to minute
+                            pass
+                        else:
+                            # Last resort: accept if within ~120 minutes
+                            try:
+                                from datetime import datetime
+                                fmt = "%Y-%m-%dT%H:%M:%S%z" if "+" in s2[-6:] else "%Y-%m-%dT%H:%M:%SZ"
+                                t_live = datetime.strptime(start_iso.replace("Z","+0000"), "%Y-%m-%dT%H:%M:%S%z")
+                                t_a = datetime.strptime(s2.replace("Z","+0000"), "%Y-%m-%dT%H:%M:%S%z")
+                                delta_min = abs((t_live - t_a).total_seconds()) / 60.0
+                                if delta_min > 120:
+                                    ok = False
+                            except Exception:
+                                ok = False
+                    if ok:
+                        cand = n; break
+                # If still nothing, relax venue match and use runner number presence near time
+                if not cand and (runner_num is not None) and start_iso:
+                    try:
+                        from datetime import datetime
+                        t_live = datetime.strptime(start_iso.replace("Z","+0000"), "%Y-%m-%dT%H:%M:%S%z")
+                    except Exception:
+                        t_live = None
+                    for n in nodes2:
+                        bt2 = ((n.get("betType") or {}).get("code") or "").upper()
+                        if bt2 != bt_code:
+                            continue
+                        legs2 = ((n.get("legs") or {}).get("nodes")) or []
+                        if not legs2:
+                            continue
+                        ev2 = (legs2[0].get("event") or {})
+                        s2 = ((ev2.get("scheduledStartDateTime") or {}).get("iso8601") or "")
+                        within = False
+                        if t_live and s2:
+                            try:
+                                t_a = datetime.strptime(s2.replace("Z","+0000"), "%Y-%m-%dT%H:%M:%S%z")
+                                within = abs((t_live - t_a).total_seconds())/60.0 <= 180
+                            except Exception:
+                                within = False
+                        if not within and start_iso and s2 and (start_iso[:16] == s2[:16]):
+                            within = True
+                        if not within:
+                            continue
+                        # Check selections for matching runner number
+                        sels2 = ((legs2[0].get("selections") or {}).get("nodes")) or []
+                        for s in sels2:
+                            # prefer modern eventCompetitor then legacy details
+                            nnum = None
+                            try:
+                                evc2 = (s.get("eventCompetitor") or {})
+                                tnm = evc2.get("__typename")
+                                if tnm == "HorseRacingEventCompetitor": nnum = evc2.get("clothNumber")
+                                elif tnm == "GreyhoundRacingEventCompetitor": nnum = evc2.get("trapNumber")
+                            except Exception:
+                                nnum = None
+                            if nnum is None:
+                                det2 = ((s.get("competitor") or {}).get("details") or {})
+                                tnm2 = det2.get("__typename")
+                                if tnm2 == "HorseDetails": nnum = det2.get("clothNumber")
+                                elif tnm2 == "GreyhoundDetails": nnum = det2.get("trapNumber")
+                            try:
+                                if nnum is not None and int(nnum) == runner_num:
+                                    cand = n; break
+                            except Exception:
+                                pass
+                        if cand:
+                            break
+            except Exception:
+                cand = None
+        if not cand:
+            _dbg("no audit product candidate matched by venue/time")
+            if trace is not None:
+                trace.append("no audit product matched by venue/time window")
             return None
         audit_pid = cand.get("id")
         legs = ((cand.get("legs") or {}).get("nodes")) or []
         if not legs:
+            _dbg("audit product has no legs")
+            if trace is not None:
+                trace.append("audit product has no legs")
             return None
         # Assume first leg and map by runner number
         leg = legs[0]
         audit_plid = leg.get("id")
+        _dbg(f"audit candidate product_id={audit_pid}, product_leg_id={audit_plid}")
+        if trace is not None:
+            trace.append(f"audit candidate: product_id={audit_pid}, product_leg_id={audit_plid}")
         sels = ((leg.get("selections") or {}).get("nodes")) or []
         audit_sid = None
+        # First, try to match by runner number if available
         for s in sels:
-            det = ((s.get("competitor") or {}).get("details") or {})
-            n = det.get("clothNumber") if det.get("__typename") == "HorseDetails" else det.get("trapNumber")
+            # Try modern eventCompetitor fields first
+            evc = (s.get("eventCompetitor") or {})
+            n = None
             try:
-                if n is not None and int(n) == runner_num:
+                tnm = evc.get("__typename")
+                if tnm == "HorseRacingEventCompetitor":
+                    n = evc.get("clothNumber")
+                elif tnm == "GreyhoundRacingEventCompetitor":
+                    n = evc.get("trapNumber")
+            except Exception:
+                n = None
+            # Fallback to legacy competitor.details
+            if n is None:
+                det = ((s.get("competitor") or {}).get("details") or {})
+                tnm2 = det.get("__typename")
+                if tnm2 == "HorseDetails":
+                    n = det.get("clothNumber")
+                elif tnm2 == "GreyhoundDetails":
+                    n = det.get("trapNumber")
+            try:
+                if (runner_num is not None) and (n is not None) and int(n) == runner_num:
                     audit_sid = s.get("id"); break
             except Exception:
                 continue
+        # If number-based matching failed, try name-based matching
+        if not audit_sid and runner_name:
+            _dbg(f"number match failed; trying name match for '{runner_name}'")
+            rn = str(runner_name).strip().lower()
+            for s in sels:
+                name_candidates = []
+                try:
+                    name_candidates.append((s.get("name") or ""))
+                except Exception:
+                    pass
+                try:
+                    name_candidates.append(((s.get("eventCompetitor") or {}).get("name") or ""))
+                except Exception:
+                    pass
+                try:
+                    name_candidates.append(((s.get("competitor") or {}).get("name") or ""))
+                except Exception:
+                    pass
+                for nm in name_candidates:
+                    if nm and str(nm).strip().lower() == rn:
+                        audit_sid = s.get("id"); break
+                if audit_sid:
+                    break
         if not (audit_pid and audit_plid and audit_sid):
+            _dbg("could not resolve audit selection id")
+            if trace is not None:
+                trace.append("could not resolve audit selection id from candidates")
             return None
+        _dbg(f"resolved audit mapping: product={audit_pid}, leg={audit_plid}, sel={audit_sid}")
+        if trace is not None:
+            trace.append("success: mapped to audit product/leg/selection")
         return {"product_id": audit_pid, "product_leg_id": audit_plid, "selection_id": audit_sid}
-    except Exception:
+    except Exception as e:
+        _dbg(f"audit mapping exception: {e}")
+        if trace is not None:
+            trace.append(f"exception during audit mapping: {e}")
         return None
 
 
@@ -252,6 +523,11 @@ def place_audit_simple_bet(
                 print(f"[AuditBet] ID mapping -> product:{used_product_id} leg:{used_product_leg_id} sel:{used_selection_id}")
             except Exception:
                 pass
+        else:
+            try:
+                print("[AuditBet] ID mapping failed; using live IDs against audit endpoint (likely to be rejected)")
+            except Exception:
+                pass
     # When querying product legs for audit, prefer the audit endpoint to avoid ID mismatches
     # (product and leg IDs should be the same, but Tote recommends querying from audit when testing)
 
@@ -266,7 +542,17 @@ def place_audit_simple_bet(
                 client = ToteClient()
                 # Default to audit unless explicitly live
                 if mode != 'live':
-                    client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
+                    from ..config import cfg
+                    if cfg.tote_audit_graphql_url:
+                        client.base_url = cfg.tote_audit_graphql_url.strip()
+
+            # Helper to choose live vs audit executor explicitly
+            def _exec(query: str, variables: dict):
+                if str(mode).lower() == 'live':
+                    # Keep Authorization for live placement to satisfy auth
+                    return client.graphql(query, variables, keep_auth=True)
+                else:
+                    return client.graphql_audit(query, variables)
 
             # Try v1 first for audit compatibility
             mutation_v1 = """
@@ -278,7 +564,7 @@ def place_audit_simple_bet(
             """
             variables_v1 = {"input": {"ticketId": f"ticket-{uuid.uuid4()}", "bets": [bet_v1]}}
             try:
-                resp = client.graphql_audit(mutation_v1, variables_v1)
+                resp = _exec(mutation_v1, variables_v1)
                 sent_variables = variables_v1; used_schema = "v1"
             except Exception as e1:
                 # Fallback to v2
@@ -291,7 +577,7 @@ def place_audit_simple_bet(
                 """
                 variables_v2 = {"input": {"bets": [bet_v2]}}
                 try:
-                    resp = client.graphql_audit(mutation_v2, variables_v2)
+                    resp = _exec(mutation_v2, variables_v2)
                     sent_variables = variables_v2; used_schema = "v2"
                 except Exception as e2:
                     err = str(e2)
@@ -313,7 +599,9 @@ def place_audit_simple_bet(
                 if isinstance(results, list) and results:
                     placement_status = results[0].get("status"); failure_reason = results[0].get("failureReason")
             else:
-                ticket = ((resp.get("placeBets") or {}).get("ticket")) or ((resp.get("ticket")) if "ticket" in resp else None)
+                # Support both sync and async payload containers
+                container = (resp.get("placeBets") or resp.get("placeBetsAsync") or resp)
+                ticket = (container.get("ticket") if isinstance(container, dict) else None) or ((resp.get("ticket")) if "ticket" in resp else None)
                 if ticket and isinstance(ticket, dict):
                     bets_node = ((ticket.get("bets") or {}).get("nodes"))
                     if isinstance(bets_node, list) and bets_node:
@@ -343,6 +631,7 @@ def place_audit_superfecta(
     placement_product_id: Optional[str] = None,
     mode: str = "audit",
     client: ToteClient | None = None,
+    line_amounts: Optional[Dict[str, float]] = None,  # optional per-line stake mapping
 ) -> Dict[str, Any]:
     """Audit-mode Superfecta bet. Supports single selection or a list (multiple bets).
 
@@ -360,10 +649,18 @@ def place_audit_superfecta(
     # Calculate per-line stake
     num_lines = len(bet_lines)
     line_stake = 0.0
-    if (stake_type or "total").lower() == "line":
+    use_weighted = bool(line_amounts)
+    if use_weighted:
+        # sanitize mapping keys
+        try:
+            line_amounts = {str(k).strip(): float(v) for k, v in (line_amounts or {}).items() if k and v is not None}
+        except Exception:
+            line_amounts = {str(k): float(v) for k, v in (line_amounts or {}).items() if v is not None}
+    if (stake_type or "total").lower() == "line" and not use_weighted:
         line_stake = float(stake)
-    else:  # 'total'
-        line_stake = float(stake) / num_lines if num_lines > 0 else 0.0
+    else:
+        # 'total' split evenly only when no weighted stakes provided
+        line_stake = (float(stake) / num_lines) if (num_lines > 0 and not use_weighted) else 0.0
 
     # Map selection strings to GraphQL legs structure using tote_product_selections
     by_number: Dict[int, str] = {}
@@ -410,11 +707,24 @@ def place_audit_superfecta(
             query_client = ToteClient()  # live
             query = """
             query ProductLegs($id: String){
-              product(id: $id){
-                ... on BettingProduct {
-                  legs{ nodes{ id selections{ nodes{ id competitor{ name details{ __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } } } }
+                product(id: $id) {
+                    ... on BettingProduct {
+                        legs {
+                            nodes {
+                                id
+                                selections {
+                                    nodes {
+                                        id
+                                        eventCompetitor {
+                                            ... on HorseRacingEventCompetitor { clothNumber }
+                                            ... on GreyhoundRacingEventCompetitor { trapNumber }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-              }
             }
             """
             data = query_client.graphql(query, {"id": product_id})
@@ -427,9 +737,10 @@ def place_audit_superfecta(
                 sels = ((legs[0].get("selections") or {}).get("nodes")) or []
                 for sel in sels:
                     sid = sel.get("id")
-                    comp = (sel.get("competitor") or {})
-                    det = (comp.get("details") or {})
-                    n = det.get("clothNumber") if det.get("__typename") == "HorseDetails" else det.get("trapNumber")
+                    # Use new `eventCompetitor` structure
+                    event_comp = sel.get("eventCompetitor") or {}
+                    n = event_comp.get("clothNumber") or event_comp.get("trapNumber")
+
                     try:
                         if n is not None:
                             n_int = int(n)
@@ -442,7 +753,7 @@ def place_audit_superfecta(
                                         "leg_index": li,
                                         "product_leg_id": product_leg_id,
                                         "selection_id": sid,
-                                        "competitor": comp.get("name"),
+                                        "competitor": None, # Name is not needed for this mapping
                                         "number": n_int,
                                     }
                                 ])
@@ -454,12 +765,143 @@ def place_audit_superfecta(
             print(f"[AuditBet] API fallback error: {e}")
             pass
     print(f"[AuditBet] by_number after API fallback: {by_number}")
-    # Choose product id used for placement (may differ if caller overrides)
-    # Always use the real product ID for audit; schema/IDs are the same as live
+    # Determine placement IDs based on mode
     used_product_id = (placement_product_id or product_id)
-
-    # Use the real productLegId obtained from DB/API for both live and audit
     audit_product_leg_id = product_leg_id
+    by_number_map: Dict[int, str] = dict(by_number)
+    if str(mode).lower() == "audit":
+        # Resolve the corresponding audit product and build a number->selectionID map from audit
+        audit_pid: Optional[str] = None
+        audit_plid: Optional[str] = None
+        by_number_audit: Dict[int, str] = {}
+        try:
+            # Get event/bet_type context from BQ
+            ctx = _bq_query_rows(
+                sink,
+                "SELECT event_id, bet_type FROM tote_products WHERE product_id=@pid LIMIT 1",
+                {"pid": product_id},
+            )
+            ev_id = (ctx[0] or {}).get("event_id") if ctx else None
+            bt_code = ((ctx[0] or {}).get("bet_type") or "").upper() if ctx else None
+            # Get live product venue/start to help match on audit if event id differs
+            v_name = None; start_iso = None
+            try:
+                live_client = ToteClient()  # live
+                q_live = (
+                    "query Product($id: String){ product(id:$id){ ... on BettingProduct { betType{ code } legs{ nodes{ event{ venue{ name } scheduledStartDateTime{ iso8601 } } } } } } }"
+                )
+                d_live = live_client.graphql(q_live, {"id": product_id})
+                prod_live = d_live.get("product") or {}
+                legs_live = ((prod_live.get("legs") or {}).get("nodes")) or []
+                if legs_live:
+                    evl = (legs_live[0].get("event") or {})
+                    v_name = ((evl.get("venue") or {}).get("name"))
+                    start_iso = ((evl.get("scheduledStartDateTime") or {}).get("iso8601"))
+                bt_code = (bt_code or (((prod_live.get("betType") or {}).get("code")) or "")).upper()
+            except Exception:
+                pass
+
+            audit_client = ToteClient()
+            cand = None
+            # Try event(id) on audit first
+            if ev_id:
+                q_ev = (
+                    "query GetEvent($id: String){ event(id:$id){ products{ nodes{ id ... on BettingProduct { betType{ code } selling{ status } legs{ nodes{ id selections{ nodes{ id eventCompetitor{ __typename ... on HorseRacingEventCompetitor{ clothNumber } ... on GreyhoundRacingEventCompetitor{ trapNumber } } competitor{ details{ __typename ... on HorseDetails{ clothNumber } ... on GreyhoundDetails{ trapNumber } } } } } } } } } } }"
+                )
+                try:
+                    d_ev = audit_client.graphql_audit(q_ev, {"id": ev_id})
+                    nodes = (((d_ev.get("event") or {}).get("products") or {}).get("nodes")) or []
+                    for n in nodes:
+                        bt = ((n.get("betType") or {}).get("code") or "").upper()
+                        ss = ((n.get("selling") or {}).get("status") or "").upper()
+                        if bt == bt_code and ss in ("OPEN","SELLING"):
+                            cand = n; break
+                        if bt == bt_code and not cand:
+                            cand = n
+                except Exception:
+                    cand = None
+            # Fallback: audit products(date, betTypes) matched by venue/time
+            if not cand:
+                try:
+                    date_part = (start_iso or "")[:10]
+                    q_list = (
+                        "query GetProducts($date: Date, $betTypes: [BetTypeCode!], $first: Int){ products(date:$date, betTypes:$betTypes, first:$first){ nodes{ id ... on BettingProduct { betType{ code } selling{ status } legs{ nodes{ id event{ venue{ name } scheduledStartDateTime{ iso8601 } } selections{ nodes{ id eventCompetitor{ __typename ... on HorseRacingEventCompetitor{ clothNumber } ... on GreyhoundRacingEventCompetitor{ trapNumber } } competitor{ details{ __typename ... on HorseDetails{ clothNumber } ... on GreyhoundDetails{ trapNumber } } } } } } } } } }"
+                    )
+                    vars = {"date": date_part or None, "betTypes": [bt_code] if bt_code else None, "first": 300}
+                    d_list = audit_client.graphql_audit(q_list, vars)
+                    nodes2 = ((d_list.get("products") or {}).get("nodes")) or []
+                    for n in nodes2:
+                        bt = ((n.get("betType") or {}).get("code") or "").upper()
+                        if bt != bt_code:
+                            continue
+                        legs2 = ((n.get("legs") or {}).get("nodes")) or []
+                        if not legs2:
+                            continue
+                        ev2 = (legs2[0].get("event") or {})
+                        v2 = ((ev2.get("venue") or {}).get("name") or "")
+                        s2 = ((ev2.get("scheduledStartDateTime") or {}).get("iso8601") or "")
+                        ok = True
+                        if v_name and v2 and (v_name.strip().lower() != v2.strip().lower()):
+                            ok = False
+                        if start_iso and s2:
+                            if start_iso == s2 or start_iso[:16] == s2[:16]:
+                                pass
+                            else:
+                                try:
+                                    from datetime import datetime
+                                    t_live = datetime.strptime(start_iso.replace("Z","+0000"), "%Y-%m-%dT%H:%M:%S%z")
+                                    t_a = datetime.strptime(s2.replace("Z","+0000"), "%Y-%m-%dT%H:%M:%S%z")
+                                    if abs((t_live - t_a).total_seconds())/60.0 > 120:
+                                        ok = False
+                                except Exception:
+                                    ok = False
+                        if ok:
+                            cand = n; break
+                except Exception:
+                    cand = None
+
+            if cand:
+                audit_pid = cand.get("id")
+                legs_a = ((cand.get("legs") or {}).get("nodes")) or []
+                if legs_a:
+                    audit_plid = legs_a[0].get("id")
+                    sels_a = ((legs_a[0].get("selections") or {}).get("nodes")) or []
+                    for s in sels_a:
+                        # prefer modern eventCompetitor then legacy details
+                        n = None
+                        try:
+                            evc = (s.get("eventCompetitor") or {})
+                            tnm = evc.get("__typename")
+                            if tnm == "HorseRacingEventCompetitor": n = evc.get("clothNumber")
+                            elif tnm == "GreyhoundRacingEventCompetitor": n = evc.get("trapNumber")
+                        except Exception:
+                            n = None
+                        if n is None:
+                            det = ((s.get("competitor") or {}).get("details") or {})
+                            tnm2 = det.get("__typename")
+                            if tnm2 == "HorseDetails": n = det.get("clothNumber")
+                            elif tnm2 == "GreyhoundDetails": n = det.get("trapNumber")
+                        try:
+                            if n is not None:
+                                by_number_audit[int(n)] = s.get("id")
+                        except Exception:
+                            pass
+        except Exception:
+            audit_pid = None
+
+        if audit_pid and audit_plid and by_number_audit:
+            used_product_id = audit_pid
+            audit_product_leg_id = audit_plid
+            by_number_map = by_number_audit
+            try:
+                print(f"[AuditBet] Audit mapping -> product:{used_product_id} leg:{audit_product_leg_id} selections:{len(by_number_map)}")
+            except Exception:
+                pass
+        else:
+            try:
+                print("[AuditBet] Audit mapping failed; using live IDs for audit (may be rejected)")
+            except Exception:
+                pass
 
     # --- Helper function to convert a line string to GraphQL leg structure ---
     def _line_to_legs(line: str) -> Optional[Dict[str, Any]]:
@@ -470,7 +912,7 @@ def place_audit_superfecta(
             sels: List[Dict[str, Any]] = []
             for pos, num in enumerate(parts[:4], start=1):
                 # Always use the mapped selection ID for both live and audit
-                sid = by_number.get(int(num))
+                sid = by_number_map.get(int(num))
                 if not sid:
                     return None
                 sels.append({"productLegSelectionID": sid, "position": pos})
@@ -524,11 +966,18 @@ def place_audit_superfecta(
     # Build bets arrays for both schema variants
     # v2 (docs/tote_queries.graphql): PlaceBetsInput with results[]
     bets_v2: List[Dict[str, Any]] = []
-    for lg in legs: # Use the processed legs
+    for idx, lg in enumerate(legs): # Use the processed legs
+        ln_str = bet_lines[idx] if idx < len(bet_lines) else None
+        amt = line_stake
+        if use_weighted and ln_str is not None:
+            try:
+                amt = float((line_amounts or {}).get(ln_str, 0.0))
+            except Exception:
+                amt = 0.0
         bet_obj = {
             "productId": used_product_id,
             "stake": {
-                "amount": {"decimalAmount": line_stake},
+                "amount": {"decimalAmount": amt},
                 "currency": currency,
             },
             "legs": [lg] if lg else [],
@@ -536,10 +985,24 @@ def place_audit_superfecta(
         bets_v2.append({"bet": bet_obj})
     payload_v2 = {"bets": bets_v2}
 
-    # v1 (ticket schema): for Superfecta use totalAmount per bet (not lineAmount)
+    # v1 (ticket schema): Superfecta stake uses totalAmount by default (toggle to lineAmount via env)
     bets_v1: List[Dict[str, Any]] = []
-    for lg in legs: # Use the processed legs
-        stake_obj = {"currencyCode": currency, "totalAmount": line_stake}
+    stake_field_env = (os.getenv("TOTE_SUPERFECTA_STAKE_FIELD", "totalAmount").strip().lower())
+    # Force per-line stake field when weighted amounts are provided
+    stake_field = ("lineamount" if use_weighted else stake_field_env)
+    for idx, lg in enumerate(legs): # Use the processed legs
+        ln_str = bet_lines[idx] if idx < len(bet_lines) else None
+        amt = line_stake
+        if use_weighted and ln_str is not None:
+            try:
+                amt = float((line_amounts or {}).get(ln_str, 0.0))
+            except Exception:
+                amt = 0.0
+        stake_obj = {"currencyCode": currency}
+        if stake_field == "lineamount":
+            stake_obj["lineAmount"] = amt
+        else:
+            stake_obj["totalAmount"] = amt
         bets_v1.append({
             "betId": f"bet-superfecta-{uuid.uuid4()}",
             "productId": used_product_id,
@@ -554,57 +1017,84 @@ def place_audit_superfecta(
         try:
             if not client:
                 client = ToteClient()
-                # Default to audit unless explicitly live
-                if mode != 'live':
-                    client.base_url = "https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/"
-
-            # Try v1 (ticket) first for compatibility with audit endpoint
+            is_live = str(mode).lower() == 'live'
+            # Build v1 mutation per Tote docs for Superfecta (sync)
             mutation_v1 = """
-            mutation PlaceBets($input: PlaceBetsInput!) {
+            mutation PlaceSuperfectaBet($input: PlaceBetsInput!) {
               placeBets(input:$input){
                 ticket{
                   id
                   toteId
-                  idempotent
-                  bets{
-                    nodes{
-                      id
-                      toteId
-                      placement{ status rejectionReason }
-                    }
-                  }
+                  bets{ nodes{ id toteId betType{ code } placement{ status rejectionReason legs{ productLegId selections{ productLegSelectionID position } } } } }
+                }
+              }
+            }
+            """
+            # Build v1 async mutation for large multi-bet tickets
+            mutation_v1_async = """
+            mutation PlaceSuperfectaBetAsync($input: PlaceBetsAsyncInput!) {
+              placeBetsAsync(input:$input){
+                ticket{
+                  id
+                  toteId
+                  bets{ nodes{ id toteId betType{ code } placement{ status rejectionReason legs{ productLegId selections{ productLegSelectionID position } } } } }
                 }
               }
             }
             """
             variables_v1 = {"input": {"ticketId": f"ticket-{uuid.uuid4()}", "bets": bets_v1}}
-            try:
-                resp = client.graphql_audit(mutation_v1, variables_v1)
-                used_schema = "v1"
-                sent_variables = variables_v1
-            except Exception as e1:
-                # Fallback to v2 (results[])
-                mutation_v2 = """
-                mutation PlaceBets($input: PlaceBetsInput!) {
-                  placeBets(input: $input) {
-                    results { toteBetId status failureReason }
-                  }
-                }
-                """
-                variables_v2 = {"input": payload_v2}
+            # Prefer v1 for live superfecta to ensure positions are honoured
+            if is_live:
                 try:
-                    resp = client.graphql_audit(mutation_v2, variables_v2)
-                    used_schema = "v2"
-                    sent_variables = variables_v2
-                except Exception as e2:
-                    err = str(e2)
+                    # Emit debug of the exact mutation + variables for comparison with docs
                     try:
-                        print("[AuditBet][ERROR] v1 variables:", json.dumps(variables_v1)[:400])
-                        print("[AuditBet][ERROR] v1 exception:", str(e1))
-                        print("[AuditBet][ERROR] v2 variables:", json.dumps(variables_v2)[:400])
-                        print("[AuditBet][ERROR] v2 exception:", err)
+                        print("[LiveSuperfecta][DEBUG] mutation:")
+                        # Choose which mutation to log based on sync/async decision
+                        print((mutation_v1_async if (len(bets_v1) > 100 or str(os.getenv("TOTE_USE_ASYNC","0")).lower() in ("1","true","yes","on")) else mutation_v1).strip())
+                        print("[LiveSuperfecta][DEBUG] variables:", json.dumps(variables_v1, indent=2)[:2000])
                     except Exception:
                         pass
+                    # Use async endpoint when exceeding sync limit (100 bets) or when forced via env toggle
+                    use_async = (len(bets_v1) > 100) or (str(os.getenv("TOTE_USE_ASYNC","0")).lower() in ("1","true","yes","on"))
+                    if use_async:
+                        print("[LiveSuperfecta][INFO] Using async endpoint due to large bet count")
+                        resp = client.graphql(mutation_v1_async, variables_v1, keep_auth=True)
+                    else:
+                        resp = client.graphql(mutation_v1, variables_v1, keep_auth=True)
+                    used_schema = "v1"; sent_variables = variables_v1
+                except Exception as e1:
+                    err = str(e1)
+                    try:
+                        print("[AuditBet][ERROR] live superfecta v1 variables:", json.dumps(variables_v1)[:400])
+                        print("[AuditBet][ERROR] live superfecta v1 exception:", err)
+                    except Exception:
+                        pass
+            else:
+                # Audit or other modes: keep v1-first with v2 fallback
+                try:
+                    resp = client.graphql_audit(mutation_v1, variables_v1)
+                    used_schema = "v1"; sent_variables = variables_v1
+                except Exception as e1:
+                    mutation_v2 = """
+                    mutation PlaceBets($input: PlaceBetsInput!) {
+                      placeBets(input: $input) {
+                        results { toteBetId status failureReason }
+                      }
+                    }
+                    """
+                    variables_v2 = {"input": payload_v2}
+                    try:
+                        resp = client.graphql_audit(mutation_v2, variables_v2)
+                        used_schema = "v2"; sent_variables = variables_v2
+                    except Exception as e2:
+                        err = str(e2)
+                        try:
+                            print("[AuditBet][ERROR] v1 variables:", json.dumps(variables_v1)[:400])
+                            print("[AuditBet][ERROR] v1 exception:", str(e1))
+                            print("[AuditBet][ERROR] v2 variables:", json.dumps(variables_v2)[:400])
+                            print("[AuditBet][ERROR] v2 exception:", err)
+                        except Exception:
+                            pass
         except Exception as e:
             err = str(e)
             try:
@@ -624,14 +1114,58 @@ def place_audit_superfecta(
                     placement_status = results[0].get("status")
                     failure_reason = results[0].get("failureReason")
             else:
-                ticket = ((resp.get("placeBets") or {}).get("ticket")) or ((resp.get("ticket")) if "ticket" in resp else None)
+                # Support both sync and async payload containers
+                container = (resp.get("placeBets") or resp.get("placeBetsAsync") or resp)
+                ticket = (container.get("ticket") if isinstance(container, dict) else None) or ((resp.get("ticket")) if "ticket" in resp else None)
                 if ticket and isinstance(ticket, dict):
                     bets_node = ((ticket.get("bets") or {}).get("nodes"))
                     if isinstance(bets_node, list) and bets_node:
+                        try:
+                            # Log how many bets Tote created on the ticket for visibility
+                            print(f"[LiveSuperfecta][DEBUG] ticket.toteId={ticket.get('toteId') or ticket.get('id')} bets_count={len(bets_node)}")
+                            btcode = ((bets_node[0].get('betType') or {}).get('code'))
+                            if btcode:
+                                print(f"[LiveSuperfecta][DEBUG] betType.code={btcode}")
+                            # Also log positions returned on placement legs
+                            pls = ((bets_node[0].get('placement') or {}).get('legs')) or []
+                            if pls:
+                                positions = []
+                                try:
+                                    for lg in pls:
+                                        for s in (lg.get('selections') or []):
+                                            positions.append(s.get('position'))
+                                except Exception:
+                                    positions = []
+                                if positions:
+                                    print(f"[LiveSuperfecta][DEBUG] placement.positions={positions}")
+                        except Exception:
+                            pass
                         placement = (bets_node[0].get("placement") or {})
                         placement_status = placement.get("status")
                         # Rejection reason (if available on placement)
                         failure_reason = placement.get("rejectionReason") or failure_reason
+                        # Optional: fetch full ticket details to validate server-side interpretation
+                        try:
+                            tid = ticket.get("toteId") or ticket.get("id")
+                            if tid and str(mode).lower() == 'live':
+                                client2 = client or ToteClient()
+                                q = """
+                                query Ticket($id: ID!){
+                                  ticket(id:$id){ id toteId bets{ nodes{ id toteId betType{ code } placement{ status legs{ productLegId selections{ productLegSelectionID position } } } } } }
+                                }
+                                """
+                                d2 = client2.graphql(q, {"id": tid})
+                                t2 = (d2.get("ticket") or {})
+                                nodes2 = ((t2.get("bets") or {}).get("nodes")) or []
+                                if nodes2:
+                                    try:
+                                        bt2 = ((nodes2[0].get('betType') or {}).get('code'))
+                                        pos2 = [s.get('position') for lg in ((nodes2[0].get('placement') or {}).get('legs') or []) for s in (lg.get('selections') or [])]
+                                        print(f"[LiveSuperfecta][TRACE] server betType.code={bt2} positions={pos2}")
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
     except Exception:
         placement_status = None
     # Record synthetic audit entry (for multiples, join selections)
@@ -648,6 +1182,7 @@ def place_audit_superfecta(
         "stake": stake,
         "currency": currency,
         "variables": sent_variables,
+        "mutation": (mutation_v1.strip() if 'mutation_v1' in locals() else None),
     }
     bet_id = f"{product_id}:{_now_ms()}"
     _record_audit_bq(
@@ -749,7 +1284,9 @@ def refresh_bet_status(sink, *, bet_id: str, post: bool = False) -> Dict[str, An
         if resp_json:
             d = json.loads(resp_json)
             resp = d.get("response") or {}
-            ticket = (resp.get("placeBets") or {}).get("ticket")
+            # Handle both sync and async placement payloads
+            container = (resp.get("placeBets") or resp.get("placeBetsAsync") or resp)
+            ticket = (container.get("ticket") if isinstance(container, dict) else None)
             if ticket and isinstance(ticket, dict):
                 nodes = (ticket.get("bets") or {}).get("nodes") or []
                 if nodes:
@@ -775,7 +1312,8 @@ def refresh_bet_status(sink, *, bet_id: str, post: bool = False) -> Dict[str, An
             if str(mode).lower() == "audit":
                 status_payload = client.graphql_audit(query, {"id": provider_id})
             else:
-                status_payload = client.graphql(query, {"id": provider_id})
+                # Keep Authorization for live status checks to avoid 401s
+                status_payload = client.graphql(query, {"id": provider_id}, keep_auth=True)
         except Exception as e:
             err = str(e)
 

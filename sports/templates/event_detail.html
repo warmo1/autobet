@@ -167,6 +167,43 @@
 {% block scripts %}
 <script>
 document.addEventListener('DOMContentLoaded', function(){
+  // Live status updates for this event
+  try {
+    const eid = "{{ event.event_id }}";
+    if (eid) {
+      const qs = new URLSearchParams({ topics: 'event_status_changed,product_status_changed', events: eid });
+      const es = new EventSource(`/stream?${qs.toString()}`);
+      const setHeaderStatus = function(status){
+        try {
+          const small = document.querySelector('.card-body .small.text-muted');
+          if (!small) return;
+          // Replace the trailing "Status: ..." part
+          const txt = small.textContent || '';
+          const parts = txt.split('•');
+          for (let i=0;i<parts.length;i++){
+            if (parts[i].trim().toUpperCase().startsWith('STATUS:')){
+              parts[i] = ` Status: ${status}`;
+              break;
+            }
+          }
+          small.textContent = parts.join(' • ');
+        } catch (e) {}
+      };
+      es.addEventListener('event_status_changed', function(ev){
+        try{ const d = JSON.parse(ev.data); if (d && d.status !== undefined) setHeaderStatus(d.status); }catch(e){}
+      });
+      es.addEventListener('product_status_changed', function(ev){
+        try{
+          const d = JSON.parse(ev.data);
+          const st = String(d.status || '').toUpperCase();
+          if (st === 'OPEN') setHeaderStatus('OPEN');
+          if (st === 'CLOSED' && String(d.bet_type || '').toUpperCase() === 'WIN') setHeaderStatus('CLOSED');
+        }catch(e){}
+      });
+      es.onerror = function(){};
+    }
+  } catch (e) {}
+
   const btn = document.getElementById('btn-refresh-pools');
   if (!btn) return;
   btn.addEventListener('click', async () => {

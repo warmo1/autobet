@@ -9,6 +9,7 @@ import os
 import threading
 
 from ..config import cfg
+from urllib.parse import urljoin
 
 
 class ToteError(RuntimeError):
@@ -23,42 +24,72 @@ class ToteClient:
     - cfg.tote_graphql_url: HTTPS GraphQL endpoint base (required)
     """
 
-    def __init__(self, *, timeout: float = 15.0, max_retries: int = 2) -> None:
-        if not cfg.tote_graphql_url:
+    def __init__(self, *, timeout: float = 15.0, max_retries: int = 2, base_url: Optional[str] = None, api_key: Optional[str] = None) -> None:
+        if not (base_url or cfg.tote_graphql_url):
             raise ToteError("TOTE_GRAPHQL_URL is not configured")
-        if not cfg.tote_api_key:
+        if not (api_key or cfg.tote_api_key):
             raise ToteError("TOTE_API_KEY is not configured")
-        # Normalize base URL. Some deployments expose HTTP GraphQL at /partner/graphql/
-        # while WebSocket subscriptions live at /partner/connections/graphql/.
-        base = (cfg.tote_graphql_url or "").rstrip("/")
-        if "/connections/graphql" in base:
-            try:
-                # Rewrite WS connections URL to HTTP gateway GraphQL endpoint
-                base = base.replace("/connections/graphql", "/gateway/graphql")
-            except Exception:
-                pass
-        self.base_url = base
+        # Use the configured URL exactly as provided (main branch behavior)
+        # Do not mutate or add trailing slashes; some frontends are strict.
+        self.base_url = (base_url or cfg.tote_graphql_url or "").strip()
         self.timeout = timeout
         self.max_retries = max(0, int(max_retries))
         self.session = requests.Session()
+        # Auth headers: mirror legacy working set that previously worked in production
+        self.api_key = (api_key or cfg.tote_api_key)
+        self.auth_scheme = (cfg.tote_auth_scheme or "Api-Key").strip()
+        # Match main branch auth: Authorization header only.
         self.headers = {
-            "Authorization": f"Api-Key {cfg.tote_api_key}",
-            "x-api-key": cfg.tote_api_key,
-            "X-API-Key": cfg.tote_api_key,
-            "x-partner-api-key": cfg.tote_api_key,
+            "Authorization": f"{self.auth_scheme} {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "autobet/0.1 (+tote)"
+            "User-Agent": "autobet/0.1 (+tote)",
         }
 
-    def _post_json(self, url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    # No alternate URL swapping for HTTP GraphQL; stick to gateway
+
+    # (No custom header builder; use the fixed, known-good header set above.)
+
+    def _post_json(self, url: str, payload: Dict[str, Any], *, headers_override: Optional[Dict[str, Any]] = None, keep_auth: Optional[bool] = None) -> Dict[str, Any]:
         last_err: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
                 _rate_limiter.acquire()
-                resp = self.session.post(url, headers=self.headers, json=payload, timeout=self.timeout)
-                resp.raise_for_status()
-                return resp.json()
+                send_headers = dict(headers_override or self.headers)
+                resp = self.session.post(url, headers=send_headers, json=payload, timeout=self.timeout)
+                # Handle redirects explicitly (301/302/303/307/308)
+                if 300 <= resp.status_code < 400:
+                    loc = resp.headers.get("Location")
+                    if loc:
+                        try:
+                            target = urljoin(url + ("/" if not url.endswith("/") else ""), loc)
+                            resp = self.session.post(target, headers=send_headers, json=payload, timeout=self.timeout)
+                        except Exception as e:
+                            last_err = e
+                            raise
+                    else:
+                        raise requests.HTTPError(f"{resp.status_code} Redirect without Location for url: {url}")
+                if resp.status_code >= 400:
+                    # Include a snippet of body to aid debugging of 4xx/5xx
+                    snippet = ""
+                    try:
+                        t = resp.text or ""
+                        snippet = (": " + t[:300].replace("\n"," ")) if t else ""
+                    except Exception:
+                        snippet = ""
+                    raise requests.HTTPError(f"{resp.status_code} Client Error: {resp.reason} for url: {url}{snippet}")
+                # OK – parse JSON or raise a descriptive error
+                try:
+                    return resp.json()
+                except Exception:
+                    ctype = resp.headers.get("Content-Type", "")
+                    t = None
+                    try:
+                        t = resp.text or ""
+                    except Exception:
+                        t = ""
+                    snippet = (t[:300].replace("\n"," ") if t else "")
+                    raise requests.HTTPError(f"Invalid JSON (Content-Type: {ctype}) for url: {resp.url}: {snippet}")
             except Exception as e:
                 last_err = e
                 # simple backoff
@@ -66,18 +97,36 @@ class ToteClient:
                     time.sleep(0.5 * (2 ** attempt))
         raise ToteError(str(last_err) if last_err else "request failed")
 
-    def graphql(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def graphql(self, query: str, variables: Optional[Dict[str, Any]] = None, *, keep_auth: Optional[bool] = None) -> Dict[str, Any]:
         url = self.base_url
         payload = {"query": query, "variables": variables or {}}
-        data = self._post_json(url, payload)
+        data = self._post_json(url, payload, keep_auth=keep_auth)
         if isinstance(data, dict) and data.get("errors"):
-            raise ToteError(json.dumps(data.get("errors")))
+            errs = data.get("errors")
+            # Raise including endpoint used; do not swap to connections for HTTP GraphQL
+            raise ToteError(f"GraphQL errors on {url}: {json.dumps(errs)}")
         return (data.get("data") if isinstance(data, dict) else data) or {}
 
     # For audit endpoint compatibility (some deployments separate audit path).
     # If no separate endpoint, reuse the same.
     def graphql_audit(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self.graphql(query, variables)
+        """Use audit credentials/URL if configured, matching main behavior.
+
+        - If cfg.tote_audit_graphql_url is set, call that endpoint for audit.
+        - If cfg.tote_audit_api_key is set, use it (and scheme) for Authorization.
+        Fallback to the regular endpoint/key when audit-specific are absent.
+        """
+        url = (cfg.tote_audit_graphql_url or self.base_url).strip()
+        audit_key = (cfg.tote_audit_api_key or self.api_key)
+        audit_scheme = (cfg.tote_audit_auth_scheme or self.auth_scheme)
+        headers = dict(self.headers)
+        headers["Authorization"] = f"{audit_scheme} {audit_key}"
+        payload = {"query": query, "variables": variables or {}}
+        data = self._post_json(url, payload, headers_override=headers)
+        if isinstance(data, dict) and data.get("errors"):
+            errs = data.get("errors")
+            raise ToteError(f"GraphQL errors on {url}: {json.dumps(errs)}")
+        return (data.get("data") if isinstance(data, dict) else data) or {}
 
     def graphql_sdl(self) -> str:
         """Return schema SDL. Tries introspection; falls back to GET ?sdl on gateway.
@@ -186,17 +235,13 @@ class ToteClient:
             # Fallback to GET ?sdl
             sdl_url = self.base_url
             # Ensure we are targeting the gateway endpoint
-            if "/gateway/graphql" not in sdl_url:
-                try:
-                    sdl_url = sdl_url.replace("/graphql", "/gateway/graphql")
-                except Exception:
-                    pass
+            # Keep URL unmodified to avoid CloudFront 403s on some partners
             if "?" in sdl_url:
                 sdl_url = sdl_url + "&sdl"
             else:
                 sdl_url = sdl_url + "?sdl"
             resp = self.session.get(sdl_url, headers={
-                "Authorization": f"Api-Key {cfg.tote_api_key}",
+                "Authorization": f"{self.auth_scheme} {self.api_key}",
                 "Accept": "text/plain, text/graphql, */*",
             }, timeout=self.timeout)
             resp.raise_for_status()

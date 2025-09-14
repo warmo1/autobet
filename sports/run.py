@@ -3,6 +3,7 @@ import argparse
 import subprocess
 import json
 from dotenv import load_dotenv # Keep this
+from pathlib import Path
 from .db import get_db, init_db
 
 # Core application components
@@ -18,7 +19,13 @@ from .ingest.tote_products import ingest_products
 
 def main(argv=None):
     """Main entry point for the command-line runner."""
-    load_dotenv()
+    # Load the same .env used by Config to avoid inconsistencies
+    try:
+        env_path = Path(__file__).parent.parent / '.env'
+        load_dotenv(dotenv_path=env_path, override=False)
+    except Exception:
+        # Fallback to default lookup if anything goes wrong
+        load_dotenv()
 
     p = argparse.ArgumentParser(description="Sports Betting Bot")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -58,8 +65,11 @@ def main(argv=None):
     sp_tote_events.add_argument("--since", help="Filter events since ISO8601 (e.g., 2025-09-01T00:00:00Z)")
     sp_tote_events.add_argument("--until", help="Filter events until ISO8601")
     def _cmd_tote_events(args):
+        from .config import cfg
         db = get_db()
         client = ToteClient()
+        if cfg.tote_graphql_url:
+            client.base_url = cfg.tote_graphql_url
         print(f"Ingesting events since='{args.since}' until='{args.until}' directly to BigQuery...")
         n = ingest_tote_events(db, client, first=args.first, since_iso=args.since, until_iso=args.until)
         print(f"[Tote Events] Ingested {n} event(s) into BigQuery.")
@@ -72,6 +82,7 @@ def main(argv=None):
     sp_tote_events_range.add_argument("--to", dest="date_to", required=True, help="End date YYYY-MM-DD (inclusive)")
     sp_tote_events_range.add_argument("--first", type=int, default=500, help="Number of events to fetch per day")
     def _cmd_tote_events_range(args):
+        from .config import cfg
         from datetime import datetime, timedelta
         try:
             from tqdm import tqdm
@@ -86,6 +97,8 @@ def main(argv=None):
         
         db = get_db()
         client = ToteClient()
+        if cfg.tote_graphql_url:
+            client.base_url = cfg.tote_graphql_url
         cur = d0
         total_events = 0
         
@@ -109,7 +122,10 @@ def main(argv=None):
     # Fetches the GraphQL SDL to verify access
     sp_tote_sdl = sub.add_parser("tote-graphql-sdl", help="Fetch the GraphQL SDL to verify access")
     def _cmd_tote_sdl(args):
+        from .config import cfg
         client = ToteClient()
+        if cfg.tote_graphql_url:
+            client.base_url = cfg.tote_graphql_url
         sdl = client.graphql_sdl()
         print(sdl[:2000])
     sp_tote_sdl.set_defaults(func=_cmd_tote_sdl)
@@ -121,13 +137,15 @@ def main(argv=None):
     sp_tote_super.add_argument("--status", choices=["OPEN","CLOSED","UNKNOWN"], default="OPEN")
     sp_tote_super.add_argument("--first", type=int, default=200)
     def _cmd_tote_super(args):
-        from sports.config import cfg # Import cfg for BigQuery configuration check
+        from .config import cfg
         if not (cfg.bq_project and cfg.bq_dataset):
             print("Error: BigQuery is not configured. Set BQ_PROJECT and BQ_DATASET in your .env file.")
             return
 
         db = get_db() # Use the BigQuery sink
         client = ToteClient()
+        if cfg.tote_graphql_url:
+            client.base_url = cfg.tote_graphql_url
         print(f"Ingesting SUPERFECTA products for date='{args.date or 'today'}' status='{args.status}' directly to BigQuery...")
         n = ingest_products(db, client, date_iso=args.date, status=args.status, first=args.first, bet_types=["SUPERFECTA"])
         print(f"[Tote SUPERFECTA] Ingested and upserted {n} product(s) to BigQuery.")
@@ -141,10 +159,12 @@ def main(argv=None):
     sp_tote_prods.add_argument("--first", type=int, default=500) # Default to include Jackpot and Pacepot
     sp_tote_prods.add_argument("--types", default="WIN,PLACE,EXACTA,TRIFECTA,SUPERFECTA,JACKPOT", help="Comma-separated bet types, e.g. WIN,PLACE,EXACTA,TRIFECTA,SUPERFECTA,JACKPOT")
     def _cmd_tote_prods(args):
-        from sports.config import cfg
+        from .config import cfg
         bt = [s.strip().upper() for s in (args.types or '').split(',') if s.strip()]
         db = get_db()
         client = ToteClient()
+        if cfg.tote_graphql_url:
+            client.base_url = cfg.tote_graphql_url
         print(f"Ingesting products for date='{args.date or 'today'}' status='{args.status}' types='{args.types}' directly to BigQuery...")
         n = ingest_products(db, client, date_iso=args.date, status=args.status, first=args.first, bet_types=(bt or None))
         print(f"[Tote Products] Ingested {n} product(s) into BigQuery")
@@ -156,8 +176,11 @@ def main(argv=None):
     sp_tote_results.add_argument("--date", help="ISO date (YYYY-MM-DD)")
     sp_tote_results.add_argument("--first", type=int, default=500)
     def _cmd_tote_results(args):
+        from .config import cfg
         db = get_db()
         client = ToteClient()
+        if cfg.tote_graphql_url:
+            client.base_url = cfg.tote_graphql_url
         print(f"Ingesting results for date='{args.date or 'today'}' by fetching CLOSED products directly to BigQuery...")
         n = ingest_products(db, client, date_iso=args.date, status="CLOSED", first=args.first, bet_types=None)
         print(f"[Tote Results] Scanned {n} product(s). Check logs for finishing positions.")
@@ -171,6 +194,7 @@ def main(argv=None):
     sp_backfill.add_argument("--first", type=int, default=500, help="GraphQL page size per call") # Default to include Jackpot and Pacepot
     sp_backfill.add_argument("--types", default="WIN,PLACE,EXACTA,TRIFECTA,SUPERFECTA,JACKPOT", help="Comma-separated bet types")
     def _cmd_backfill(args):
+        from .config import cfg
         from datetime import datetime, timedelta
         try:
             from tqdm import tqdm
@@ -186,6 +210,8 @@ def main(argv=None):
         
         db = get_db()
         client = ToteClient()
+        if cfg.tote_graphql_url:
+            client.base_url = cfg.tote_graphql_url
         cur = d0
         total_prod = 0
         
@@ -209,7 +235,7 @@ def main(argv=None):
     sp_bq_clean = sub.add_parser("bq-cleanup", help="Delete leftover _tmp tables in the configured BigQuery dataset")
     sp_bq_clean.add_argument("--older", type=int, default=None, help="Only delete temp tables older than N days")
     def _cmd_bq_clean(args):
-        from sports.bq import get_bq_sink
+        from .bq import get_bq_sink
         sink = get_bq_sink()
         if not sink:
             print("[BQ Cleanup] BigQuery sink not enabled/configured")
@@ -228,9 +254,12 @@ def main(argv=None):
     sp_pipe.add_argument("--first", type=int, default=500, help="GraphQL page size per call")
     sp_pipe.add_argument("--types", default="WIN,PLACE,EXACTA,TRIFECTA,SUPERFECTA,JACKPOT", help="Comma-separated bet types for products fetch")
     def _cmd_pipeline(args):
+        from .config import cfg
         bt = [s.strip().upper() for s in (args.types or '').split(',') if s.strip()]
         db = get_db()
         client = ToteClient()
+        if cfg.tote_graphql_url:
+            client.base_url = cfg.tote_graphql_url
         ds = args.date
         print(f"[Pipeline] {ds}: products OPEN...")
         try:
@@ -257,7 +286,11 @@ def main(argv=None):
     sp_audit_sf.add_argument("--post", action="store_true", help="If set, attempt to POST to Tote API in audit mode")
     def _cmd_audit_sf(args):
         db = get_db()
-        res = place_audit_superfecta(db, product_id=args.product, selection=args.sel, stake=args.stake, currency=args.currency, post=args.post, mode='audit')
+        from .config import cfg
+        client = ToteClient()
+        if cfg.tote_audit_graphql_url:
+            client.base_url = cfg.tote_audit_graphql_url.strip()
+        res = place_audit_superfecta(db, product_id=args.product, selection=args.sel, stake=args.stake, currency=args.currency, post=args.post, client=client)
         print("[Audit SF]", res)
     sp_audit_sf.set_defaults(func=_cmd_audit_sf)
 
@@ -270,7 +303,11 @@ def main(argv=None):
     sp_audit_win.add_argument("--post", action="store_true")
     def _cmd_audit_win(args):
         db = get_db()
-        res = place_audit_win(db, event_id=args.event, selection_id=args.selection, stake=args.stake, currency=args.currency, post=args.post, mode='audit')
+        from .config import cfg
+        client = ToteClient()
+        if cfg.tote_audit_graphql_url:
+            client.base_url = cfg.tote_audit_graphql_url.strip()
+        res = place_audit_win(db, event_id=args.event, selection_id=args.selection, stake=args.stake, currency=args.currency, post=args.post, client=client)
         print("[Audit WIN]", res)
     sp_audit_win.set_defaults(func=_cmd_audit_win)
 
@@ -280,7 +317,11 @@ def main(argv=None):
     sp_bet_status.add_argument("--post", action="store_true", help="If set, attempt to call Tote API for status")
     def _cmd_bet_status(args):
         db = get_db()
-        res = refresh_bet_status(db, bet_id=args.bet_id, post=args.post)
+        from .config import cfg
+        client = ToteClient()
+        if cfg.tote_graphql_url:
+            client.base_url = cfg.tote_graphql_url.strip()
+        res = refresh_bet_status(db, bet_id=args.bet_id, post=args.post, client=client)
         print("[Bet Status]", res)
     sp_bet_status.set_defaults(func=_cmd_bet_status)
 
@@ -290,7 +331,10 @@ def main(argv=None):
     sp_sub.add_argument("--duration", type=int, help="Run for N seconds then exit")
     def _cmd_sub(args):
         db = get_db()
-        run_pool_subscriber(db, duration=args.duration)
+        from .config import cfg
+        client = ToteClient()
+        client.base_url = cfg.tote_subscriptions_url
+        run_pool_subscriber(db, client=client, duration=args.duration)
     sp_sub.set_defaults(func=_cmd_sub)
 
     # --- Tote audit: list bets and optional sync ---
@@ -301,7 +345,11 @@ def main(argv=None):
     sp_list.add_argument("--first", type=int, default=20)
     sp_list.add_argument("--sync", action="store_true", help="If set, update tote_bets outcomes by matching toteId")
     def _cmd_list(args):
-        data = audit_list_bets(since_iso=args.since, until_iso=args.until, first=args.first)
+        from .config import cfg
+        client = ToteClient()
+        if cfg.tote_graphql_url:
+            client.base_url = cfg.tote_graphql_url.strip()
+        data = audit_list_bets(client, since_iso=args.since, until_iso=args.until, first=args.first)
         print(json.dumps(data, indent=2)[:2000])
         if args.sync:
             db = get_db()
@@ -314,7 +362,7 @@ def main(argv=None):
     # Exports BigQuery schema to a CSV file
     sp_bq_schema = sub.add_parser("bq-schema-export", help="Export BigQuery schema to a CSV file")
     def _cmd_bq_schema_export(args):
-        from sports.bq_schema import export_bq_schema_to_csv
+        from .bq_schema import export_bq_schema_to_csv
         export_bq_schema_to_csv()
     sp_bq_schema.set_defaults(func=_cmd_bq_schema_export)
 

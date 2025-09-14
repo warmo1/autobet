@@ -40,6 +40,12 @@ class Config:
     tote_api_key: str = os.getenv("TOTE_API_KEY", "")
     tote_graphql_url: str = os.getenv("TOTE_GRAPHQL_URL", "")  # e.g. https://hub.production.racing.tote.co.uk/partner/connections/graphql/
     tote_subscriptions_url: str = os.getenv("TOTE_SUBSCRIPTIONS_URL", "")  # e.g. wss://.../graphql/
+    # Optional separate audit credentials/URL (recommended if audit requires different key)
+    tote_audit_api_key: str = os.getenv("TOTE_AUDIT_API_KEY", "")
+    tote_audit_graphql_url: str = os.getenv("TOTE_AUDIT_GRAPHQL_URL", "")  # e.g. https://hub.production.racing.tote.co.uk/partner/gateway/audit/graphql/
+    # Authorization scheme control (defaults to "Api-Key"). Examples: "Api-Key", "Bearer".
+    tote_auth_scheme: str = os.getenv("TOTE_AUTH_SCHEME", "Api-Key")
+    tote_audit_auth_scheme: str = os.getenv("TOTE_AUDIT_AUTH_SCHEME", "Api-Key")
 
     # --- BigQuery (writes + optional web reads) ---
     # These are referenced by sports/bq.py and sports/webapp.py

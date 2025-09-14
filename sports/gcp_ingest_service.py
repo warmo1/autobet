@@ -110,53 +110,50 @@ def handle_pubsub() -> tuple[str, int]:
                 return ("", 204)
             
             win_product_id = win_prod_df.iloc[0]["product_id"]
-            # Build candidate probable-odds endpoints from configured GraphQL base.
-            # Many partners expose REST under /partner/gateway/ as well.
-            base = cfg.tote_graphql_url or ""
-            host_root = ""
+            # Use GraphQL to fetch lines (probable odds) for the WIN product
+            GQL = """
+            query GetProduct($id: String!) {
+              product(id: $id) {
+                id
+                ... on BettingProduct {
+                  lines { nodes { legs { lineSelections { selectionId } } odds { decimal } } }
+                }
+              }
+            }
+            """
             try:
-                if "/partner/" in base:
-                    host_root = base.split("/partner/")[0].rstrip("/")
-                else:
-                    from urllib.parse import urlparse
-                    u = urlparse(base)
-                    if u.scheme and u.netloc:
-                        host_root = f"{u.scheme}://{u.netloc}"
-            except Exception:
-                host_root = ""
-            if not host_root:
-                host_root = "https://hub.production.racing.tote.co.uk"
-
-            candidates = [
-                f"{host_root}/partner/gateway/v1/products/{win_product_id}/probable-odds",
-                f"{host_root}/partner/gateway/probable-odds/v1/products/{win_product_id}",
-                f"{host_root}/partner/gateway/probable-odds/v1/products/{win_product_id}/probable-odds",
-                f"{host_root}/v1/products/{win_product_id}/probable-odds",
-            ]
-
-            headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
-            resp = None
-            last_status = None
-            for url in candidates:
-                try:
-                    resp = rate_limited_get(url, headers=headers, timeout=20)
-                    if 200 <= resp.status_code < 300:
-                        break
-                    last_status = resp.status_code
-                except requests.exceptions.RequestException:
-                    last_status = None
-                    continue
-            if resp is None or not (200 <= resp.status_code < 300):
-                # Gracefully handle missing endpoints (often 403/404); skip without failing.
-                st = last_status if last_status is not None else "n/a"
-                print(f"Could not fetch probable odds for {win_product_id} (event: {event_id}). Status: {st}. Skipping.")
+                data = client.graphql(GQL, {"id": win_product_id})
+            except ToteError as te:
+                print(f"GraphQL probable fetch failed for {win_product_id}: {te}")
                 return ("", 204)
-
+            prod = (data or {}).get("product") or {}
+            lines = (((prod.get("lines") or {}).get("nodes")) or []) if isinstance(prod, dict) else []
+            norm_lines = []
+            for ln in lines:
+                try:
+                    odds = ((ln.get("odds") or {}).get("decimal"))
+                    legs = ln.get("legs") or []
+                    sel_id = None
+                    if legs:
+                        sels = (legs[0].get("lineSelections") or [])
+                        if sels:
+                            sel_id = sels[0].get("selectionId")
+                    if sel_id and odds is not None:
+                        norm_lines.append({
+                            "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
+                            "odds": {"decimal": float(odds)},
+                        })
+                except Exception:
+                    continue
+            if not norm_lines:
+                print(f"No probable odds lines found via GraphQL for product {win_product_id}")
+                return ("", 204)
+            payload = {"products": {"nodes": [{"id": win_product_id, "lines": {"nodes": norm_lines}}]}}
             rid = f"probable:{int(time.time()*1000)}:{win_product_id}"
             ts_ms = int(time.time()*1000)
-            sink.upsert_raw_tote_probable_odds([{"raw_id": rid, "fetched_ts": ts_ms, "payload": resp.text, "product_id": win_product_id}])
+            sink.upsert_raw_tote_probable_odds([{"raw_id": rid, "fetched_ts": ts_ms, "payload": json.dumps(payload), "product_id": win_product_id}])
             metrics = {"probable_for_product": win_product_id}
-            print(f"Ingested probable odds for product {win_product_id}")
+            print(f"Ingested probable odds (GraphQL) for product {win_product_id}")
 
         elif task == "ingest_event_results":
             event_id = payload.get("event_id")

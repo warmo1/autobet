@@ -31,8 +31,21 @@ query GetProducts($date: Date, $status: BettingProductSellingStatus, $first: Int
         }
         legs {
           nodes {
-            event { id name venue { name } scheduledStartDateTime { iso8601 } }
-            selections { nodes { id competitor { name details { __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } }
+            event { id name venue { name } scheduledStartDateTime { iso8601 } result { results { nodes { finishingPosition id name } } } }
+            id
+            selections {
+              nodes {
+                id
+                name
+                eventCompetitor {
+                  __typename
+                  id
+                  name
+                  entryStatus
+                  ... on HorseRacingEventCompetitor { clothNumber }
+                }
+              }
+            }
           }
         }
         lines {
@@ -67,8 +80,21 @@ query GetProducts($date: Date, $status: BettingProductSellingStatus, $first: Int
           }
           legs {
             nodes {
-              event { id name venue { name } scheduledStartDateTime { iso8601 } }
-              selections { nodes { id competitor { name details { __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } }
+              event { id name venue { name } scheduledStartDateTime { iso8601 } result { results { nodes { finishingPosition id name } } } }
+              id
+              selections {
+                nodes {
+                  id
+                  name
+                  eventCompetitor {
+                    __typename
+                    id
+                    name
+                    entryStatus
+                    ... on HorseRacingEventCompetitor { clothNumber }
+                  }
+                }
+              }
             }
           }
         lines {
@@ -96,7 +122,7 @@ PRODUCT_BY_ID_QUERY = """
 query GetProduct($id: String!) {
   product(id: $id) {
     id
-    ... on BettingProduct {
+    ... on BettingProduct { # This fragment is likely the most up-to-date
       country { alpha2Code }
       betType { code rules { bet { min { decimalAmount currency { code } } max { decimalAmount currency { code } } } line { min { decimalAmount currency { code } } max { decimalAmount currency { code } } increment { decimalAmount currency { code } } } } }
       selling { status }
@@ -109,10 +135,42 @@ query GetProduct($id: String!) {
           carryIn { grossAmount { decimalAmount } netAmount { decimalAmount } }
         }
       }
-      legs { nodes { id event { id name venue { name } scheduledStartDateTime { iso8601 } } selections { nodes { id competitor { name details { __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } } } }
+      lines {
+        nodes {
+          legs { lineSelections { selectionId } }
+          odds { decimal }
+        }
+      }
+      legs {
+        nodes {
+          id
+          event { id name venue { name } scheduledStartDateTime { iso8601 } result { results { nodes { finishingPosition id name } } } }
+          selections {
+            nodes {
+              id
+              name
+              eventCompetitor {
+                __typename
+                id
+                name
+                entryStatus
+                ... on HorseRacingEventCompetitor { clothNumber }
+              }
+            }
+          }
+        }
+      }
       result { status dividends { nodes { dividend { amount { decimalAmount } } dividendLegs { nodes { dividendSelections { nodes { id finishingPosition } } } } } } }
     }
-    type { ... on BettingProduct { country { alpha2Code } betType { code } selling { status } legs { nodes { event { id name venue { name } scheduledStartDateTime { iso8601 } } selections { nodes { id competitor { name details { __typename ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } } } } } }
+    type { # This is a fallback for older schema versions
+      ... on BettingProduct {
+        country { alpha2Code }
+        betType { code }
+        selling { status }
+        lines { nodes { legs { lineSelections { selectionId } } odds { decimal } } }
+        legs { nodes { event { id name venue { name } scheduledStartDateTime { iso8601 } } selections { nodes { id competitor { name details { __typename ... on HorseDetails { clothNumber } } } } } } }
+      }
+    }
   }
 }
 """
@@ -302,24 +360,21 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
             sels = ((leg.get("selections") or {}).get("nodes")) or []
             for sel in sels:
                 sid = sel.get("id")
-                comp = (sel.get("competitor") or {})
-                det = (comp.get("details") or {})
-                n = None
-                try:
-                    if det.get("__typename") == "HorseDetails":
-                        n = det.get("clothNumber")
-                    elif det.get("__typename") == "GreyhoundDetails":
-                        n = det.get("trapNumber")
-                    elif "clothNumber" in det:
-                        n = det.get("clothNumber")
-                except Exception:
-                    n = None
+                # Handle new `eventCompetitor` structure and fall back to `competitor`
+                event_comp = sel.get("eventCompetitor") or {}
+                comp_name = sel.get("name") or event_comp.get("name")
+                n = event_comp.get("clothNumber") or event_comp.get("trapNumber")
+                if not comp_name: # Legacy fallback
+                    comp_name = (sel.get("competitor") or {}).get("name")
+                if n is None: # Legacy fallback
+                    det = (sel.get("competitor") or {}).get("details") or {}
+                    n = det.get("clothNumber") or det.get("trapNumber")
                 rows_selections.append({
                     "product_id": (bp.get("id") or src.get("id")),
                     "leg_index": idx,
                     "selection_id": sid,
                     "product_leg_id": product_leg_id,
-                    "competitor": comp.get("name"),
+                    "competitor": comp_name,
                     "number": int(n) if n is not None else None,
                     "leg_event_id": l_ev_id,
                     "leg_event_name": l_ev_name,

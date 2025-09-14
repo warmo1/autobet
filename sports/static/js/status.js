@@ -267,10 +267,18 @@ window.addEventListener('DOMContentLoaded', () => {
       }
       const resEl = document.getElementById('qa-result');
       try {
-        const res = await fetch('/api/trigger', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        let res;
+        if (action === 'ensure_views') {
+          res = await fetch('/api/admin/ensure_views', { method: 'POST' });
+        } else {
+          res = await fetch('/api/trigger', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        }
         const j = await res.json();
         if (res.ok) {
-          resEl.textContent = `OK: ${j.action} → ${Array.isArray(j.message_ids) ? j.message_ids.join(', ') : ''}`;
+          const okMsg = (action === 'ensure_views')
+            ? 'Views reloaded'
+            : `${j.action} → ${Array.isArray(j.message_ids) ? j.message_ids.join(', ') : ''}`;
+          resEl.textContent = `OK: ${okMsg}`;
           resEl.style.color = '#166534';
           // Refresh freshness soon after firing
           setTimeout(loadDataFreshness, 2000);

@@ -47,7 +47,7 @@ def _record_audit(db, *, product_id: str, selection: str, stake: float, currency
     return bet_id
 
 
-def place_audit_simple_bet(db, *, product_id: str, selection_id: str, stake: float, currency: str, post: bool = True) -> Dict[str, Any]:
+def place_audit_simple_bet(db, *, product_id: str, selection_id: str, stake: float, currency: str, post: bool = True, client: Optional[ToteClient] = None) -> Dict[str, Any]:
     """Places a single-line audit bet (e.g., WIN, PLACE) using the correct v2 GraphQL schema."""
     try:
         bet_type, event_id = product_id.split(":", 1)
@@ -76,7 +76,8 @@ def place_audit_simple_bet(db, *, product_id: str, selection_id: str, stake: flo
     err = None
     if post:
         try:
-            client = ToteClient()
+            if client is None:
+                client = ToteClient()
             mutation = """
             mutation PlaceBets($input: PlaceBetsInput!) {
               placeBets(input: $input) {
@@ -84,7 +85,11 @@ def place_audit_simple_bet(db, *, product_id: str, selection_id: str, stake: flo
               }
             }
             """
-            resp = client.graphql_audit(mutation, variables)
+            # Use graphql_audit for audit, but regular graphql for live
+            if "audit" in (client.base_url or ""):
+                resp = client.graphql_audit(mutation, variables)
+            else:
+                resp = client.graphql(mutation, variables)
         except Exception as e:
             err = str(e)
     
@@ -114,11 +119,12 @@ def place_audit_superfecta(
     post: bool = False,
     stake_type: str = "total",
     placement_product_id: Optional[str] = None,
+    client: Optional[ToteClient] = None,
 ) -> Dict[str, Any]:
     """Audit-mode Superfecta bet using the correct v2 GraphQL schema."""
     bet_lines: list[str] = []
     if selections and isinstance(selections, list):
-        bet_lines = [s.strip() for s in selections if s and s.strip()]
+        bet_lines = [str(s).strip() for s in selections if s and str(s).strip()]
     elif selection:
         bet_lines = [selection.strip()]
 
@@ -140,7 +146,8 @@ def place_audit_superfecta(
 
     if not by_number:
         try:
-            client = ToteClient()
+            if client is None:
+                client = ToteClient()
             query = """
             query ProductLegs($id: String){ product(id: $id){ ... on BettingProduct { legs{ nodes{ id selections{ nodes{ id competitor{ details{ ... on HorseDetails { clothNumber } ... on GreyhoundDetails { trapNumber } } } } } } } } } }
             """
@@ -195,7 +202,8 @@ def place_audit_superfecta(
     resp, err = None, None
     if post:
         try:
-            client = ToteClient()
+            if client is None:
+                client = ToteClient()
             mutation = """
             mutation PlaceBets($input: PlaceBetsInput!) {
               placeBets(input: $input) {
@@ -203,7 +211,10 @@ def place_audit_superfecta(
               }
             }
             """
-            resp = client.graphql_audit(mutation, variables)
+            if "audit" in (client.base_url or ""):
+                resp = client.graphql_audit(mutation, variables)
+            else:
+                resp = client.graphql(mutation, variables)
         except Exception as e:
             err = str(e)
             print(f"[AuditBet][ERROR] Superfecta placement failed: {err}")
@@ -232,5 +243,38 @@ def place_audit_superfecta(
         out["failure_reason"] = failure_reason
     return out
 
-# Keep other functions from the old file if they are needed, e.g., refresh_bet_status, audit_list_bets, etc.
-# For now, they are omitted as the primary issue was with bet placement.
+def refresh_bet_status(db, *, bet_id: str, post: bool = True, client: Optional[ToteClient] = None) -> Dict[str, Any]:
+    """Refresh the status of a single bet by its Tote ID."""
+    if client is None:
+        client = ToteClient()
+    query = "query Bet($id: String!){ bet(id: $id){ status settledTimeUTC result } }"
+    variables = {"id": bet_id}
+    resp, err = None, None
+    if post:
+        try:
+            resp = client.graphql(query, variables)
+        except Exception as e:
+            err = str(e)
+    return {"response": resp, "error": err}
+
+def audit_list_bets(client: ToteClient, *, since_iso: Optional[str] = None, until_iso: Optional[str] = None, first: int = 20) -> Dict[str, Any]:
+    """List bets from the audit/live gateway."""
+    query = """
+    query Bets($first: Int, $since: DateTime, $until: DateTime){
+      bets(first: $first, since: $since, until: $until){
+        nodes{
+          toteId status settledTimeUTC result
+          legs{ nodes{ selections{ nodes{ productLegSelectionID position } } } }
+        }
+      }
+    }
+    """
+    variables = {"first": first}
+    if since_iso: variables["since"] = since_iso
+    if until_iso: variables["until"] = until_iso
+    return client.graphql(query, variables)
+
+def sync_bets_from_api(db, data: Dict[str, Any]) -> int:
+    """Sync bet outcomes from API response to BigQuery."""
+    # This function's implementation would go here, likely upserting to tote_audit_bets.
+    return 0
