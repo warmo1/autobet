@@ -53,7 +53,7 @@
     <div class="card mb-4 border-primary">
         <div class="card-header bg-primary text-white">
             <h5>Model Calculation: {{ calculation_result.product.event_name }} - {{ calculation_result.product.venue }}</h5>
-            <small>Start Time: {{ calculation_result.product.start_iso | datetime }} UTC</small>
+            <small>Start Time: <span class="time-iso" data-iso="{{ calculation_result.product.start_iso }}">{{ calculation_result.product.start_iso }}</span></small>
         </div>
         <div class="card-body">
             <div class="row">
@@ -105,7 +105,7 @@
                 <tr>
                     <th>Event</th>
                     <th>Venue</th>
-                    <th>Start Time (UTC)</th>
+                    <th>Start Time</th>
                     <th>Pool (Gross)</th>
                     <th></th>
                 </tr>
@@ -115,7 +115,7 @@
                 <tr>
                     <td>{{ event.event_name }}</td>
                     <td>{{ event.venue }}</td>
-                    <td>{{ event.start_iso | datetime }}</td>
+                    <td><span class="time-iso" data-iso="{{ event.start_iso }}">{{ event.start_iso }}</span></td>
                     <td>{{ event.currency }} {{ event.total_gross | f2 }}</td>
                     <td class="text-end">
                         <button class="btn btn-sm btn-outline-secondary me-2 btn-refresh-odds" data-eid="{{ event.event_id }}" title="Refresh probable odds from Tote API">

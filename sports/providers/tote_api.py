@@ -295,19 +295,5 @@ def rate_limited_get(url: str, *, headers: Dict[str, Any] | None = None, timeout
     resp = requests.get(url, headers=headers or {}, timeout=timeout)
     return resp
 
-
-def store_raw(conn, *, endpoint: str, entity_id: Optional[str], sport: Optional[str], payload: Dict[str, Any]) -> str:
-    """Archive raw Tote payload into raw_tote table.
-
-    Returns the generated raw_id.
-    """
-    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    raw_id = f"{endpoint}:{entity_id or ''}:{int(time.time())}"
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO raw_tote(raw_id, endpoint, entity_id, sport, fetched_ts, payload)
-        VALUES(?,?,?,?,?,?)
-        """,
-        (raw_id, endpoint, entity_id, sport, ts, json.dumps(payload)),
-    )
-    return raw_id
+# Note: Legacy SQLite helpers removed. All raw payload archiving is handled via
+# BigQuery upsert helpers in sports.bq (e.g., upsert_raw_tote, upsert_raw_tote_probable_odds).

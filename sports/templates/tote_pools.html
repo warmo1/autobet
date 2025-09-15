@@ -66,7 +66,7 @@
       <tbody>
         {% for p in products %}
         <tr>
-          <td data-product-id="{{ p.product_id }}"><span class="text-nowrap">{{ p.start_iso[:10] }} {{ p.start_iso[11:16] }}</span></td>
+          <td data-product-id="{{ p.product_id }}"><span class="time-iso" data-iso="{{ p.start_iso }}">{{ p.start_iso }}</span></td>
           <td>{{ p.bet_type }}</td>
           <td><a href="{{ url_for('event_detail', event_id=p.event_id) }}">{{ p.event_name }}</a></td>
           <td>{{ p.venue }}</td>

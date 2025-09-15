@@ -60,7 +60,7 @@
                     <tbody>
                         {% for bet in live_bets %}
                         <tr>
-                            <td><a href="{{ url_for('audit_bet_detail_page', bet_id=bet.bet_id) }}">{{ bet.created | datetime }}</a></td>
+                            <td><a href="{{ url_for('audit_bet_detail_page', bet_id=bet.bet_id) }}"><span class="time-iso" data-iso="{{ bet.created_iso }}">{{ bet.created_iso }}</span></a></td>
                             <td>{{ bet.venue }}</td>
                             <td>{{ bet.event_name }}</td>
                             <td>{{ bet.selection }}</td>
@@ -94,7 +94,7 @@
                     <tbody>
                         {% for bet in audit_bets %}
                         <tr>
-                            <td><a href="{{ url_for('audit_bet_detail_page', bet_id=bet.bet_id) }}">{{ bet.created | datetime }}</a></td>
+                            <td><a href="{{ url_for('audit_bet_detail_page', bet_id=bet.bet_id) }}"><span class="time-iso" data-iso="{{ bet.created_iso }}">{{ bet.created_iso }}</span></a></td>
                             <td>{{ bet.venue }}</td><td>{{ bet.event_name }}</td><td>{{ bet.selection }}</td><td>{{ bet.currency }} {{ "%.2f"|format(bet.stake) }}</td>
                             <td><span class="badge bg-secondary">{{ bet.status }}</span></td><td>{{ bet.tote_bet_id or 'N/A' }}</td>
                         </tr>

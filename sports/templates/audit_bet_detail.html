@@ -13,7 +13,7 @@
       <em>Unknown bet.</em>
     {% else %}
       <div class="mb-2"><b>Bet ID:</b> {{ bet.bet_id }}</div>
-      <div class="mb-2"><b>Time:</b> {{ bet.ts|datetime }}</div>
+      <div class="mb-2"><b>Time:</b> {% if bet._created_iso %}<span class="time-iso" data-iso="{{ bet._created_iso }}">{{ bet._created_iso }}</span>{% else %}—{% endif %}</div>
       <div class="mb-2"><b>Product:</b> <code>{{ bet.product_id }}</code></div>
       <div class="mb-2"><b>Selection(s):</b> {{ bet.selection }}</div>
       <div class="mb-2"><b>Stake:</b> {{ '%.2f' % bet.stake }} {{ bet.currency }}</div>
