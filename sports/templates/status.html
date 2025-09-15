@@ -45,7 +45,7 @@
           <tbody>
             {% for p in recent_sf %}
             <tr>
-              <td>{{ p.start_iso[:10] }} {{ p.start_iso[11:16] }}</td>
+              <td><span class="time-iso" data-iso="{{ p.start_iso }}">{{ p.start_iso }}</span></td>
               <td>{{ p.event_name }}</td>
               <td>{{ p.venue }}</td>
               <td>{{ p.status }}</td>
