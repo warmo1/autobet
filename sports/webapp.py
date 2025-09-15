@@ -3196,8 +3196,8 @@ def tote_product_calculator_page(product_id: str):
                 odf = sql_df(
                     """
                     SELECT s.number AS cloth, COALESCE(s.competitor, CAST(s.number AS STRING)) AS name, CAST(o.decimal_odds AS FLOAT64) AS odds
-                    FROM vw_tote_probable_odds o 
-                    JOIN tote_product_selections s ON o.selection_id = s.selection_id 
+                    FROM vw_tote_probable_odds o
+                    JOIN tote_product_selections s ON o.selection_id = s.selection_id AND s.product_id = o.product_id
                     WHERE o.product_id = ?
                     ORDER BY CAST(s.number AS INT64)
                     """,
@@ -3489,7 +3489,7 @@ def tote_live_model_page():
             else:
                 # Fetch runners and probable odds
                 odds_df = sql_df(
-                    "SELECT s.number, s.competitor as name, o.decimal_odds as odds FROM vw_tote_probable_odds o JOIN tote_product_selections s ON o.selection_id = s.selection_id WHERE o.product_id = ? ORDER BY s.number",
+                    "SELECT s.number, s.competitor as name, o.decimal_odds as odds FROM vw_tote_probable_odds o JOIN tote_product_selections s ON o.selection_id = s.selection_id AND s.product_id = o.product_id WHERE o.product_id = ? ORDER BY s.number",
                     params=(p["win_product_id"],)
                 )
                 if odds_df.empty or odds_df['odds'].isnull().all():
