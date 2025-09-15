@@ -1,13 +1,11 @@
 pandas>=2.1
 numpy>=1.24
 Flask>=3.0
-python-dotenv>=1.0
 feedparser>=6.0
 betfairlightweight>=2.20
 google-generativeai>=0.7
 openai>=1.40
 python-telegram-bot
-python-dotenv>=1.0
 google-cloud-bigquery>=3.20
 google-cloud-bigquery-storage>=2.24
 google-cloud-pubsub>=2.20

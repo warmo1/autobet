@@ -3478,207 +3478,24 @@ def api_tote_placement_id():
 def models_page():
     flash("Models pages are temporarily disabled.", "warning")
     return redirect(url_for('index'))
-    conn = _get_db_conn(); init_schema(conn)
-    df = sql_df(conn, "SELECT model_id, created_ts, market, algo, metrics_json, path FROM models ORDER BY created_ts DESC")
-    conn.close()
-    models = [] if df.empty else df.to_dict("records")
-    # Parse metrics json
-    for m in models:
-        try:
-            m["metrics"] = json.loads(m.get("metrics_json") or "{}")
-        except Exception:
-            m["metrics"] = {}
-    # Attach latest prediction run timestamp per model
-    conn = _get_db_conn()
-    for m in models:
-        try:
-            row = conn.execute("SELECT MAX(ts_ms) FROM predictions WHERE model_id=?", (m.get('model_id'),)).fetchone()
-            m["latest_ts_ms"] = int(row[0]) if row and row[0] is not None else None
-        except Exception:
-            m["latest_ts_ms"] = None
-    conn.close()
-    return render_template("models.html", models=models)
 
 @app.route("/models/<model_id>/eval")
 def model_eval_page(model_id: str):
-    # This page relies on legacy local tables.
+    # This page relied on legacy local tables and is disabled.
     flash("Model evaluation is temporarily disabled.", "warning")
     return redirect(url_for('index'))
-    conn = _get_db_conn(); init_schema(conn)
-    # Available prediction runs (timestamps)
-    runs = sql_df(
-        "SELECT DISTINCT ts_ms FROM predictions WHERE model_id=? ORDER BY ts_ms DESC LIMIT 50",
-        params=(model_id,)
-    )
-    ts_param = request.args.get("ts")
-    ts_ms = None
-    if ts_param:
-        try:
-            ts_ms = int(ts_param)
-        except Exception:
-            ts_ms = None
-    if ts_ms is None and not runs.empty:
-        ts_ms = int(runs.iloc[0]["ts_ms"])  # latest
-    date_from = request.args.get("from")
-    date_to = request.args.get("to")
-    # Load joined predictions + results within optional date filter
-    params = [model_id, ts_ms]
-    where = ""
-    if date_from:
-        where += " AND p.event_id IN (SELECT event_id FROM tote_products WHERE start_iso >= ?)"; params.append(date_from)
-    if date_to:
-        where += " AND p.event_id IN (SELECT event_id FROM tote_products WHERE start_iso <= ?)"; params.append(date_to)
-    sql = (
-        "SELECT p.event_id, p.horse_id, p.proba, r.finish_pos, h.name AS horse_name, f.event_date "
-        "FROM predictions p "
-        "JOIN hr_horse_runs r ON r.event_id = p.event_id AND r.horse_id = p.horse_id "
-        "LEFT JOIN hr_horses h ON h.horse_id = p.horse_id "
-        "LEFT JOIN features_runner_event f ON f.event_id = p.event_id AND f.horse_id = p.horse_id "
-        "WHERE p.model_id=? AND p.ts_ms=?" + where
-    )
-    df = sql_df(conn, sql, params=tuple(params))
-    # If empty, render page with controls
-    metrics = {"events": 0, "top1_hits": 0, "hit_rate": None, "brier": None}
-    samples = []
-    ts_options = (runs.to_dict("records") if not runs.empty else [])
-    if not df.empty:
-        # Compute per-event winner
-        df["is_winner"] = (df["finish_pos"] == 1).astype(int)
-        # Hit rate of top-1 per event
-        top = df.sort_values(["event_id", "proba"], ascending=[True, False]).drop_duplicates(["event_id"], keep="first")
-        hits = int(top["is_winner"].sum())
-        n_events = int(top.shape[0])
-        hit_rate = (hits / n_events) if n_events else None
-        # Brier score over all rows
-        try:
-            brier = float(((df["proba"] - df["is_winner"]) ** 2).mean())
-        except Exception:
-            brier = None
-        metrics = {"events": n_events, "top1_hits": hits, "hit_rate": hit_rate, "brier": brier}
-        # Build samples of mismatches and matches
-        # Mismatches: predicted top-1 but not winner
-        merged = top.copy()
-        merged["pred_name"] = merged["horse_name"]
-        # Actual winners per event for context
-        winners = df[df["finish_pos"] == 1][["event_id", "horse_name"]].drop_duplicates(["event_id"])
-        winners = winners.rename(columns={"horse_name": "winner_name"})
-        merged = pd.merge(merged, winners, on="event_id", how="left")
-        bad = merged[merged["is_winner"] == 0].sort_values("proba", ascending=False).head(50)
-        good = merged[merged["is_winner"] == 1].sort_values("proba", ascending=False).head(50)
-        samples = {
-            "misses": bad.to_dict("records"),
-            "hits": good.to_dict("records"),
-        }
-    conn.close()
-    return render_template(
-        "model_eval.html",
-        model_id=model_id,
-        ts_ms=ts_ms,
-        ts_options=ts_options,
-        filters={"from": date_from or "", "to": date_to or ""},
-        metrics=metrics,
-        samples=samples,
-    )
 
 @app.route("/models/<model_id>/superfecta")
 def model_superfecta_eval_page(model_id: str):
-    # This page relies on legacy local tables.
+    # This page relied on legacy local tables and is disabled.
     flash("Model pages are temporarily disabled.", "warning")
     return redirect(url_for('index'))
-    conn = _get_db_conn(); init_schema(conn)
-    # Latest run by default
-    runs = sql_df(
-        "SELECT DISTINCT ts_ms FROM predictions WHERE model_id=? ORDER BY ts_ms DESC LIMIT 50",
-        params=(model_id,)
-    )
-    ts_param = request.args.get("ts")
-    ts_ms = None
-    if ts_param:
-        try:
-            ts_ms = int(ts_param)
-        except Exception:
-            ts_ms = None
-    if ts_ms is None and not runs.empty:
-        ts_ms = int(runs.iloc[0]["ts_ms"])  # latest
-    date_from = request.args.get("from"); date_to = request.args.get("to")
-    # Optionally trigger evaluation on request
-    if request.args.get("run") == "1":
-        from .eval_sf import evaluate_superfecta
-        try:
-            evaluate_superfecta(conn, model_id=model_id, ts_ms=ts_ms, date_from=date_from or None, date_to=date_to or None)
-        except Exception:
-            pass
-    # Load eval rows
-    params = [model_id]
-    where = ["model_id=?"]
-    if ts_ms is not None:
-        where.append("ts_ms=?"); params.append(ts_ms)
-    if date_from:
-        where.append("product_id IN (SELECT product_id FROM tote_products WHERE start_iso >= ?)"); params.append(date_from)
-    if date_to:
-        where.append("product_id IN (SELECT product_id FROM tote_products WHERE start_iso <= ?)"); params.append(date_to)
-    sql = "SELECT * FROM superfecta_eval WHERE " + " AND ".join(where) + " ORDER BY ts_ms DESC"
-    ev = sql_df(conn, sql, params=tuple(params))
-    # Summary metrics
-    metrics = {"n": 0, "exact4": 0, "prefix3": 0, "prefix2": 0, "any4set": 0}
-    rows = []
-    if not ev.empty:
-        metrics["n"] = int(ev.shape[0])
-        for k in ("exact4","prefix3","prefix2","any4set"):
-            try:
-                metrics[k] = int(ev[k].sum())
-            except Exception:
-                metrics[k] = 0
-        rows = ev.to_dict("records")
-    conn.close()
-    return render_template("model_superfecta.html", model_id=model_id, ts_ms=ts_ms, ts_options=(runs.to_dict("records") if not runs.empty else []), filters={"from": date_from or "", "to": date_to or ""}, metrics=metrics, rows=rows)
 
 @app.route("/models/<model_id>/eval/event/<event_id>")
 def model_event_eval_page(model_id: str, event_id: str):
-    # This page relies on legacy local tables.
+    # This page relied on legacy local tables and is disabled.
     flash("Model pages are temporarily disabled.", "warning")
     return redirect(url_for('index'))
-    """Drill-down: show predicted probabilities vs actual finish for one event."""
-    ts_param = request.args.get("ts")
-    ts_ms = None
-    if ts_param:
-        try:
-            ts_ms = int(ts_param)
-        except Exception:
-            ts_ms = None
-    conn = _get_db_conn(); init_schema(conn)
-    if ts_ms is None:
-        row = conn.execute(
-            "SELECT MAX(ts_ms) FROM predictions WHERE model_id=? AND event_id=?",
-            (model_id, event_id)
-        ).fetchone()
-        ts_ms = int(row[0]) if row and row[0] is not None else None
-    # Event context
-    ev = conn.execute("SELECT * FROM tote_events WHERE event_id=?", (event_id,)).fetchone()
-    event = None
-    if ev:
-        cols = [c[0] for c in conn.execute('PRAGMA table_info(tote_events)').fetchall()]
-        event = {cols[i]: ev[i] for i in range(len(cols))}
-    else:
-        # fallback from products
-        pr = conn.execute("SELECT MIN(event_name), MIN(venue), MIN(start_iso) FROM tote_products WHERE event_id=?", (event_id,)).fetchone()
-        if pr:
-            event = {"event_id": event_id, "name": pr[0], "venue": pr[1], "start_iso": pr[2]}
-    # Predictions joined with results & names
-    rows = sql_df(
-        """
-        SELECT p.horse_id, h.name AS horse_name, p.proba, p.rank, r.finish_pos, r.cloth_number
-        FROM predictions p
-        LEFT JOIN hr_horses h ON h.horse_id = p.horse_id
-        LEFT JOIN hr_horse_runs r ON r.event_id = p.event_id AND r.horse_id = p.horse_id
-        WHERE p.model_id=? AND p.ts_ms=? AND p.event_id=?
-        ORDER BY p.proba DESC
-        """,
-        params=(model_id, ts_ms, event_id)
-    )
-    conn.close()
-    preds = rows.to_dict("records") if not rows.empty else []
-    return render_template("model_event_eval.html", model_id=model_id, ts_ms=ts_ms, event=event, event_id=event_id, preds=preds)
 @app.route("/imports")
 def imports_page():
     """Show latest data imports and basic counts from BigQuery."""
