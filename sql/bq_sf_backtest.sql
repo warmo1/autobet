@@ -1,134 +1,123 @@
--- Historical backtesting for a Superfecta weighting model.
--- This script evaluates the Plackett-Luce model (`tf_superfecta_perms`)
--- against historical race results and dividends.
+-- Historical backtesting for a Superfecta weighting model in BigQuery.
+--
+-- Evaluates the Plackett–Luce-style permutation generator (`tf_superfecta_perms`)
+-- against historical race results using winners from `hr_horse_runs`.
+--
+-- Inputs:
+--   backtest_start_date: start date (inclusive)
+--   backtest_end_date:   end date   (inclusive)
+--   model_top_n:         number of top runners to include in permutations
+--   cover_frac:          fraction of lines covered (e.g., 0.60 for 60%)
+--
+-- Notes:
+--   - Assumes predictions are populated (table `predictions`) and `tote_params.model_id`
+--     points to the model_id to use. The view `vw_superfecta_runner_strength` relies on this.
+--   - Requires `ensure_views()` to have been run to create the table function and views.
 
--- ====================================================================
--- Configuration
--- ====================================================================
-DECLARE backtest_start_date DATE DEFAULT '2023-01-01';
-DECLARE backtest_end_date DATE DEFAULT CURRENT_DATE();
--- The `top_n` parameter for the model: how many top runners to consider for permutations.
--- A higher number increases accuracy but also computational cost.
-DECLARE model_top_n INT64 DEFAULT 10;
+DECLARE backtest_start_date DATE DEFAULT DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY);
+DECLARE backtest_end_date   DATE DEFAULT CURRENT_DATE();
+DECLARE model_top_n         INT64 DEFAULT 10;
+DECLARE cover_frac          FLOAT64 DEFAULT 0.60;
 
--- ====================================================================
--- Backtesting Logic
--- =================================================_==================
+-- Helper CTE: closed Superfecta products in range with their events
+WITH prods AS (
+  SELECT
+    p.product_id,
+    p.event_id,
+    p.event_name,
+    COALESCE(e.venue, p.venue) AS venue,
+    e.country,
+    p.start_iso,
+    p.currency,
+    p.total_net,
+    p.total_gross
+  FROM `${BQ_PROJECT}.${BQ_DATASET}.tote_products` p
+  LEFT JOIN `${BQ_PROJECT}.${BQ_DATASET}.tote_events` e USING(event_id)
+  WHERE UPPER(p.bet_type) = 'SUPERFECTA'
+    AND DATE(SUBSTR(p.start_iso,1,10)) BETWEEN backtest_start_date AND backtest_end_date
+    AND UPPER(COALESCE(p.status,'')) IN ('CLOSED','SETTLED','RESULTED')
+),
+-- Winners by event (positions 1..4) from historical runs
+winners AS (
+  SELECT event_id,
+         MAX(IF(finish_pos=1, horse_id, NULL)) AS h1,
+         MAX(IF(finish_pos=2, horse_id, NULL)) AS h2,
+         MAX(IF(finish_pos=3, horse_id, NULL)) AS h3,
+         MAX(IF(finish_pos=4, horse_id, NULL)) AS h4
+  FROM `${BQ_PROJECT}.${BQ_DATASET}.hr_horse_runs`
+  WHERE finish_pos IS NOT NULL AND finish_pos BETWEEN 1 AND 4
+  GROUP BY event_id
+),
+-- Expand permutations for each product using the model’s strengths
+perms AS (
+  SELECT
+    p.product_id,
+    t.h1, t.h2, t.h3, t.h4,
+    t.p
+  FROM prods p,
+       `${BQ_PROJECT}.${BQ_DATASET}.tf_superfecta_perms`(p.product_id, model_top_n) AS t
+),
+-- Rank permutations by probability per product
+ranked AS (
+  SELECT
+    product_id,
+    h1, h2, h3, h4,
+    p,
+    ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY p DESC) AS rn,
+    COUNT(*)    OVER (PARTITION BY product_id) AS total_lines
+  FROM perms
+),
+-- Winning tuple per product (requires all 4 finishers present)
+answers AS (
+  SELECT pr.product_id, pr.event_id, w.h1, w.h2, w.h3, w.h4
+  FROM prods pr
+  JOIN winners w USING(event_id)
+  WHERE w.h1 IS NOT NULL AND w.h2 IS NOT NULL AND w.h3 IS NOT NULL AND w.h4 IS NOT NULL
+),
+-- Join ranked permutations with winning tuple to find the model rank and p for the true outcome
+hits AS (
+  SELECT
+    a.product_id,
+    a.event_id,
+    r.total_lines,
+    r.rn  AS winner_rank,
+    r.p   AS winner_p
+  FROM answers a
+  JOIN ranked r
+    ON r.product_id = a.product_id
+   AND r.h1 = a.h1 AND r.h2 = a.h2 AND r.h3 = a.h3 AND r.h4 = a.h4
+),
+coverage AS (
+  SELECT
+    r.product_id,
+    r.total_lines,
+    CAST(ROUND(cover_frac * r.total_lines) AS INT64) AS cover_lines,
+    MAX(IF(rn <= CAST(ROUND(cover_frac * r.total_lines) AS INT64), 1, 0)) OVER (PARTITION BY r.product_id) AS cover_flag
+  FROM ranked r
+)
 
--- Step 1: Identify historical Superfecta products with resulted dividends.
-CREATE OR REPLACE TEMP TABLE BacktestProducts AS
+-- Final per-product results: rank of the true outcome and hit@coverage
 SELECT
-  p.product_id,
-  p.event_id,
-  d.selection AS winning_selection,
-  d.dividend
-FROM `autobet-470818.autobet.tote_products` p
-JOIN `autobet-470818.autobet.tote_product_dividends` d ON p.product_id = d.product_id
-WHERE UPPER(p.bet_type) = 'SUPERFECTA'
-  AND p.status IN ('RESULTED', 'CLOSED')
-  AND d.dividend > 0
-  AND DATE(SUBSTR(p.start_iso, 1, 10)) BETWEEN backtest_start_date AND backtest_end_date
-  -- Ensure the dividend is for a valid Superfecta combination.
-  AND REGEXP_CONTAINS(d.selection, r'^\d+-\d+-\d+-\d+$');
+  pr.product_id,
+  pr.event_id,
+  pr.event_name,
+  pr.venue,
+  pr.country,
+  pr.start_iso,
+  pr.total_net,
+  h.total_lines,
+  h.winner_rank,
+  h.winner_p,
+  c.cover_lines,
+  (h.winner_rank IS NOT NULL AND h.winner_rank <= c.cover_lines) AS hit_at_coverage
+FROM prods pr
+LEFT JOIN hits h USING(product_id)
+LEFT JOIN coverage c USING(product_id)
+ORDER BY pr.start_iso;
 
--- Step 2: Get the actual winning horse_ids for each event from the results table.
--- This is more reliable than parsing the dividend string.
-CREATE OR REPLACE TEMP TABLE ActualWinners AS
-SELECT
-  r.event_id,
-  STRING_AGG(r.horse_id ORDER BY r.finish_pos ASC) AS winning_horse_ids
-FROM `autobet-470818.autobet.hr_horse_runs` r
-WHERE r.event_id IN (SELECT event_id FROM BacktestProducts)
-  AND r.finish_pos BETWEEN 1 AND 4
-GROUP BY r.event_id
-HAVING COUNT(r.horse_id) = 4;
-
--- Step 3: Run the Plackett-Luce model for each product and rank the predicted permutations.
--- This step inlines the logic from the `tf_superfecta_perms` function to avoid
--- performance issues and errors with correlated subqueries when calling table functions row-by-row.
-CREATE OR REPLACE TEMP TABLE ModelPredictions AS
-WITH
-  -- Get all runners and their model-derived strengths for the products in our backtest set.
-  AllRunners AS (
-    SELECT
-      s.product_id,
-      s.runner_id,
-      s.strength,
-      ROW_NUMBER() OVER (PARTITION BY s.product_id ORDER BY s.strength DESC) AS rnk
-    FROM `autobet-470818.autobet.vw_superfecta_runner_strength` s
-    WHERE s.product_id IN (SELECT product_id FROM BacktestProducts)
-  ),
-  -- Filter to the top N runners per product to manage permutation complexity.
-  TopRunners AS (
-    SELECT * FROM AllRunners WHERE rnk <= model_top_n
-  ),
-  -- Pre-calculate the sum of strengths for the top N runners in each product.
-  TotalStrength AS (
-    SELECT product_id, SUM(strength) AS sum_s FROM TopRunners GROUP BY product_id
-  ),
-  -- Generate all 1-2-3-4 permutations from the top N runners and calculate their Plackett-Luce probability.
-  Permutations AS (
-    SELECT
-      tr1.product_id,
-      tr1.runner_id AS h1, tr2.runner_id AS h2, tr3.runner_id AS h3, tr4.runner_id AS h4,
-      -- Plackett-Luce probability calculation
-      SAFE_DIVIDE(tr1.strength, t.sum_s) *
-      SAFE_DIVIDE(tr2.strength, (t.sum_s - tr1.strength)) *
-      SAFE_DIVIDE(tr3.strength, (t.sum_s - tr1.strength - tr2.strength)) *
-      SAFE_DIVIDE(tr4.strength, (t.sum_s - tr1.strength - tr2.strength - tr3.strength)) AS probability
-    FROM TopRunners tr1
-    JOIN TopRunners tr2 ON tr1.product_id = tr2.product_id AND tr2.runner_id != tr1.runner_id
-    JOIN TopRunners tr3 ON tr1.product_id = tr3.product_id AND tr3.runner_id NOT IN (tr1.runner_id, tr2.runner_id)
-    JOIN TopRunners tr4 ON tr1.product_id = tr4.product_id AND tr4.runner_id NOT IN (tr1.runner_id, tr2.runner_id, tr3.runner_id)
-    JOIN TotalStrength t ON t.product_id = tr1.product_id
-  )
--- Rank the generated permutations by their calculated probability.
-SELECT *,
-  CONCAT(h1, '-', h2, '-', h3, '-', h4) AS predicted_horse_ids,
-  ROW_NUMBER() OVER(PARTITION BY product_id ORDER BY probability DESC) AS pred_rank
-FROM Permutations;
-
--- Step 4: Join everything to create a final results table.
--- This table can be persisted for deeper analysis if needed.
-CREATE OR REPLACE TABLE `autobet-470818.autobet.superfecta_backtest_results` AS
-SELECT
-  bp.product_id,
-  bp.event_id,
-  e.start_iso,
-  e.venue,
-  aw.winning_horse_ids,
-  bp.winning_selection,
-  bp.dividend,
-  mp.pred_rank AS winner_rank,
-  mp.probability AS winner_probability,
-  (SELECT COUNT(1) FROM `autobet-470818.autobet.tote_product_selections` s WHERE s.product_id = bp.product_id AND s.leg_index = 1) AS num_runners,
-  (SELECT COUNT(1) FROM ModelPredictions WHERE product_id = bp.product_id) AS total_perms_considered
-FROM BacktestProducts bp
-JOIN `autobet-470818.autobet.tote_events` e ON bp.event_id = e.event_id
-JOIN ActualWinners aw ON bp.event_id = aw.event_id
-LEFT JOIN ModelPredictions mp ON bp.product_id = mp.product_id AND mp.predicted_horse_ids = aw.winning_horse_ids;
-
--- ====================================================================
--- Results & Summary
--- ====================================================================
-
--- Show some recent detailed results
-SELECT * FROM `autobet-470818.autobet.superfecta_backtest_results` ORDER BY start_iso DESC LIMIT 100;
-
--- Generate a summary of the backtest performance
-SELECT
-  'Overall' AS summary_group,
-  COUNT(product_id) AS total_races,
-  -- Hit Rate: How often was the model's top prediction the actual winner?
-  SAFE_DIVIDE(COUNTIF(winner_rank = 1), COUNT(product_id)) AS hit_rate_top_1,
-  -- Coverage: How often was the winner in the top 10 predictions?
-  SAFE_DIVIDE(COUNTIF(winner_rank <= 10), COUNT(product_id)) AS hit_rate_top_10,
-  -- ROI: What was the return on investment if we bet £1 on the top prediction each time?
-  -- (Total Dividends from Hits - Total Bets) / Total Bets
-  SAFE_DIVIDE(
-    SUM(IF(winner_rank = 1, dividend, 0)) - COUNT(product_id),
-    COUNT(product_id)
-  ) AS roi_top_1_bet,
-  -- Average dividend when we hit the top prediction
-  AVG(IF(winner_rank = 1, dividend, NULL)) AS avg_dividend_on_hit
-FROM `autobet-470818.autobet.superfecta_backtest_results`;
+-- To aggregate summary metrics, wrap the above SELECT in another query, e.g.:
+-- SELECT
+--   COUNTIF(hit_at_coverage) AS hits,
+--   COUNT(1) AS races,
+--   SAFE_DIVIDE(COUNTIF(hit_at_coverage), COUNT(1)) AS hit_rate
+-- FROM ( ... the final SELECT above ... );

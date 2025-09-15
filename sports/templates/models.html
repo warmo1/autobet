@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+
+{% block title %}Models{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h1>Model Backtest</h1>
+    <a class="btn btn-outline-secondary" href="{{ url_for('models_page') }}">Reset</a>
+  </div>
+
+  <form method="GET" action="{{ url_for('models_page') }}" class="row g-3 align-items-end bg-light p-3 rounded mb-4">
+    <div class="col-md-3">
+      <label class="form-label" for="start">Start</label>
+      <input type="date" id="start" name="start" class="form-control" value="{{ params.start }}" />
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="end">End</label>
+      <input type="date" id="end" name="end" class="form-control" value="{{ params.end }}" />
+    </div>
+    <div class="col-md-2">
+      <label class="form-label" for="top_n">Top N</label>
+      <input type="number" id="top_n" name="top_n" class="form-control" value="{{ params.top_n }}" min="4" max="20" />
+    </div>
+    <div class="col-md-2">
+      <label class="form-label" for="coverage">Coverage</label>
+      <input type="number" step="0.05" id="coverage" name="coverage" class="form-control" value="{{ params.coverage }}" min="0" max="1" />
+    </div>
+    <div class="col-md-2">
+      <label class="form-label" for="limit">Limit</label>
+      <input type="number" id="limit" name="limit" class="form-control" value="{{ params.limit }}" min="50" max="2000" />
+    </div>
+    <div class="col-12">
+      <button type="submit" class="btn btn-primary">Run Backtest</button>
+      <a class="btn btn-outline-primary" id="btn-json" href="#">View JSON</a>
+    </div>
+  </form>
+
+  <div class="alert alert-secondary small">
+    <b>What these settings mean:</b>
+    <ul class="mb-0">
+      <li><b>Top N</b>: number of highest‑strength runners we allow into the permutations. Lower values produce fewer lines and a more concentrated staking plan; higher values produce more coverage and a longer tail of lines.</li>
+      <li><b>Coverage</b>: fraction of ranked lines you “buy” starting from the highest probability. For example 0.60 buys the top 60% of lines by model probability.</li>
+      <li><b>Hit Rate</b>: share of races where the true 1–4 finishing order is within the purchased coverage. It does not account for EV or stake sizing; use the calculators/viability page for that.</li>
+      <li><b>Weights</b>: the model uses <i>predictions</i> when present; otherwise it derives strengths from WIN probable odds (mapped to horse IDs). This is the same weighting engine used by the calculator on the Superfecta page.</li>
+    </ul>
+  </div>
+
+  <div class="row mb-3">
+    <div class="col-md-3">
+      <div class="card">
+        <div class="card-body">
+          <div class="text-muted">Races</div>
+          <div class="fs-4">{{ summary.races or 0 }}</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="card">
+        <div class="card-body">
+          <div class="text-muted">With Winner Rank</div>
+          <div class="fs-4">{{ summary.with_winner_rank or 0 }}</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="card">
+        <div class="card-body">
+          <div class="text-muted">Hits @ Coverage</div>
+          <div class="fs-4">{{ summary.hits_at_cov or 0 }}</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="card">
+        <div class="card-body">
+          <div class="text-muted">Hit Rate</div>
+          <div class="fs-4">{{ (summary.hit_rate or 0) | pct1 }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {% if rows and rows|length > 0 %}
+  <div class="table-responsive">
+    <table class="table table-striped table-hover">
+      <thead>
+        <tr>
+          <th>Start</th>
+          <th>Event</th>
+          <th>Venue</th>
+          <th>Country</th>
+          <th>Pool Net</th>
+          <th>Total Lines</th>
+          <th>Cover Lines</th>
+          <th>Winner Rank</th>
+          <th>Weights</th>
+          <th>Hit?</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td>{{ r.start_iso | datetime }}</td>
+          <td>{{ r.event_name }}</td>
+          <td>{{ r.venue }}</td>
+          <td>{{ r.country }}</td>
+          <td>{{ r.total_net | f2 }}</td>
+          <td>{{ r.total_lines }}</td>
+          <td>{{ r.cover_lines }}</td>
+          <td>{{ r.winner_rank if r.winner_rank is not none else '-' }}</td>
+          <td>{% if r.weights_source %}{{ r.weights_source }}{% else %}-{% endif %}</td>
+          <td>{% if r.hit_at_coverage %}<span class="badge bg-success">Yes</span>{% else %}<span class="badge bg-secondary">No</span>{% endif %}</td>
+          <td class="text-end">
+            <a class="btn btn-sm btn-outline-primary" href="{{ url_for('tote_calculators_page') }}?product_id={{ r.product_id }}&bet_type=SUPERFECTA&top_n={{ params.top_n }}&coverage={{ params.coverage }}">Open</a>
+            <button class="btn btn-sm btn-outline-secondary btn-ev" data-pid="{{ r.product_id }}" data-topn="{{ params.top_n }}">EV</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="alert alert-info">No rows returned for the selected period.</div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+document.getElementById('btn-json').addEventListener('click', function(e){
+  e.preventDefault();
+  const p = new URLSearchParams(new FormData(document.querySelector('form')));
+  const url = `/api/models/backtest?${p.toString()}`;
+  window.open(url, '_blank');
+});
+
+// EV Curve modal setup
+const modalHtml = `
+<div class="modal fade" id="evModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">EV Breakeven Curve</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body"><canvas id="evChart" height="120"></canvas></div>
+    </div>
+  </div>
+</div>`;
+document.body.insertAdjacentHTML('beforeend', modalHtml);
+let evChart;
+function showEvChart(rows){
+  const ctx = document.getElementById('evChart');
+  const x = rows.map(r => Number(r.lines_frac));
+  const y = rows.map(r => Number(r.o_min_break_even));
+  if(evChart){ evChart.destroy(); }
+  evChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: x, datasets: [{ label: 'O_min breakeven vs coverage', data: y, borderColor: '#0d6efd', fill: false }] },
+    options: { scales: { x: { title: {display:true, text:'Coverage (fraction)'} }, y: { title:{display:true, text:'O_min (gross)'} } } }
+  });
+  const modal = new bootstrap.Modal(document.getElementById('evModal'));
+  modal.show();
+}
+
+document.querySelectorAll('.btn-ev').forEach(btn => {
+  btn.addEventListener('click', async (e) => {
+    e.preventDefault();
+    const pid = btn.dataset.pid;
+    const topn = btn.dataset.topn || 10;
+    try{
+      const url = `/api/models/ev_curve?pid=${encodeURIComponent(pid)}&top_n=${encodeURIComponent(topn)}`;
+      const res = await fetch(url);
+      const j = await res.json();
+      if(!res.ok || j.error){ throw new Error(j.error || `HTTP ${res.status}`); }
+      showEvChart(j.rows || []);
+    }catch(err){
+      console.error('EV fetch error', err);
+      alert('Could not load EV curve: ' + err.message);
+    }
+  });
+});
+</script>
+{% endblock %}
