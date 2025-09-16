@@ -2832,21 +2832,21 @@ def tote_superfecta_detail(product_id: str):
     # Runners with latest probable odds (if available)
     runners2: list = []
     try: # noqa
-            r2 = sql_df(
-                """
-                SELECT
-                    o.selection_id,
-                    o.cloth_number,
-                    COALESCE(s.competitor, o.selection_id) AS horse,
-                    o.decimal_odds,
-                    TIMESTAMP_MILLIS(o.ts_ms) AS odds_iso
-                FROM vw_tote_probable_odds o
-                JOIN tote_products p ON o.product_id = p.product_id
-                LEFT JOIN tote_product_selections s ON o.selection_id = s.selection_id AND o.product_id = p.product_id
-                WHERE p.event_id = @event_id AND UPPER(p.bet_type) = 'WIN'
-                ORDER BY o.cloth_number ASC
-            """,
-            params={'event_id': p.get('event_id')}
+        r2 = sql_df(
+            """
+            SELECT
+                o.selection_id,
+                o.cloth_number,
+                COALESCE(s.competitor, o.selection_id) AS horse,
+                o.decimal_odds,
+                TIMESTAMP_MILLIS(o.ts_ms) AS odds_iso
+            FROM vw_tote_probable_odds o
+            JOIN tote_products p ON o.product_id = p.product_id
+            LEFT JOIN tote_product_selections s ON o.selection_id = s.selection_id AND o.product_id = p.product_id
+            WHERE p.event_id = @event_id AND UPPER(p.bet_type) = 'WIN'
+            ORDER BY o.cloth_number ASC
+        """,
+        params={'event_id': p.get('event_id')}
         )
         runners2 = r2.to_dict("records") if not r2.empty else []
     except Exception as e:
