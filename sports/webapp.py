@@ -16,7 +16,7 @@ from google.cloud import bigquery
 from .providers.tote_bets import place_audit_superfecta
 from .providers.tote_bets import refresh_bet_status, audit_list_bets, sync_bets_from_api
 from .gcp import publish_pubsub_message
-from .providers.pl_calcs import calculate_pl_strategy
+from .providers.pl_calcs import calculate_pl_strategy, calculate_pl_from_perms
 import itertools
 import math
 import requests
@@ -3626,26 +3626,73 @@ def tote_live_model_page():
                 if odds_df.empty or odds_df['odds'].isnull().all():
                     flash(f"Could not fetch probable odds for {p['event_name']}. Cannot run model.", "warning")
                 else:
-                    # Run the model
-                    calc_result = calculate_pl_strategy(
-                        runners=odds_df.to_dict("records"),
-                        bet_type="SUPERFECTA",
-                        bankroll=float(model_params.get("stake_per_line", 10.0) * 100), # Example bankroll
-                        key_horse_mult=2.0, # Default
-                        poor_horse_mult=0.5, # Default
-                        concentration=0.0, # Default
-                        market_inefficiency=0.1, # Default
-                        desired_profit_pct=5.0, # Default
-                        take_rate=float(p.get("deduction_rate") or model_params.get("t", 0.3)),
-                        net_rollover=float(p.get("rollover") or model_params.get("R", 0.0)),
-                        inc_self=True,
-                        div_mult=1.0,
-                        # Let the model compute f-share automatically unless user overrides
-                        f_fix=None,
-                        pool_gross_other=float(p.get("total_gross") or 0.0),
-                    )
+                    # Prefer BigQuery permutations for performance and accuracy
+                    calc_result = None
+                    try:
+                        if _use_bq():
+                            top_n = int(max(1, len(odds_df)))
+                            perms_df = sql_df(
+                                f"SELECT * FROM `{cfg.bq_project}.{cfg.bq_dataset}.tf_superfecta_perms_any`(@pid, @top_n)",
+                                params={"pid": p["product_id"], "top_n": top_n},
+                                cache_ttl=0,
+                            )
+                        else:
+                            perms_df = None
+                    except Exception:
+                        perms_df = None
 
-                    pl_model = calc_result.get("pl_model")
+                    if perms_df is not None and not perms_df.empty:
+                        # Build runner odds map from WIN market
+                        odds_map = {}
+                        try:
+                            for _, r in odds_df.iterrows():
+                                n = str(int(r["number"])) if not pd.isna(r["number"]) else None
+                                if n:
+                                    odds_map[n] = float(r["odds"]) if not pd.isna(r["odds"]) else None
+                        except Exception:
+                            odds_map = {}
+
+                        # Prepare perms for EV helper
+                        rows = []
+                        for _, r in perms_df.sort_values("p", ascending=False).iterrows():
+                            ids = [str(r.get("h1")), str(r.get("h2")), str(r.get("h3")), str(r.get("h4"))]
+                            rows.append({"ids": ids, "probability": float(r.get("p") or 0.0)})
+
+                        ev_res = calculate_pl_from_perms(
+                            perms=rows,
+                            bankroll=float(model_params.get("stake_per_line", 10.0) * 100),
+                            runner_odds=odds_map,
+                            concentration=0.0,
+                            market_inefficiency=0.1,
+                            desired_profit_pct=5.0,
+                            take_rate=float(p.get("deduction_rate") or model_params.get("t", 0.3)),
+                            net_rollover=float(p.get("rollover") or model_params.get("R", 0.0)),
+                            inc_self=True,
+                            div_mult=1.0,
+                            f_fix=None,
+                            pool_gross_other=float(p.get("total_gross") or 0.0),
+                        )
+                        pl_model = ev_res.get("pl_model")
+                    else:
+                        # Fallback: run local Python model
+                        calc_result = calculate_pl_strategy(
+                            runners=odds_df.to_dict("records"),
+                            bet_type="SUPERFECTA",
+                            bankroll=float(model_params.get("stake_per_line", 10.0) * 100), # Example bankroll
+                            key_horse_mult=2.0, # Default
+                            poor_horse_mult=0.5, # Default
+                            concentration=0.0, # Default
+                            market_inefficiency=0.1, # Default
+                            desired_profit_pct=5.0, # Default
+                            take_rate=float(p.get("deduction_rate") or model_params.get("t", 0.3)),
+                            net_rollover=float(p.get("rollover") or model_params.get("R", 0.0)),
+                            inc_self=True,
+                            div_mult=1.0,
+                            # Let the model compute f-share automatically unless user overrides
+                            f_fix=None,
+                            pool_gross_other=float(p.get("total_gross") or 0.0),
+                        )
+                        pl_model = calc_result.get("pl_model")
                     if pl_model and pl_model.get("best_scenario"):
                         scenario = pl_model["best_scenario"]
                         staking_plan = pl_model.get("staking_plan") or []
