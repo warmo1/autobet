@@ -291,7 +291,7 @@
         <div class="card mb-4 border-primary">
             <div class="card-header bg-primary text-white">
                 <h4>Place Bet: {{ product.event_name }} — {{ product.venue }}</h4>
-                <div class="small">Start: {{ product.start_iso | datetime }} UTC • Product: {{ product.product_id }} • {{ product.currency }}</div>
+                <div class="small">Start: <span class="time-iso" data-iso="{{ product.start_iso }}">{{ product.start_iso }}</span> • Product: {{ product.product_id }} • {{ product.currency }}</div>
             </div>
             <div class="card-body">
                 {% with pl_res = results.pl_model, best = results.pl_model.best_scenario %}

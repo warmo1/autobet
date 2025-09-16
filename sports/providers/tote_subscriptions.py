@@ -396,23 +396,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                     else:
                         payload = (msg.get("payload") or {}).get("data") or {}
 
-                    # Store raw when not using a BigQuery sink (legacy/local)
-                    if not _is_bq_sink(conn):
-                        try:
-                            conn.execute(
-                                "INSERT OR REPLACE INTO tote_messages(ts_ms, channel, kind, entity_id, audit, payload) VALUES(?,?,?,?,?,?)",
-                                (
-                                    ts,
-                                    str(payload.get("id") or ""),
-                                    str(payload.get("type") or ""),
-                                    str(payload.get("id") or ""),
-                                    0,
-                                    json.dumps(payload),
-                                ),
-                            )
-                            conn.commit()
-                        except Exception:
-                            pass
+                    # Legacy SQLite raw message storage removed; use BigQuery logs below when available.
 
                     # Parse message data (payload is already the GraphQL data object)
                     try:
@@ -499,23 +483,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                             pass
                                         except Exception:
                                             pass
-                                    else:
-                                        try:
-                                            row = conn.execute(
-                                                "SELECT event_id, bet_type, status, currency, start_iso FROM tote_products WHERE product_id=?",
-                                                (pid,),
-                                            ).fetchone()
-                                            ev, bt, st, curr, start_iso = (row or (None, None, None, None, None))
-                                            conn.execute(
-                                                """
-                                                INSERT OR REPLACE INTO tote_pool_snapshots(product_id,event_id,bet_type,status,currency,start_iso,ts_ms,total_gross,total_net)
-                                                VALUES(?,?,?,?,?,?,?,?,?)
-                                                """,
-                                                (pid, ev, bt, st, curr, start_iso, ts, gross, net),
-                                            )
-                                            conn.commit()
-                                        except Exception:
-                                            pass
+                                    # SQLite fallback removed; BigQuery sink is required.
 
                         # onEventStatusChanged → update tote_events.status
                         if "onEventStatusChanged" in data:
@@ -556,12 +524,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                             pass
                                         except Exception:
                                             pass
-                                    else:
-                                        try:
-                                            conn.execute("UPDATE tote_events SET status=? WHERE event_id=?", (status, eid))
-                                            conn.commit()
-                                        except Exception:
-                                            pass
+                                    # SQLite fallback removed; BigQuery sink is required.
 
                         # onEventResultChanged → per-competitor finishing positions
                         if "onEventResultChanged" in data:
@@ -589,15 +552,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                                     await q.put(("upsert_tote_event_results_log", r))
                                         except Exception:
                                             pass
-                                    else:
-                                        try:
-                                            conn.execute(
-                                                "UPDATE tote_events SET result_status=COALESCE(result_status,'RESULTED') WHERE event_id=?",
-                                                (eid,),
-                                            )
-                                            conn.commit()
-                                        except Exception:
-                                            pass
+                                    # SQLite fallback removed; BigQuery sink is required.
 
                         # onPoolDividendChanged → append dividend updates per selection
                         if "onPoolDividendChanged" in data:

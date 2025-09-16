@@ -126,12 +126,12 @@ def _today_iso() -> str:
 # --- Background: pool subscription (optional) ---
 _pool_thread_started = False
 
-    def _pool_subscriber_loop():
-        from .providers.tote_subscriptions import run_subscriber
-        while True:
-            try:
-                # The subscriber loop will now use the BigQuery sink via the new db layer
-                db = get_db()
+def _pool_subscriber_loop():
+    from .providers.tote_subscriptions import run_subscriber
+    while True:
+        try:
+            # The subscriber loop will now use the BigQuery sink via the new db layer
+            db = get_db()
             # Pass the local SSE event bus so the subscriber can publish UI updates
             run_subscriber(db, duration=None, event_callback=event_bus.publish)
         except Exception as e:
@@ -1151,7 +1151,70 @@ def tote_calculators_page():
                 flash(f"Probable odds fetch (BQ) failed: {e}", "error")
         # Skip legacy local fallback; rely solely on BigQuery probable odds or selection units
         # If no runners found, the calculators will show a warning below.
-        if (not runners) or len(runners) == 0:
+        # Prefer BigQuery permutation function for SUPERFECTA
+        used_bq_perms = False
+        if _use_bq() and bet_type == "SUPERFECTA":
+            try:
+                # Prefer the *_any function which works with predictions or odds-derived strengths
+                perms_df = sql_df(
+                    f"SELECT * FROM `{cfg.bq_project}.{cfg.bq_dataset}.tf_superfecta_perms_any`(@pid, @top_n)",
+                    params={"pid": product_id, "top_n": top_n},
+                    cache_ttl=0,
+                )
+                if (perms_df is None) or perms_df.empty:
+                    # Fallback to the horse_any variant if available (uses event-level WIN odds mapping)
+                    try:
+                        perms_df = sql_df(
+                            f"SELECT * FROM `{cfg.bq_project}.{cfg.bq_dataset}.tf_superfecta_perms_horse_any`(@pid, @top_n)",
+                            params={"pid": product_id, "top_n": top_n},
+                            cache_ttl=0,
+                        )
+                    except Exception:
+                        perms_df = None
+                if perms_df is not None and not perms_df.empty:
+                    # Sort by probability descending
+                    perms_df = perms_df.sort_values("p", ascending=False).reset_index(drop=True)
+                    total_lines = int(len(perms_df))
+                    target_lines = max(1, int(round(total_lines * coverage)))
+                    # Compute cumulative coverage and take top 30 to show
+                    cum_vals = perms_df["p"].cumsum()
+                    cum_p = float(cum_vals.iloc[target_lines - 1]) if target_lines <= total_lines else float(cum_vals.iloc[-1])
+                    rows = []
+                    show_n = min(30, total_lines)
+                    for i in range(show_n):
+                        r = perms_df.iloc[i]
+                        rows.append({
+                            "rank": i + 1,
+                            "h1": r.get("h1"),
+                            "h2": r.get("h2"),
+                            "h3": r.get("h3"),
+                            "h4": r.get("h4"),
+                            "p": float(r.get("p") or 0.0),
+                            "cum_p": float(cum_vals.iloc[i]),
+                        })
+                    top_lines = rows
+                    random_cov = target_lines / float(total_lines or 1)
+                    efficiency = (cum_p / random_cov) if random_cov > 0 else None
+                    # Breakeven using S lines
+                    S = stake_per_line * float(target_lines)
+                    try:
+                        if f_share is not None and f_share > 0 and (1.0 - t_val) > 0:
+                            o_min_val = (S / (f_share * (1.0 - t_val))) - S
+                        else:
+                            o_min_val = None
+                    except Exception:
+                        o_min_val = None
+                    o_min = o_min_val
+                    used_bq_perms = True
+            except Exception as e:
+                # Fall through to local calculation if BQ fails
+                try:
+                    flash(f"BigQuery permutation function error: {e}", "warning")
+                except Exception:
+                    pass
+
+        # Fallback: local PL enumeration (only if BQ not used)
+        if not used_bq_perms:
             runners = []
 
             # Build PL permutations for superfecta
@@ -1295,6 +1358,67 @@ def tote_calculators_page():
         venues=(venues_df['venue'].tolist() if not venues_df.empty else []),
         venue=venue,
     )
+
+@app.route("/api/models/backtest")
+def api_models_backtest():
+    """Run the BigQuery backtest and return JSON summary + sample rows.
+
+    Query params:
+      start: YYYY-MM-DD (default: 2024-01-01)
+      end:   YYYY-MM-DD (default: today)
+      top_n: int (default: 10)
+      coverage: float (0..1, default: 0.60)
+      limit: int (default: 200)
+    """
+    if not _use_bq():
+        return app.response_class(json.dumps({"error": "BigQuery not configured"}), mimetype="application/json", status=400)
+    try:
+        start = (request.args.get("start") or "2024-01-01").strip()
+        end = (request.args.get("end") or _today_iso()).strip()
+        try:
+            top_n = int(request.args.get("top_n") or 10)
+        except Exception:
+            top_n = 10
+        try:
+            coverage = float(request.args.get("coverage") or 0.60)
+        except Exception:
+            coverage = 0.60
+        try:
+            limit = max(1, int(request.args.get("limit") or 200))
+        except Exception:
+            limit = 200
+
+        # Use the horse_any backtest that works with predictions or odds-derived strengths
+        tf = f"`{cfg.bq_project}.{cfg.bq_dataset}.tf_sf_backtest_horse_any`"
+        rows_df = sql_df(
+            f"SELECT * FROM {tf}(@start,@end,@top_n,@cov) ORDER BY start_iso LIMIT @lim",
+            params={"start": start, "end": end, "top_n": top_n, "cov": coverage, "lim": limit},
+            cache_ttl=0,
+        )
+        # Summary metrics
+        sum_df = sql_df(
+            f"""
+            WITH r AS (
+              SELECT * FROM {tf}(@start,@end,@top_n,@cov)
+            )
+            SELECT
+              COUNT(*) AS races,
+              COUNTIF(winner_rank IS NOT NULL) AS with_winner_rank,
+              COUNTIF(hit_at_coverage) AS hits_at_cov,
+              SAFE_DIVIDE(COUNTIF(hit_at_coverage), NULLIF(COUNT(*),0)) AS hit_rate
+            FROM r
+            """,
+            params={"start": start, "end": end, "top_n": top_n, "cov": coverage},
+            cache_ttl=0,
+        )
+        payload = {
+            "params": {"start": start, "end": end, "top_n": top_n, "coverage": coverage},
+            "summary": ({} if sum_df.empty else sum_df.iloc[0].to_dict()),
+            "rows": ([] if rows_df.empty else rows_df.to_dict("records")),
+        }
+        return app.response_class(json.dumps(payload), mimetype="application/json")
+    except Exception as e:
+        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
 @app.route("/tote/viability", methods=["GET", "POST"])
 def tote_viability_page():
@@ -1969,6 +2093,15 @@ def audit_bets_page():
         for _, row in df.iterrows():
             bet_data = row.to_dict()
             bet_data['created'] = bet_data.get('ts_ms')
+            # Provide ISO string for client-side local time rendering
+            try:
+                ts_ms_val = int(bet_data.get('ts_ms')) if bet_data.get('ts_ms') is not None else None
+                if ts_ms_val is not None:
+                    bet_data['created_iso'] = datetime.utcfromtimestamp(ts_ms_val/1000.0).strftime('%Y-%m-%dT%H:%M:%SZ')
+                else:
+                    bet_data['created_iso'] = None
+            except Exception:
+                bet_data['created_iso'] = None
             bet_data['tote_bet_id'] = None  # Default
 
             try:
@@ -2039,6 +2172,15 @@ def audit_bet_detail_page(bet_id: str):
         df = sql_df("SELECT * FROM tote_audit_bets WHERE bet_id = ?", params=(bet_id,))
         if not df.empty:
             detail = df.iloc[0].to_dict()
+            # Compute ISO for local time rendering
+            try:
+                ts_ms_val = int(detail.get('ts_ms')) if detail.get('ts_ms') is not None else None
+                if ts_ms_val is not None:
+                    detail['_created_iso'] = datetime.utcfromtimestamp(ts_ms_val/1000.0).strftime('%Y-%m-%dT%H:%M:%SZ')
+                else:
+                    detail['_created_iso'] = None
+            except Exception:
+                detail['_created_iso'] = None
             # Parse stored request/response for pretty printing in the template
             try:
                 rr = json.loads(detail.get("response_json") or "{}")
@@ -2768,19 +2910,19 @@ def tote_superfecta_detail(product_id: str):
     # Runners with latest probable odds (if available)
     runners2: list = []
     try: # noqa
-        r2 = sql_df(
-            """
-            SELECT
-                o.selection_id,
-                o.cloth_number,
-                COALESCE(s.competitor, o.selection_id) AS horse,
-                o.decimal_odds,
-                TIMESTAMP_MILLIS(o.ts_ms) AS odds_ts
-            FROM vw_tote_probable_odds o
-            JOIN tote_products p ON o.product_id = p.product_id
-            LEFT JOIN tote_product_selections s ON o.selection_id = s.selection_id AND o.product_id = p.product_id
-            WHERE p.event_id = @event_id AND UPPER(p.bet_type) = 'WIN'
-            ORDER BY o.cloth_number ASC
+            r2 = sql_df(
+                """
+                SELECT
+                    o.selection_id,
+                    o.cloth_number,
+                    COALESCE(s.competitor, o.selection_id) AS horse,
+                    o.decimal_odds,
+                    TIMESTAMP_MILLIS(o.ts_ms) AS odds_iso
+                FROM vw_tote_probable_odds o
+                JOIN tote_products p ON o.product_id = p.product_id
+                LEFT JOIN tote_product_selections s ON o.selection_id = s.selection_id AND o.product_id = p.product_id
+                WHERE p.event_id = @event_id AND UPPER(p.bet_type) = 'WIN'
+                ORDER BY o.cloth_number ASC
             """,
             params={'event_id': p.get('event_id')}
         )
@@ -3071,14 +3213,117 @@ def tote_product_calculator_page(product_id: str):
             try:
                 odf = sql_df(
                     """
-                    SELECT s.number AS cloth, COALESCE(s.competitor, CAST(s.number AS STRING)) AS name, CAST(o.decimal_odds AS FLOAT64) AS odds
-                    FROM vw_tote_probable_odds o 
-                    JOIN tote_product_selections s ON o.selection_id = s.selection_id 
+                    SELECT
+                      COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64)) AS cloth,
+                      COALESCE(s.competitor, CONCAT('#', CAST(COALESCE(s.number, o.cloth_number) AS STRING))) AS name,
+                      CAST(o.decimal_odds AS FLOAT64) AS odds
+                    FROM vw_tote_probable_odds o
+                    LEFT JOIN tote_product_selections s
+                      ON s.selection_id = o.selection_id AND s.product_id = o.product_id
                     WHERE o.product_id = ?
-                    ORDER BY CAST(s.number AS INT64)
+                    ORDER BY COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64))
                     """,
                     params=(win_pid,),
                 )
+                # If no odds found, try an inline refresh from the partner endpoint then re-query
+                if odf.empty or odf['odds'].isnull().all():
+                    try:
+                        base = cfg.tote_graphql_url or ""
+                        host_root = ""
+                        try:
+                            if "/partner/" in base:
+                                host_root = base.split("/partner/")[0].rstrip("/")
+                            else:
+                                from urllib.parse import urlparse
+                                u = urlparse(base)
+                                if u.scheme and u.netloc:
+                                    host_root = f"{u.scheme}://{u.netloc}"
+                        except Exception:
+                            host_root = ""
+                        if not host_root:
+                            host_root = "https://hub.production.racing.tote.co.uk"
+                        candidates = [
+                            f"{host_root}/partner/gateway/probable-odds/v1/products/{win_pid}",
+                            f"{host_root}/partner/gateway/v1/products/{win_pid}/probable-odds",
+                            f"{host_root}/v1/products/{win_pid}/probable-odds",
+                        ]
+                        headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
+                        data = None
+                        for url in candidates:
+                            try:
+                                r = requests.get(url, headers=headers, timeout=10)
+                                if r.status_code == 200:
+                                    data = r.json(); break
+                            except Exception:
+                                continue
+                        if data:
+                            def _extract_lines(obj):
+                                lines = []
+                                if not isinstance(obj, dict):
+                                    return lines
+                                try:
+                                    if isinstance(obj.get("lines"), dict) and isinstance(obj["lines"].get("nodes"), list):
+                                        for ln in obj["lines"]["nodes"]:
+                                            lines.append(ln)
+                                    elif isinstance(obj.get("lines"), list):
+                                        lines.extend(obj["lines"])
+                                except Exception:
+                                    pass
+                                for k, v in list(obj.items()):
+                                    if isinstance(v, dict):
+                                        lines.extend(_extract_lines(v))
+                                    elif isinstance(v, list):
+                                        for it in v:
+                                            if isinstance(it, dict):
+                                                lines.extend(_extract_lines(it))
+                                return lines
+                            lines = _extract_lines(data)
+                            norm_lines = []
+                            for ln in lines:
+                                try:
+                                    odds = ((ln.get("odds") or {}).get("decimal"))
+                                    legs = ln.get("legs") or []
+                                    sel_id = None
+                                    if legs:
+                                        try:
+                                            sels = (legs[0].get("lineSelections") or [])
+                                            if sels:
+                                                sel_id = sels[0].get("selectionId")
+                                        except Exception:
+                                            pass
+                                    if sel_id and odds is not None:
+                                        norm_lines.append({
+                                            "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
+                                            "odds": {"decimal": float(odds)},
+                                        })
+                                except Exception:
+                                    continue
+                            if norm_lines:
+                                from .bq import get_bq_sink
+                                sink = get_bq_sink()
+                                import time as _t
+                                ts_ms = int(_t.time() * 1000)
+                                payload = {"products": {"nodes": [{"id": win_pid, "lines": {"nodes": norm_lines}}]}}
+                                sink.upsert_raw_tote_probable_odds([
+                                    {"raw_id": f"probable:{win_pid}:{ts_ms}", "fetched_ts": ts_ms, "payload": json.dumps(payload), "product_id": win_pid}
+                                ])
+                                # Re-query odds
+                                odf = sql_df(
+                                    """
+                                    SELECT
+                                      COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64)) AS cloth,
+                                      COALESCE(s.competitor, CONCAT('#', CAST(COALESCE(s.number, o.cloth_number) AS STRING))) AS name,
+                                      CAST(o.decimal_odds AS FLOAT64) AS odds
+                                    FROM vw_tote_probable_odds o
+                                    LEFT JOIN tote_product_selections s
+                                      ON s.selection_id = o.selection_id AND s.product_id = o.product_id
+                                    WHERE o.product_id = ?
+                                    ORDER BY COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64))
+                                    """,
+                                    params=(win_pid,),
+                                )
+                    except Exception:
+                        pass
                 for _, r in odf.iterrows():
                     try:
                         name = str(r.get("name") or f"#{r.get('cloth')}")
@@ -3298,8 +3543,11 @@ def tote_live_model_page():
     
     where = [
         "UPPER(p.bet_type) = 'SUPERFECTA'",
-        "UPPER(COALESCE(p.status,'')) IN ('OPEN','SELLING','UNKNOWN')",
     ]
+    # On the live model page, show all of today's events regardless of status.
+    # For other dates, keep to OPEN/SELLING/UNKNOWN to avoid clutter.
+    if date_filter != _today_iso():
+        where.append("UPPER(COALESCE(p.status,'')) IN ('OPEN','SELLING','UNKNOWN')")
     params = {}
 
     if country:
@@ -3337,6 +3585,19 @@ def tote_live_model_page():
             flash(f"Query for upcoming events failed: {e2}", "error")
             upcoming_df = pd.DataFrame()
 
+    # Secondary fallback: for GB today, use the 'next 60 minutes' helper view if empty
+    try:
+        if (upcoming_df is None or upcoming_df.empty) and country == "GB" and date_filter == _today_iso():
+            gb_df = sql_df(
+                "SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, total_gross, total_net \n"
+                "FROM vw_gb_open_superfecta_next60 ORDER BY start_iso",
+                cache_ttl=30,
+            )
+            if gb_df is not None and not gb_df.empty:
+                upcoming_df = gb_df
+    except Exception:
+        pass
+
     calculation_result = None
     if calculate_product_id and not upcoming_df.empty:
         # Find the specific product to calculate
@@ -3349,7 +3610,17 @@ def tote_live_model_page():
             else:
                 # Fetch runners and probable odds
                 odds_df = sql_df(
-                    "SELECT s.number, s.competitor as name, o.decimal_odds as odds FROM vw_tote_probable_odds o JOIN tote_product_selections s ON o.selection_id = s.selection_id WHERE o.product_id = ? ORDER BY s.number",
+                    """
+                    SELECT
+                      COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64)) AS number,
+                      COALESCE(s.competitor, CONCAT('#', CAST(COALESCE(s.number, o.cloth_number) AS STRING))) AS name,
+                      CAST(o.decimal_odds AS FLOAT64) AS odds
+                    FROM vw_tote_probable_odds o
+                    LEFT JOIN tote_product_selections s
+                      ON s.selection_id = o.selection_id AND s.product_id = o.product_id
+                    WHERE o.product_id = ?
+                    ORDER BY COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64))
+                    """,
                     params=(p["win_product_id"],)
                 )
                 if odds_df.empty or odds_df['odds'].isnull().all():
@@ -3436,209 +3707,138 @@ def api_tote_placement_id():
 
 @app.route("/models")
 def models_page():
-    flash("Models pages are temporarily disabled.", "warning")
-    return redirect(url_for('index'))
-    conn = _get_db_conn(); init_schema(conn)
-    df = sql_df(conn, "SELECT model_id, created_ts, market, algo, metrics_json, path FROM models ORDER BY created_ts DESC")
-    conn.close()
-    models = [] if df.empty else df.to_dict("records")
-    # Parse metrics json
-    for m in models:
-        try:
-            m["metrics"] = json.loads(m.get("metrics_json") or "{}")
-        except Exception:
-            m["metrics"] = {}
-    # Attach latest prediction run timestamp per model
-    conn = _get_db_conn()
-    for m in models:
-        try:
-            row = conn.execute("SELECT MAX(ts_ms) FROM predictions WHERE model_id=?", (m.get('model_id'),)).fetchone()
-            m["latest_ts_ms"] = int(row[0]) if row and row[0] is not None else None
-        except Exception:
-            m["latest_ts_ms"] = None
-    conn.close()
-    return render_template("models.html", models=models)
+    """Responsive Models page backed by BigQuery backtest TFs."""
+    if not _use_bq():
+        flash("BigQuery is not configured. Set BQ_PROJECT and BQ_DATASET.", "error")
+        return redirect(url_for('index'))
+
+    start = (request.args.get("start") or "2024-01-01").strip()
+    end = (request.args.get("end") or _today_iso()).strip()
+    try:
+        top_n = int(request.args.get("top_n") or 10)
+    except Exception:
+        top_n = 10
+    try:
+        coverage = float(request.args.get("coverage") or 0.60)
+    except Exception:
+        coverage = 0.60
+    try:
+        limit = max(1, int(request.args.get("limit") or 200))
+    except Exception:
+        limit = 200
+
+    tf = f"`{cfg.bq_project}.{cfg.bq_dataset}.tf_sf_backtest_horse_any`"
+    try:
+        rows_df = sql_df(
+            f"SELECT * FROM {tf}(@start,@end,@top_n,@cov) ORDER BY start_iso LIMIT @lim",
+            params={"start": start, "end": end, "top_n": top_n, "cov": coverage, "lim": limit},
+            cache_ttl=0,
+        )
+    except Exception as e:
+        rows_df = pd.DataFrame()
+        flash(f"Backtest error: {e}", "error")
+
+    try:
+        sum_df = sql_df(
+            f"""
+            WITH r AS (
+              SELECT * FROM {tf}(@start,@end,@top_n,@cov)
+            )
+            SELECT
+              COUNT(*) AS races,
+              COUNTIF(winner_rank IS NOT NULL) AS with_winner_rank,
+              COUNTIF(hit_at_coverage) AS hits_at_cov,
+              SAFE_DIVIDE(COUNTIF(hit_at_coverage), NULLIF(COUNT(*),0)) AS hit_rate
+            FROM r
+            """,
+            params={"start": start, "end": end, "top_n": top_n, "cov": coverage},
+            cache_ttl=0,
+        )
+        summary = ({} if sum_df.empty else sum_df.iloc[0].to_dict())
+    except Exception as e:
+        summary = {}
+        flash(f"Summary error: {e}", "error")
+
+    # Annotate weight source (PRED vs ODDS) for displayed rows
+    try:
+        if rows_df is not None and not rows_df.empty:
+            pids = list(dict.fromkeys(rows_df["product_id"].astype(str).tolist()))
+            if pids:
+                csv_ids = ",".join(pids)
+                pred_df = sql_df(
+                    """
+                    WITH ids AS (SELECT id FROM UNNEST(SPLIT(@ids, ',')) AS id)
+                    SELECT DISTINCT s.product_id
+                    FROM vw_superfecta_runner_strength s
+                    JOIN ids ON ids.id = s.product_id
+                    """,
+                    params={"ids": csv_ids},
+                    cache_ttl=0,
+                )
+                odds_df = sql_df(
+                    """
+                    WITH ids AS (SELECT id FROM UNNEST(SPLIT(@ids, ',')) AS id)
+                    SELECT DISTINCT s.product_id
+                    FROM vw_sf_strengths_from_win_horse s
+                    JOIN ids ON ids.id = s.product_id
+                    """,
+                    params={"ids": csv_ids},
+                    cache_ttl=0,
+                )
+                pred_set = set([] if pred_df is None or pred_df.empty else pred_df["product_id"].astype(str).tolist())
+                odds_set = set([] if odds_df is None or odds_df.empty else odds_df["product_id"].astype(str).tolist())
+                rows_df["weights_source"] = rows_df["product_id"].astype(str).apply(
+                    lambda x: ("PRED" if x in pred_set else ("ODDS" if x in odds_set else "UNKNOWN"))
+                )
+    except Exception:
+        pass
+
+    return render_template(
+        "models.html",
+        params={"start": start, "end": end, "top_n": top_n, "coverage": coverage, "limit": limit},
+        summary=summary,
+        rows=([] if rows_df is None or rows_df.empty else rows_df.to_dict("records")),
+    )
+
+@app.route("/api/models/ev_curve")
+def api_models_ev_curve():
+    if not _use_bq():
+        return app.response_class(json.dumps({"error": "BigQuery not configured"}), mimetype="application/json", status=400)
+    pid = (request.args.get("pid") or "").strip()
+    try:
+        top_n = int(request.args.get("top_n") or 10)
+    except Exception:
+        top_n = 10
+    if not pid:
+        return app.response_class(json.dumps({"error": "missing pid"}), mimetype="application/json", status=400)
+    try:
+        df = sql_df(
+            f"SELECT line_index, lines_frac, cum_prob, stake_total, o_min_break_even FROM `{cfg.bq_project}.{cfg.bq_dataset}.tf_sf_breakeven_latest`(@pid, @top_n) ORDER BY line_index",
+            params={"pid": pid, "top_n": top_n},
+            cache_ttl=0,
+        )
+        rows = ([] if df is None or df.empty else df.to_dict("records"))
+        return app.response_class(json.dumps({"rows": rows}), mimetype="application/json")
+    except Exception as e:
+        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
 @app.route("/models/<model_id>/eval")
 def model_eval_page(model_id: str):
-    # This page relies on legacy local tables.
+    # This page relied on legacy local tables and is disabled.
     flash("Model evaluation is temporarily disabled.", "warning")
     return redirect(url_for('index'))
-    conn = _get_db_conn(); init_schema(conn)
-    # Available prediction runs (timestamps)
-    runs = sql_df(
-        "SELECT DISTINCT ts_ms FROM predictions WHERE model_id=? ORDER BY ts_ms DESC LIMIT 50",
-        params=(model_id,)
-    )
-    ts_param = request.args.get("ts")
-    ts_ms = None
-    if ts_param:
-        try:
-            ts_ms = int(ts_param)
-        except Exception:
-            ts_ms = None
-    if ts_ms is None and not runs.empty:
-        ts_ms = int(runs.iloc[0]["ts_ms"])  # latest
-    date_from = request.args.get("from")
-    date_to = request.args.get("to")
-    # Load joined predictions + results within optional date filter
-    params = [model_id, ts_ms]
-    where = ""
-    if date_from:
-        where += " AND p.event_id IN (SELECT event_id FROM tote_products WHERE start_iso >= ?)"; params.append(date_from)
-    if date_to:
-        where += " AND p.event_id IN (SELECT event_id FROM tote_products WHERE start_iso <= ?)"; params.append(date_to)
-    sql = (
-        "SELECT p.event_id, p.horse_id, p.proba, r.finish_pos, h.name AS horse_name, f.event_date "
-        "FROM predictions p "
-        "JOIN hr_horse_runs r ON r.event_id = p.event_id AND r.horse_id = p.horse_id "
-        "LEFT JOIN hr_horses h ON h.horse_id = p.horse_id "
-        "LEFT JOIN features_runner_event f ON f.event_id = p.event_id AND f.horse_id = p.horse_id "
-        "WHERE p.model_id=? AND p.ts_ms=?" + where
-    )
-    df = sql_df(conn, sql, params=tuple(params))
-    # If empty, render page with controls
-    metrics = {"events": 0, "top1_hits": 0, "hit_rate": None, "brier": None}
-    samples = []
-    ts_options = (runs.to_dict("records") if not runs.empty else [])
-    if not df.empty:
-        # Compute per-event winner
-        df["is_winner"] = (df["finish_pos"] == 1).astype(int)
-        # Hit rate of top-1 per event
-        top = df.sort_values(["event_id", "proba"], ascending=[True, False]).drop_duplicates(["event_id"], keep="first")
-        hits = int(top["is_winner"].sum())
-        n_events = int(top.shape[0])
-        hit_rate = (hits / n_events) if n_events else None
-        # Brier score over all rows
-        try:
-            brier = float(((df["proba"] - df["is_winner"]) ** 2).mean())
-        except Exception:
-            brier = None
-        metrics = {"events": n_events, "top1_hits": hits, "hit_rate": hit_rate, "brier": brier}
-        # Build samples of mismatches and matches
-        # Mismatches: predicted top-1 but not winner
-        merged = top.copy()
-        merged["pred_name"] = merged["horse_name"]
-        # Actual winners per event for context
-        winners = df[df["finish_pos"] == 1][["event_id", "horse_name"]].drop_duplicates(["event_id"])
-        winners = winners.rename(columns={"horse_name": "winner_name"})
-        merged = pd.merge(merged, winners, on="event_id", how="left")
-        bad = merged[merged["is_winner"] == 0].sort_values("proba", ascending=False).head(50)
-        good = merged[merged["is_winner"] == 1].sort_values("proba", ascending=False).head(50)
-        samples = {
-            "misses": bad.to_dict("records"),
-            "hits": good.to_dict("records"),
-        }
-    conn.close()
-    return render_template(
-        "model_eval.html",
-        model_id=model_id,
-        ts_ms=ts_ms,
-        ts_options=ts_options,
-        filters={"from": date_from or "", "to": date_to or ""},
-        metrics=metrics,
-        samples=samples,
-    )
 
 @app.route("/models/<model_id>/superfecta")
 def model_superfecta_eval_page(model_id: str):
-    # This page relies on legacy local tables.
+    # This page relied on legacy local tables and is disabled.
     flash("Model pages are temporarily disabled.", "warning")
     return redirect(url_for('index'))
-    conn = _get_db_conn(); init_schema(conn)
-    # Latest run by default
-    runs = sql_df(
-        "SELECT DISTINCT ts_ms FROM predictions WHERE model_id=? ORDER BY ts_ms DESC LIMIT 50",
-        params=(model_id,)
-    )
-    ts_param = request.args.get("ts")
-    ts_ms = None
-    if ts_param:
-        try:
-            ts_ms = int(ts_param)
-        except Exception:
-            ts_ms = None
-    if ts_ms is None and not runs.empty:
-        ts_ms = int(runs.iloc[0]["ts_ms"])  # latest
-    date_from = request.args.get("from"); date_to = request.args.get("to")
-    # Optionally trigger evaluation on request
-    if request.args.get("run") == "1":
-        from .eval_sf import evaluate_superfecta
-        try:
-            evaluate_superfecta(conn, model_id=model_id, ts_ms=ts_ms, date_from=date_from or None, date_to=date_to or None)
-        except Exception:
-            pass
-    # Load eval rows
-    params = [model_id]
-    where = ["model_id=?"]
-    if ts_ms is not None:
-        where.append("ts_ms=?"); params.append(ts_ms)
-    if date_from:
-        where.append("product_id IN (SELECT product_id FROM tote_products WHERE start_iso >= ?)"); params.append(date_from)
-    if date_to:
-        where.append("product_id IN (SELECT product_id FROM tote_products WHERE start_iso <= ?)"); params.append(date_to)
-    sql = "SELECT * FROM superfecta_eval WHERE " + " AND ".join(where) + " ORDER BY ts_ms DESC"
-    ev = sql_df(conn, sql, params=tuple(params))
-    # Summary metrics
-    metrics = {"n": 0, "exact4": 0, "prefix3": 0, "prefix2": 0, "any4set": 0}
-    rows = []
-    if not ev.empty:
-        metrics["n"] = int(ev.shape[0])
-        for k in ("exact4","prefix3","prefix2","any4set"):
-            try:
-                metrics[k] = int(ev[k].sum())
-            except Exception:
-                metrics[k] = 0
-        rows = ev.to_dict("records")
-    conn.close()
-    return render_template("model_superfecta.html", model_id=model_id, ts_ms=ts_ms, ts_options=(runs.to_dict("records") if not runs.empty else []), filters={"from": date_from or "", "to": date_to or ""}, metrics=metrics, rows=rows)
 
 @app.route("/models/<model_id>/eval/event/<event_id>")
 def model_event_eval_page(model_id: str, event_id: str):
-    # This page relies on legacy local tables.
+    # This page relied on legacy local tables and is disabled.
     flash("Model pages are temporarily disabled.", "warning")
     return redirect(url_for('index'))
-    """Drill-down: show predicted probabilities vs actual finish for one event."""
-    ts_param = request.args.get("ts")
-    ts_ms = None
-    if ts_param:
-        try:
-            ts_ms = int(ts_param)
-        except Exception:
-            ts_ms = None
-    conn = _get_db_conn(); init_schema(conn)
-    if ts_ms is None:
-        row = conn.execute(
-            "SELECT MAX(ts_ms) FROM predictions WHERE model_id=? AND event_id=?",
-            (model_id, event_id)
-        ).fetchone()
-        ts_ms = int(row[0]) if row and row[0] is not None else None
-    # Event context
-    ev = conn.execute("SELECT * FROM tote_events WHERE event_id=?", (event_id,)).fetchone()
-    event = None
-    if ev:
-        cols = [c[0] for c in conn.execute('PRAGMA table_info(tote_events)').fetchall()]
-        event = {cols[i]: ev[i] for i in range(len(cols))}
-    else:
-        # fallback from products
-        pr = conn.execute("SELECT MIN(event_name), MIN(venue), MIN(start_iso) FROM tote_products WHERE event_id=?", (event_id,)).fetchone()
-        if pr:
-            event = {"event_id": event_id, "name": pr[0], "venue": pr[1], "start_iso": pr[2]}
-    # Predictions joined with results & names
-    rows = sql_df(
-        """
-        SELECT p.horse_id, h.name AS horse_name, p.proba, p.rank, r.finish_pos, r.cloth_number
-        FROM predictions p
-        LEFT JOIN hr_horses h ON h.horse_id = p.horse_id
-        LEFT JOIN hr_horse_runs r ON r.event_id = p.event_id AND r.horse_id = p.horse_id
-        WHERE p.model_id=? AND p.ts_ms=? AND p.event_id=?
-        ORDER BY p.proba DESC
-        """,
-        params=(model_id, ts_ms, event_id)
-    )
-    conn.close()
-    preds = rows.to_dict("records") if not rows.empty else []
-    return render_template("model_event_eval.html", model_id=model_id, ts_ms=ts_ms, event=event, event_id=event_id, preds=preds)
 @app.route("/imports")
 def imports_page():
     """Show latest data imports and basic counts from BigQuery."""
