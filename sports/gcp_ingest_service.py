@@ -116,7 +116,7 @@ def handle_pubsub() -> tuple[str, int]:
               product(id: $id) {
                 id
                 ... on BettingProduct {
-                  lines { nodes { legs { lineSelections { selectionId } } odds { decimal } } }
+                  lines { nodes { legs { legId lineSelections { selectionId } } odds { decimal } } }
                 }
               }
             }
@@ -132,11 +132,11 @@ def handle_pubsub() -> tuple[str, int]:
             for ln in lines:
                 try:
                     odds = ((ln.get("odds") or {}).get("decimal"))
-                    legs = ln.get("legs") or []
+                    legs_obj = ln.get("legs")
                     sel_id = None
-                    if legs:
-                        sels = (legs[0].get("lineSelections") or [])
-                        if sels:
+                    if isinstance(legs_obj, dict):
+                        sels = legs_obj.get("lineSelections") or []
+                        if sels and isinstance(sels, list) and sels:
                             sel_id = sels[0].get("selectionId")
                     if sel_id and odds is not None:
                         norm_lines.append({

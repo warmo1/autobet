@@ -51,7 +51,7 @@ query GetProducts($date: Date, $status: BettingProductSellingStatus, $first: Int
         lines {
           nodes {
             id
-            legs { lineSelections { selectionId } }
+            legs { legId lineSelections { selectionId } }
             odds { decimal name status }
           }
         }
@@ -102,7 +102,7 @@ query GetProducts($date: Date, $status: BettingProductSellingStatus, $first: Int
         lines {
           nodes {
             id
-            legs { lineSelections { selectionId } }
+            legs { legId lineSelections { selectionId } }
             odds { decimal name status }
           }
         }
@@ -142,7 +142,7 @@ query GetProduct($id: String!) {
       lines {
         nodes {
           id
-          legs { lineSelections { selectionId } }
+          legs { legId lineSelections { selectionId } }
           odds { decimal name status }
         }
       }
@@ -172,7 +172,7 @@ query GetProduct($id: String!) {
         country { alpha2Code }
         betType { code }
         selling { status }
-        lines { nodes { id legs { lineSelections { selectionId } } odds { decimal name status } } }
+        lines { nodes { id legs { legId lineSelections { selectionId } } odds { decimal name status } } }
         legs { nodes { event { id name venue { name } scheduledStartDateTime { iso8601 } } selections { nodes { id competitor { name details { __typename ... on HorseDetails { clothNumber } } } } } } }
       }
     }
