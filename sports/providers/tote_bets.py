@@ -99,7 +99,7 @@ def _resolve_audit_ids_for_simple(
         trace.append(f"live_product_id={live_product_id}; live_selection_id={live_selection_id}")
     prod = _bq_query_rows(
         sink,
-        "SELECT event_id, bet_type FROM tote_products WHERE product_id=@pid LIMIT 1",
+        "SELECT event_id, bet_type FROM `autobet-470818.autobet.tote_products` WHERE product_id=@pid LIMIT 1",
         {"pid": live_product_id},
     )
     if not prod:
@@ -116,7 +116,7 @@ def _resolve_audit_ids_for_simple(
         return None
     sel = _bq_query_rows(
         sink,
-        "SELECT number FROM tote_product_selections WHERE product_id=@pid AND selection_id=@sid LIMIT 1",
+        "SELECT number FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=@pid AND selection_id=@sid LIMIT 1",
         {"pid": live_product_id, "sid": live_selection_id},
     )
     runner_num = None
@@ -452,7 +452,7 @@ def place_audit_simple_bet(
         from google.cloud import bigquery
         # Prefer product_leg_id by product+leg, independent of selection (more robust)
         pli_df = sink.query(
-            "SELECT product_leg_id FROM tote_product_selections WHERE product_id=@pid AND leg_index=1 LIMIT 1",
+            "SELECT product_leg_id FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=@pid AND leg_index=1 LIMIT 1",
             job_config=bigquery.QueryJobConfig(query_parameters=[
                 bigquery.ScalarQueryParameter("pid", "STRING", product_id),
             ])
@@ -467,7 +467,7 @@ def place_audit_simple_bet(
         try:
             from google.cloud import bigquery
             pli_df2 = sink.query(
-                "SELECT product_leg_id FROM tote_product_selections WHERE product_id=@pid AND selection_id=@sid LIMIT 1",
+                "SELECT product_leg_id FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=@pid AND selection_id=@sid LIMIT 1",
                 job_config=bigquery.QueryJobConfig(query_parameters=[
                     bigquery.ScalarQueryParameter("pid", "STRING", product_id),
                     bigquery.ScalarQueryParameter("sid", "STRING", selection_id),
@@ -668,7 +668,7 @@ def place_audit_superfecta(
     try:
         rows = _bq_query_rows(
             sink,
-            "SELECT product_leg_id, selection_id, number, leg_index FROM tote_product_selections WHERE product_id=@pid",
+            "SELECT product_leg_id, selection_id, number, leg_index FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=@pid",
             {"pid": product_id},
         )
         for r in rows:
@@ -748,7 +748,7 @@ def place_audit_superfecta(
                             # Cache locally for future requests
                             try:
                                 sink.upsert_tote_product_selections([
-                                    {
+                            { # type: ignore
                                         "product_id": product_id,
                                         "leg_index": li,
                                         "product_leg_id": product_leg_id,
@@ -778,7 +778,7 @@ def place_audit_superfecta(
             # Get event/bet_type context from BQ
             ctx = _bq_query_rows(
                 sink,
-                "SELECT event_id, bet_type FROM tote_products WHERE product_id=@pid LIMIT 1",
+                "SELECT event_id, bet_type FROM `autobet-470818.autobet.tote_products` WHERE product_id=@pid LIMIT 1",
                 {"pid": product_id},
             )
             ev_id = (ctx[0] or {}).get("event_id") if ctx else None
@@ -1222,7 +1222,7 @@ def place_audit_win(
     # Find the OPEN WIN product_id for the event from BigQuery
     win_product_rows = _bq_query_rows(
         sink,
-        "SELECT product_id FROM tote_products WHERE event_id=@eid AND bet_type='WIN' AND status='OPEN' LIMIT 1",
+        "SELECT product_id FROM `autobet-470818.autobet.tote_products` WHERE event_id=@eid AND bet_type='WIN' AND status='OPEN' LIMIT 1",
         {"eid": event_id}
     )
     
@@ -1270,8 +1270,7 @@ def refresh_bet_status(sink, *, bet_id: str, post: bool = False) -> Dict[str, An
     (audit endpoint by default) to update the stored status.
     """
     rows = _bq_query_rows(
-        sink,
-        "SELECT response_json, mode FROM tote_audit_bets WHERE bet_id=@bid LIMIT 1",
+        sink, "SELECT response_json, mode FROM `autobet-470818.autobet.tote_audit_bets` WHERE bet_id=@bid LIMIT 1",
         {"bid": bet_id},
     )
     if not rows:
@@ -1333,7 +1332,7 @@ def refresh_bet_status(sink, *, bet_id: str, post: bool = False) -> Dict[str, An
                     bigquery.ScalarQueryParameter("st", "STRING", st),
                     bigquery.ScalarQueryParameter("bid", "STRING", bet_id),
                 ])
-                sink.query("UPDATE tote_audit_bets SET status=@st WHERE bet_id=@bid", job_config=job_cfg)
+                sink.query("UPDATE `autobet-470818.autobet.tote_audit_bets` SET status=@st WHERE bet_id=@bid", job_config=job_cfg)
     except Exception:
         pass
 
@@ -1384,7 +1383,7 @@ def sync_bets_from_api(sink, api_data: Dict[str, Any]) -> int:
                 bigquery.ScalarQueryParameter("st", "STRING", status),
             ])
             sink.query(
-                "UPDATE tote_audit_bets SET status=@st WHERE response_json LIKE CONCAT('%', @tid, '%')",
+                "UPDATE `autobet-470818.autobet.tote_audit_bets` SET status=@st WHERE response_json LIKE CONCAT('%', @tid, '%')",
                 job_config=job_cfg,
             )
             updated += 1

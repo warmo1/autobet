@@ -61,7 +61,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                 pass
         return None
 
-    headers = {"Authorization": f"Api-Key {cfg.tote_api_key}"}
+    headers = {"Authorization": f"{cfg.tote_auth_scheme} {cfg.tote_api_key}"}
     subprotocols = ["graphql-transport-ws", "graphql-ws"]
     # Server enforces one root field per subscription operation.
     # Prepare a list of single-field subscription documents we will start with unique IDs.
@@ -74,12 +74,8 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
             subscription { onPoolTotalChanged {
               isFinalized
               productId
-              total {
-                # Use only __typename within nested amounts to avoid schema drift issues.
-                netAmount { __typename }
-                grossAmount { __typename }
-              }
-              carryIn { grossAmount { decimalAmount } }
+              total { netAmount { minorUnitsTotalAmount } grossAmount { minorUnitsTotalAmount } }
+              carryIn { grossAmount { minorUnitsTotalAmount } }
             } }
             """.strip(),
         ))
@@ -89,9 +85,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
             """
             subscription { onPoolDividendChanged {
               productId
-              dividends {
-                # Avoid schema drift in Money shape; fetch amounts via HTTP fallback when needed
-                dividend { __typename }
+              dividends { dividend { minorUnitsTotalAmount }
                 legs { legId selections { id finishingPosition } }
               }
             } }
@@ -163,9 +157,9 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                 query GetTotals($id: String!) {
                   product(id: $id) {
                     ... on BettingProduct {
-                      pool { total { grossAmount { decimalAmount } netAmount { decimalAmount } } }
+                      pool { total { grossAmount { decimalAmount amount minorUnitsTotalAmount } netAmount { decimalAmount amount minorUnitsTotalAmount } } }
                     }
-                    type { ... on BettingProduct { pool { total { grossAmount { decimalAmount } netAmount { decimalAmount } } } } }
+                    type { ... on BettingProduct { pool { total { grossAmount { decimalAmount amount minorUnitsTotalAmount } netAmount { decimalAmount amount minorUnitsTotalAmount } } } } }
                   }
                 }
                 """
@@ -175,20 +169,12 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
             node = data.get("product") or {}
             src = (node.get("type") or node) or {}
             total = ((src.get("pool") or {}).get("total") or {})
-            g = (((total.get("grossAmount") or {}).get("decimalAmount")))
-            n = (((total.get("netAmount") or {}).get("decimalAmount")))
+            g_val = _money_to_float(total.get("grossAmount"))
+            n_val = _money_to_float(total.get("netAmount"))
             try:
                 last_fetch_ts[pid] = now
             except Exception:
                 pass
-            try:
-                g_val = float(g) if g is not None else None
-            except Exception:
-                g_val = None
-            try:
-                n_val = float(n) if n is not None else None
-            except Exception:
-                n_val = None
             return (n_val, g_val)
         except Exception:
             return (None, None)
@@ -272,8 +258,8 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                 # Load products in the last ~36 hours from the view with the latest totals.
                 sql = (
                     """
-                    SELECT product_id, event_id, UPPER(bet_type) AS bet_type, currency, start_iso
-                    FROM vw_products_latest_totals
+                    SELECT product_id, event_id, UPPER(bet_type) AS bet_type, currency, start_iso " +
+                    "FROM `autobet-470818.autobet.vw_products_latest_totals` " +
                     WHERE SAFE.PARSE_TIMESTAMP('%Y-%m-%dT%H:%M:%SZ', start_iso) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 36 HOUR)
                     """
                 )
@@ -332,11 +318,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                     pass
                 # Send connection init based on negotiated protocol
                 if proto == "graphql-transport-ws":
-                    # Send auth in both upgrade header and init payload for compatibility
-                    await ws.send(json.dumps({
-                        "type": "connection_init",
-                        "payload": {"authorization": f"Api-Key {cfg.tote_api_key}"},
-                    }))
+                    await ws.send(json.dumps({"type": "connection_init", "payload": {}}))
                     # wait for ack or keep-alive
                     while True:
                         m = json.loads(await ws.recv())
@@ -349,7 +331,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                         except Exception:
                             continue
                 else:
-                    await ws.send(json.dumps({"type": "connection_init", "payload": {"authorization": f"Api-Key {cfg.tote_api_key}"}}))
+                    await ws.send(json.dumps({"type": "connection_init", "payload": {"authorization": f"{cfg.tote_auth_scheme} {cfg.tote_api_key}"}}))
                     for idx, (_name, qdoc) in enumerate(_subs(), start=1):
                         try:
                             await ws.send(json.dumps({"id": str(idx), "type": "start", "payload": {"query": qdoc}}))
@@ -406,24 +388,9 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                             node = data["onPoolTotalChanged"]
                             if node and isinstance(node, dict):
                                 pid = node.get("productId")
-                                # Try to read amounts from the payload; fall back to HTTP fetch if needed
                                 total = (node.get("total") or {})
-                                net_list = (total.get("netAmounts") or [])
-                                gross_list = (total.get("grossAmounts") or [])
-                                # Prefer explicit decimal amounts if present
-                                try:
-                                    net = float(net_list[0].get("decimalAmount")) if (net_list and net_list[0].get("decimalAmount") is not None) else None
-                                except Exception:
-                                    net = None
-                                try:
-                                    gross = float(gross_list[0].get("decimalAmount")) if (gross_list and gross_list[0].get("decimalAmount") is not None) else None
-                                except Exception:
-                                    gross = None
-                                # Fallback to singular Money objects
-                                if net is None:
-                                    net = _money_to_float((total.get("netAmount") or {}))
-                                if gross is None:
-                                    gross = _money_to_float((total.get("grossAmount") or {}))
+                                net = _money_to_float(total.get("netAmount"))
+                                gross = _money_to_float(total.get("grossAmount"))
                                 # If values are still missing, fetch via HTTP GraphQL as a fallback
                                 if (net is None or gross is None) and pid:
                                     try:
@@ -476,7 +443,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                                         total_gross=gross,
                                                         total_net=net,
                                                         rollover=rollover,
-                                                        currency=(ctx.get("currency") or (net_list[0].get("currency") or {}).get("code") if net_list else None),
+                                                        currency=ctx.get("currency"),
                                                         ts_ms=ts,
                                                     ))
                                         except asyncio.QueueFull:
@@ -566,8 +533,8 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                         # Optional HTTP fallback for amounts if WS payload lacks them
                                         fetched_amounts: dict[str, float] | None = None
                                         for d in dvs:
+                                            amount = _money_to_float(d.get("dividend"))
                                             legs = (d.get("legs") or [])
-                                            amount = None
                                             for lg in legs:
                                                 sels = (lg.get("selections") or [])
                                                 for s in sels:

@@ -1835,6 +1835,7 @@ class BigQuerySink:
           p.currency,
           p.total_gross,
           p.total_net,
+          p.rollover,
           ARRAY_LENGTH(JSON_EXTRACT_ARRAY(e.competitors_json, '$')) AS n_competitors
         FROM `{ds}.tote_products` p
         LEFT JOIN `{ds}.tote_events` e ON e.event_id = p.event_id
