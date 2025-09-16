@@ -106,7 +106,8 @@
                     <th>Event</th>
                     <th>Venue</th>
                     <th>Start Time</th>
-                    <th>Pool (Gross)</th>
+                    <th>Pool Gross+Rollover</th>
+                    <th>Pool Net+Rollover</th>
                     <th></th>
                 </tr>
             </thead>
@@ -116,7 +117,8 @@
                     <td>{{ event.event_name }}</td>
                     <td>{{ event.venue }}</td>
                     <td><span class="time-iso" data-iso="{{ event.start_iso }}">{{ event.start_iso }}</span></td>
-                    <td>{{ event.currency }} {{ event.total_gross | f2 }}</td>
+                    <td>{{ event.currency }} {{ ((event.total_gross or 0) + (event.rollover or 0)) | f2 }}</td>
+                    <td>{{ event.currency }} {{ ((event.total_net or 0) + (event.rollover or 0)) | f2 }}</td>
                     <td class="text-end">
                         <button class="btn btn-sm btn-outline-secondary me-2 btn-refresh-odds" data-eid="{{ event.event_id }}" title="Refresh probable odds from Tote API">
                             Refresh Odds
