@@ -74,8 +74,8 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
             subscription { onPoolTotalChanged {
               isFinalized
               productId
-              total { netAmount { minorUnitsTotalAmount } grossAmount { minorUnitsTotalAmount } }
-              carryIn { grossAmount { minorUnitsTotalAmount } }
+              total { netAmounts { decimalAmount } grossAmounts { decimalAmount } }
+              carryIn { grossAmounts { decimalAmount } }
             } }
             """.strip(),
         ))
@@ -85,7 +85,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
             """
             subscription { onPoolDividendChanged {
               productId
-              dividends { dividend { minorUnitsTotalAmount }
+              dividends { dividend { value { decimalAmount } }
                 legs { legId selections { id finishingPosition } }
               }
             } }
@@ -388,23 +388,19 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                             if node and isinstance(node, dict):
                                 pid = node.get("productId")
                                 total = (node.get("total") or {})
-                                net = _money_to_float(total.get("netAmount"))
-                                gross = _money_to_float(total.get("grossAmount"))
+                                net = _money_to_float((total.get("netAmounts") or [{}])[0])
+                                gross = _money_to_float((total.get("grossAmounts") or [{}])[0])
                                 # If values are still missing, fetch via HTTP GraphQL as a fallback
                                 if (net is None or gross is None) and pid:
                                     try:
-                                        n2, g2 = await _fetch_totals_http(str(pid))
-                                        if net is None:
-                                            net = n2
-                                        if gross is None:
-                                            gross = g2
+                                        n2, g2 = await _fetch_totals_http(str(pid)) # noqa
+                                        net = net if net is not None else n2
+                                        gross = gross if gross is not None else g2
                                     except Exception:
                                         pass
                                 # Carry-in rollover amount (if present)
-                                try:
-                                    rollover = float(((node.get("carryIn") or {}).get("grossAmount") or {}).get("decimalAmount") or 0.0)
-                                except Exception:
-                                    rollover = 0.0
+                                carry_in = node.get("carryIn") or {}
+                                rollover = _money_to_float((carry_in.get("grossAmounts") or [{}])[0]) or 0.0
                                 if pid:
                                     # Publish realtime update for UI consumers
                                     try:
@@ -529,7 +525,7 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                         # Optional HTTP fallback for amounts if WS payload lacks them
                                         fetched_amounts: dict[str, float] | None = None
                                         for d in dvs:
-                                            amount = _money_to_float(d.get("dividend"))
+                                            amount = _money_to_float((d.get("dividend") or {}).get("value"))
                                             legs = (d.get("legs") or [])
                                             for lg in legs:
                                                 sels = (lg.get("selections") or [])

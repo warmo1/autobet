@@ -619,7 +619,7 @@ def tote_events_page():
         where.append("SUBSTR(start_iso,1,10) <= ?"); params.append(date_to)
     base_sql = ( # noqa
         "SELECT event_id, name, venue, country, start_iso, sport, status, competitors_json, home, away "
-        "FROM `autobet-470818.autobet.tote_events`"
+        "FROM `tote_events`"
     )
     count_sql = base_sql.replace("SELECT event_id, name, venue, country, start_iso, sport, status, competitors_json, home, away", "SELECT COUNT(1) AS c")
     if where:
@@ -635,9 +635,23 @@ def tote_events_page():
     # Bypass cache for paged results to avoid any unexpected truncation/staleness
     df = sql_df(base_sql, params=tuple(params_paged), cache_ttl=0)
     total = int(sql_df(count_sql, params=tuple(params), cache_ttl=0).iloc[0]["c"])
-    countries_df = sql_df("SELECT DISTINCT country FROM `autobet-470818.autobet.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
-    sports_df = sql_df("SELECT DISTINCT sport FROM `autobet-470818.autobet.tote_events` WHERE sport IS NOT NULL AND sport<>'' ORDER BY sport")
-    venues_df = sql_df("SELECT DISTINCT venue FROM `autobet-470818.autobet.tote_events` WHERE venue IS NOT NULL AND venue<>'' ORDER BY venue")
+    try:
+        # Use the new materialized views for faster filter loading
+        countries_df = sql_df("SELECT country FROM `mv_event_filters_country` ORDER BY country")
+        sports_df = sql_df("SELECT sport FROM `mv_event_filters_sport` ORDER BY sport")
+        venues_df = sql_df("SELECT venue FROM `mv_event_filters_venue` ORDER BY venue")
+        country_options = countries_df['country'].tolist() if not countries_df.empty else []
+        sport_options = sports_df['sport'].tolist() if not sports_df.empty else []
+        venue_options = venues_df['venue'].tolist() if not venues_df.empty else []
+    except Exception:
+        # Fallback to direct queries if MV fails
+        countries_df = sql_df("SELECT DISTINCT country FROM `tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+        sports_df = sql_df("SELECT DISTINCT sport FROM `tote_events` WHERE sport IS NOT NULL AND sport<>'' ORDER BY sport")
+        venues_df = sql_df("SELECT DISTINCT venue FROM `tote_events` WHERE venue IS NOT NULL AND venue<>'' ORDER BY venue")
+        country_options = countries_df['country'].tolist() if not countries_df.empty else []
+        sport_options = sports_df['sport'].tolist() if not sports_df.empty else []
+        venue_options = venues_df['venue'].tolist() if not venues_df.empty else []
+
     events = df.to_dict("records") if not df.empty else []
     for ev in events:
         comps = []
@@ -661,9 +675,9 @@ def tote_events_page():
             "page": page,
             "total": total,
         },
-        country_options=(countries_df['country'].tolist() if not countries_df.empty else []),
-        sport_options=(sports_df['sport'].tolist() if not sports_df.empty else []),
-        venue_options=(venues_df['venue'].tolist() if not venues_df.empty else []),
+        country_options=country_options,
+        sport_options=sport_options,
+        venue_options=venue_options,
     )
 
 @app.route("/tote-superfecta", methods=["GET","POST"])
@@ -716,7 +730,10 @@ def tote_superfecta_page():
         df = sql_df(sql2, params=tuple(params))
 
     # Options for filters
-    cdf = sql_df("SELECT DISTINCT country FROM `autobet-470818.autobet.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+    try:
+        cdf = sql_df("SELECT country FROM `mv_event_filters_country` ORDER BY country")
+    except Exception:
+        cdf = sql_df("SELECT DISTINCT country FROM `autobet-470818.autobet.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
     # UI Improvement: Dynamic venue options based on other filters for a better user experience.
     vdf_sql = "SELECT DISTINCT COALESCE(e.venue, p.venue) AS venue FROM `autobet-470818.autobet.tote_products` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) WHERE UPPER(p.bet_type)='SUPERFECTA' AND COALESCE(e.venue, p.venue) IS NOT NULL AND COALESCE(e.venue, p.venue) <> ''"
     vdf_params: list[object] = []
@@ -2267,31 +2284,37 @@ def api_status_data_freshness():
 def api_status_qc():
     """Return QC gaps and counts from QC views."""
     try:
-        out: dict[str, Any] = {}
+        out: dict[str, Any] = {
+            "missing_runner_numbers": 0,
+            "missing_bet_rules": 0,
+            "probable_odds_avg_cov": None,
+            "gb_sf_missing_snapshots": 0,
+        }
         # Missing runner numbers today
         try:
             df = sql_df("SELECT COUNT(DISTINCT product_id) AS c FROM vw_qc_today_missing_runner_numbers")
             out["missing_runner_numbers"] = int(df.iloc[0]["c"]) if not df.empty else 0
         except Exception:
-            out["missing_runner_numbers"] = None
+            pass  # Keep default 0
         # Missing bet rules
         try:
             df = sql_df("SELECT COUNT(1) AS c FROM vw_qc_missing_bet_rules")
             out["missing_bet_rules"] = int(df.iloc[0]["c"]) if not df.empty else 0
         except Exception:
-            out["missing_bet_rules"] = None
+            pass  # Keep default 0
         # Probable odds coverage (average across products)
         try:
             df = sql_df("SELECT AVG(coverage) AS avg_cov FROM vw_qc_probable_odds_coverage")
-            out["probable_odds_avg_cov"] = float(df.iloc[0]["avg_cov"]) if not df.empty else None
+            if not df.empty and pd.notna(df.iloc[0]["avg_cov"]):
+                out["probable_odds_avg_cov"] = float(df.iloc[0]["avg_cov"])
         except Exception:
-            out["probable_odds_avg_cov"] = None
+            pass  # Keep default None
         # Today's GB Superfecta missing snapshots
         try:
             df = sql_df("SELECT COUNT(1) AS c FROM vw_qc_today_gb_sf_missing_snapshots")
             out["gb_sf_missing_snapshots"] = int(df.iloc[0]["c"]) if not df.empty else 0
         except Exception:
-            out["gb_sf_missing_snapshots"] = None
+            pass  # Keep default 0
         return app.response_class(json.dumps(out), mimetype="application/json")
     except Exception as e:
         return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
@@ -2302,20 +2325,16 @@ def api_status_upcoming():
     """Return upcoming races/products in the next 4 hours if view exists."""
     upcoming = []
     try:
-        # Prefer 240m GB Superfecta view if available
-        df = sql_df("SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, combos, S, roi_current, viable_now FROM vw_gb_open_superfecta_next240_be ORDER BY start_iso")
+        # Use the 60-minute view which is known to exist.
+        df = sql_df("SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, combos, S, roi_current, viable_now FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso")
         upcoming = df.to_dict("records") if not df.empty else []
     except Exception:
+        # Fallback: generic query for open products in the next 4 hours
         try:
-            # Secondary fallback: older 60m view name
-            df = sql_df("SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, combos, S, roi_current, viable_now FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso")
-            upcoming = df.to_dict("records") if not df.empty else []
-        except Exception:
-            # Final fallback: generic query for open products in the next 4 hours
             now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
             df = sql_df(
                 "SELECT p.product_id, p.event_id, COALESCE(p.event_name, e.name) AS event_name, e.sport, COALESCE(p.venue, e.venue) AS venue, COALESCE(e.country, p.currency) AS country, p.start_iso, p.status, p.currency, qc.avg_cov "
-                "FROM tote_products p "
+                "FROM vw_products_latest_totals p "
                 "LEFT JOIN tote_events e USING(event_id) "
                 "LEFT JOIN vw_qc_probable_odds_coverage qc ON p.product_id = qc.product_id "
                 "WHERE p.status='OPEN' AND TIMESTAMP(p.start_iso) BETWEEN TIMESTAMP(@now) AND TIMESTAMP_ADD(TIMESTAMP(@now), INTERVAL 4 HOUR) "
@@ -2324,6 +2343,7 @@ def api_status_upcoming():
             )
             upcoming = df.to_dict("records") if not df.empty else []
         except Exception:
+            # If all fallbacks fail, return an empty list.
             upcoming = []
     return app.response_class(json.dumps({"items": upcoming}), mimetype="application/json")
 

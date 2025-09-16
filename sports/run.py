@@ -127,7 +127,7 @@ def main(argv=None):
         if cfg.tote_graphql_url:
             client.base_url = cfg.tote_graphql_url
         sdl = client.graphql_sdl()
-        print(sdl[:2000])
+        print(sdl)
     sp_tote_sdl.set_defaults(func=_cmd_tote_sdl)
 
     # --- Tote API: SUPERFECTA products ---
