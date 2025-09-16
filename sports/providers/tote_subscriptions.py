@@ -378,7 +378,6 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                     else:
                         payload = (msg.get("payload") or {}).get("data") or {}
 
-                    # Legacy SQLite raw message storage removed; use BigQuery logs below when available.
 
                     # Parse message data (payload is already the GraphQL data object)
                     try:
@@ -450,7 +449,6 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                             pass
                                         except Exception:
                                             pass
-                                    # SQLite fallback removed; BigQuery sink is required.
 
                         # onEventStatusChanged → update tote_events.status
                         if "onEventStatusChanged" in data:
@@ -491,7 +489,6 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                             pass
                                         except Exception:
                                             pass
-                                    # SQLite fallback removed; BigQuery sink is required.
 
                         # onEventResultChanged → per-competitor finishing positions
                         if "onEventResultChanged" in data:
@@ -519,7 +516,6 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                                     await q.put(("upsert_tote_event_results_log", r))
                                         except Exception:
                                             pass
-                                    # SQLite fallback removed; BigQuery sink is required.
 
                         # onPoolDividendChanged → append dividend updates per selection
                         if "onPoolDividendChanged" in data:
@@ -727,8 +723,6 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                     }
                                     if q is not None:
                                         await q.put(("upsert_raw_tote", row))
-                                    else:
-                                        conn.upsert_raw_tote([row])
                                 except Exception:
                                     pass
 
