@@ -99,7 +99,7 @@ def load_bets():
     winning_selections_df.rename(columns={'selection': 'winning_selections'}, inplace=True)
 
     # 3. Add human-readable datetime
-    bets_df['bet_time'] = pd.to_datetime(bets_df['ts_ms'], unit='ms')
+    bets_df['bet_time'] = pd.to_datetime(bets_df['ts_ms'], unit='ms').dt.tz_localize('UTC').dt.tz_convert(None)
 
     # 4. Explode multi-line bets
     bets_df['lines'] = bets_df['selection'].str.split(',')
@@ -212,11 +212,23 @@ def get_data_freshness():
         ps_today = sql_df("SELECT COUNT(1) AS c FROM tote_pool_snapshots WHERE DATE(TIMESTAMP_MILLIS(ts_ms))=CURRENT_DATE()")
         ps_last = sql_df("SELECT TIMESTAMP_MILLIS(MAX(ts_ms)) AS ts FROM tote_pool_snapshots")
 
+        def _format_ts(df_col):
+            if df_col.empty or pd.isna(df_col.iloc[0]):
+                return "N/A"
+            # Convert pandas Timestamp (which is UTC from BQ) to local time string
+            return df_col.iloc[0].tz_convert(None).strftime('%Y-%m-%d %H:%M:%S')
+
         return {
-            "events": {"today": int(ev_today.iloc[0]["c"]) if not ev_today.empty else 0, "last": (str(ev_last.iloc[0]["ts"]) if not ev_last.empty and pd.notna(ev_last.iloc[0]["ts"]) else "N/A")},
-            "products": {"today": int(pr_today.iloc[0]["c"]) if not pr_today.empty else 0, "last": (str(pr_last.iloc[0]["ts"]) if not pr_last.empty and pd.notna(pr_last.iloc[0]["ts"]) else "N/A")},
-            "probable_odds": {"today": int(po_today.iloc[0]["c"]) if not po_today.empty else 0, "last": (str(po_last.iloc[0]["ts"]) if not po_last.empty and pd.notna(po_last.iloc[0]["ts"]) else "N/A")},
-            "pool_snapshots": {"today": int(ps_today.iloc[0]["c"]) if not ps_today.empty else 0, "last": (str(ps_last.iloc[0]["ts"]) if not ps_last.empty and pd.notna(ps_last.iloc[0]["ts"]) else "N/A")},
+            "events": {"today": int(ev_today.iloc[0]["c"]) if not ev_today.empty else 0, "last": _format_ts(ev_last['ts'])},
+            "products": {"today": int(pr_today.iloc[0]["c"]) if not pr_today.empty else 0, "last": _format_ts(pr_last['ts'])},
+            "probable_odds": {
+                "today": int(po_today.iloc[0]["c"]) if not po_today.empty else 0,
+                "last": _format_ts(po_last['ts']),
+            },
+            "pool_snapshots": {
+                "today": int(ps_today.iloc[0]["c"]) if not ps_today.empty else 0,
+                "last": _format_ts(ps_last['ts']),
+            },
         }
     except Exception as e:
         return {"error": str(e)}
@@ -311,7 +323,7 @@ def get_job_log():
             "SELECT job_id, component, task, status, started_ts, ended_ts, duration_ms, error "
             "FROM ingest_job_runs ORDER BY started_ts DESC LIMIT 50"
         )
-        df['started_ts'] = pd.to_datetime(df['started_ts'], unit='ms')
+        df['started_ts'] = pd.to_datetime(df['started_ts'], unit='ms').dt.tz_localize('UTC').dt.tz_convert(None)
         return df
     except Exception as e:
         st.error(f"Failed to fetch job log: {e}")
@@ -325,15 +337,19 @@ def get_upcoming_races_status():
     try:
         # First, try the 60-minute view which is known to exist.
         df = sql_df("SELECT product_id, event_name, venue, start_iso, roi_current, viable_now FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso")
-        if not df.empty:
-            return df
     except Exception:
         # This might fail if the view doesn't exist, so we'll fall back.
-        pass
-    
+        df = pd.DataFrame()
+
+    if not df.empty:
+        df['start_iso'] = pd.to_datetime(df['start_iso']).dt.tz_convert(None)
+        return df
+
     try:
         # Fallback to a generic query for any open Superfecta in the next 4 hours.
         df = sql_df("SELECT p.product_id, p.event_name, p.venue, p.start_iso FROM vw_products_latest_totals p WHERE UPPER(p.bet_type) = 'SUPERFECTA' AND p.status = 'OPEN' AND TIMESTAMP(p.start_iso) BETWEEN CURRENT_TIMESTAMP() AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 4 HOUR) ORDER BY p.start_iso")
+        if not df.empty:
+            df['start_iso'] = pd.to_datetime(df['start_iso']).dt.tz_convert(None)
         return df
     except Exception:
         # If all else fails, return an empty DataFrame.
@@ -419,8 +435,12 @@ def fetch_live_bets_from_api(since, until):
                 "selections": ", ".join([s.get("name", "") for s in selections]),
             }
             flat_bets.append(flat_bet)
-            
-        return pd.DataFrame(flat_bets)
+
+        df = pd.DataFrame(flat_bets)
+        if not df.empty:
+            df['settled_time'] = pd.to_datetime(df['settled_time']).dt.tz_convert(None)
+            df['event_start'] = pd.to_datetime(df['event_start']).dt.tz_convert(None)
+        return df
 
     except ToteError as e:
         st.error(f"Tote API Error: {e}")

@@ -74,8 +74,16 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
             subscription { onPoolTotalChanged {
               isFinalized
               productId
-              total { netAmounts { decimalAmount } grossAmounts { decimalAmount } }
-              carryIn { grossAmounts { decimalAmount } }
+              total {
+                netAmounts {
+                  decimalAmount
+                  currency { code }
+                }
+                grossAmounts {
+                  decimalAmount
+                  currency { code }
+                }
+              }
             } }
             """.strip(),
         ))
@@ -85,8 +93,22 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
             """
             subscription { onPoolDividendChanged {
               productId
-              dividends { dividend { value { decimalAmount } }
-                legs { legId selections { id finishingPosition } }
+              dividends {
+                dividend {
+                  amounts {
+                    decimalAmount
+                    currency {
+                      code
+                    }
+                  }
+                }
+                legs {
+                  legId
+                  selections {
+                    id
+                    finishingPosition
+                  }
+                }
               }
             } }
             """.strip(),
@@ -94,7 +116,16 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
         # 3) Event result
         docs.append((
             "onEventResultChanged",
-            "subscription { onEventResultChanged { eventId competitorResults { competitorId finishingPosition status } } }",
+            """
+            subscription { onEventResultChanged {
+              eventId
+              competitorResults {
+                competitorId
+                finishingPosition
+                status
+              }
+            } }
+            """.strip(),
         ))
         # 4) Event status
         docs.append((
@@ -104,7 +135,13 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
         # 5) Competitor status
         docs.append((
             "onCompetitorStatusChanged",
-            "subscription { onCompetitorStatusChanged { eventId competitorId status } }",
+            """
+            subscription { onCompetitorStatusChanged {
+              eventId
+              competitorId
+              status
+            } }
+            """.strip(),
         ))
         # 6) Product status
         docs.append((
@@ -398,9 +435,9 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                         gross = gross if gross is not None else g2
                                     except Exception:
                                         pass
-                                # Carry-in rollover amount (if present)
-                                carry_in = node.get("carryIn") or {}
-                                rollover = _money_to_float((carry_in.get("grossAmounts") or [{}])[0]) or 0.0
+                                # carryIn is no longer in the subscription, so rollover is assumed 0 from this message.
+                                # It might be present on the product record itself.
+                                rollover = 0.0
                                 if pid:
                                     # Publish realtime update for UI consumers
                                     try:
@@ -525,7 +562,8 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                         # Optional HTTP fallback for amounts if WS payload lacks them
                                         fetched_amounts: dict[str, float] | None = None
                                         for d in dvs:
-                                            amount = _money_to_float((d.get("dividend") or {}).get("value"))
+                                            amounts_list = ((d.get("dividend") or {}).get("amounts") or [])
+                                            amount = _money_to_float(amounts_list[0] if amounts_list else None)
                                             legs = (d.get("legs") or [])
                                             for lg in legs:
                                                 sels = (lg.get("selections") or [])
@@ -558,16 +596,15 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                                                             query GetDividends($id: String!) {
                                                                               product(id: $id) {
                                                                                 ... on BettingProduct {
-                                                                                  result {
-                                                                                    dividends {
-                                                                                      nodes {
-                                                                                        dividend { amount { decimalAmount stringAmount minorUnitsTotalAmount } }
-                                                                                        dividendLegs { nodes { dividendSelections { nodes { id } } } }
-                                                                                      }
-                                                                                    }
-                                                                                  }
+                                                                                  result { dividends { nodes {
+                                                                                    dividend { amounts { decimalAmount stringAmount minorUnitsTotalAmount currency { code } } }
+                                                                                    dividendLegs { nodes { dividendSelections { nodes { id } } } }
+                                                                                  } } }
                                                                                 }
-                                                                                type { ... on BettingProduct { result { dividends { nodes { dividend { amount { decimalAmount stringAmount minorUnitsTotalAmount } } dividendLegs { nodes { dividendSelections { nodes { id } } } } } } } } }
+                                                                                type { ... on BettingProduct { result { dividends { nodes {
+                                                                                  dividend { amounts { decimalAmount stringAmount minorUnitsTotalAmount currency { code } } }
+                                                                                  dividendLegs { nodes { dividendSelections { nodes { id } } } }
+                                                                                } } } } }
                                                                               }
                                                                             }
                                                                             """
@@ -580,8 +617,8 @@ async def _subscribe_pools(url: str, conn, *, duration: Optional[int] = None, ev
                                                                         mp: dict[str, float] = {}
                                                                         for nd in nds:
                                                                             try:
-                                                                                amt_obj = (((nd.get("dividend") or {}).get("amount")) or {})
-                                                                                amt_val = _money_to_float(amt_obj)
+                                                                                amt_list = (((nd.get("dividend") or {}).get("amounts")) or [])
+                                                                                amt_val = _money_to_float(amt_list[0] if amt_list else None)
                                                                                 dlegs = ((nd.get("dividendLegs") or {}).get("nodes") or [])
                                                                                 if amt_val is not None:
                                                                                     for dl in dlegs:

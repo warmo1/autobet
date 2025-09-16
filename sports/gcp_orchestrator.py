@@ -23,12 +23,17 @@ def scan_and_publish_pre_race_jobs():
     This is intended to be called by a Cloud Scheduler job every few minutes.
     """
     db = get_db()
-    # This view `vw_gb_open_superfecta_next60` is defined in bq.py and finds
-    # open products for GB races starting in the next 60 minutes.
+    # Scan for any open products starting in the next 30 minutes to trigger
+    # more frequent pool and odds updates.
     try:
-        upcoming_df = db.query(
-            "SELECT product_id, event_id FROM `autobet-470818.autobet.vw_gb_open_superfecta_next60`"
-        ).to_dataframe()
+        upcoming_df = db.query("""
+            SELECT p.product_id, p.event_id
+            FROM `autobet-470818.autobet.vw_products_latest_totals` p
+            WHERE p.status = 'OPEN'
+              AND TIMESTAMP(p.start_iso) BETWEEN CURRENT_TIMESTAMP() AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 30 MINUTE)
+            GROUP BY p.product_id, p.event_id
+        """).to_dataframe()
+
     except Exception as e:
         print(f"Error querying for upcoming races: {e}")
         return "Query for upcoming races failed", 500
@@ -64,16 +69,14 @@ def scan_and_publish_pre_race_jobs():
         return "GCP_PROJECT not set", 500
 
     published_count = 0
-    for _, row in upcoming_df.iterrows():
-        product_id = row["product_id"]
-        event_id = row["event_id"]
-
-        # Job to refresh pool totals (via products endpoint)
+    # Publish pool refresh jobs for each product
+    for product_id in upcoming_df["product_id"].unique():
         pool_job = {"task": "ingest_single_product", "product_id": product_id}
         publish_pubsub_message(project_id, topic_id, pool_job)
         published_count += 1
 
-        # Job to refresh probable odds (for the WIN market of the same event)
+    # Publish odds refresh jobs for each unique event
+    for event_id in upcoming_df["event_id"].unique():
         probable_odds_job = {"task": "ingest_probable_odds", "event_id": event_id}
         publish_pubsub_message(project_id, topic_id, probable_odds_job)
         published_count += 1

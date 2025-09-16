@@ -384,7 +384,10 @@ def _fmt_datetime(ts: float | int | str):
     try:
         import datetime as _dt
         v = float(ts)
-        return _dt.datetime.utcfromtimestamp(v).strftime('%Y-%m-%d %H:%M')
+        # Handle both seconds and milliseconds; convert to server's local time
+        if v > 1e12: # Heuristic for milliseconds
+            v = v / 1000.0
+        return _dt.datetime.fromtimestamp(v).strftime('%Y-%m-%d %H:%M')
     except Exception:
         try:
             return str(ts)
@@ -2124,7 +2127,7 @@ def audit_bets_page():
             try:
                 ts_ms_val = int(bet_data.get('ts_ms')) if bet_data.get('ts_ms') is not None else None
                 if ts_ms_val is not None:
-                    bet_data['created_iso'] = datetime.utcfromtimestamp(ts_ms_val/1000.0).strftime('%Y-%m-%dT%H:%M:%SZ')
+                    bet_data['created_iso'] = datetime.fromtimestamp(ts_ms_val/1000.0).astimezone().isoformat()
                 else:
                     bet_data['created_iso'] = None
             except Exception:
@@ -2203,7 +2206,7 @@ def audit_bet_detail_page(bet_id: str):
             try:
                 ts_ms_val = int(detail.get('ts_ms')) if detail.get('ts_ms') is not None else None
                 if ts_ms_val is not None:
-                    detail['_created_iso'] = datetime.utcfromtimestamp(ts_ms_val/1000.0).strftime('%Y-%m-%dT%H:%M:%SZ')
+                    detail['_created_iso'] = datetime.fromtimestamp(ts_ms_val/1000.0).astimezone().isoformat()
                 else:
                     detail['_created_iso'] = None
             except Exception:
@@ -2715,50 +2718,23 @@ def api_refresh_event_pools(event_id: str):
 @app.post("/api/tote/refresh_odds/<event_id>")
 def api_refresh_odds(event_id: str):
     """
-    Refreshes probable odds by re-ingesting the WIN product for the event.
-    This uses the main GraphQL ingestion path for consistency and robustness.
+    Triggers a Cloud Run job to refresh probable odds for an event.
     """
     try:
-        # Find an OPEN or SELLING WIN product for this event to re-ingest.
-        pdf = sql_df(
-            "SELECT product_id FROM `autobet-470818.autobet.tote_products` WHERE event_id=? AND UPPER(bet_type)='WIN' AND UPPER(status) IN ('OPEN', 'SELLING') ORDER BY status DESC LIMIT 1",
-            params=(event_id,)
-        )
-        if pdf.empty:
-            # Fallback to any WIN product if none are open
-            pdf = sql_df(
-                "SELECT product_id FROM `autobet-470818.autobet.tote_products` WHERE event_id=? AND UPPER(bet_type)='WIN' ORDER BY start_iso DESC LIMIT 1",
-                params=(event_id,)
-            )
+        if not event_id:
+            return app.response_class(json.dumps({"error": "missing event_id"}), mimetype="application/json", status=400)
 
-        if pdf.empty:
-            return app.response_class(json.dumps({"error": "no WIN product found for event"}), mimetype="application/json", status=404)
+        # Get project and topic from config/env
+        project_id = os.getenv("GCP_PROJECT") or cfg.bq_project
+        topic_id = os.getenv("PUBSUB_TOPIC_ID", "ingest-jobs")
+        if not project_id or not topic_id:
+            return app.response_class(json.dumps({"error": "GCP project or Pub/Sub topic not configured"}), mimetype="application/json", status=500)
 
-        win_product_id = pdf.iloc[0]["product_id"]
+        # Publish a job to ingest probable odds for the event
+        job_payload = {"task": "ingest_probable_odds", "event_id": event_id}
+        message_id = publish_pubsub_message(project_id, topic_id, job_payload)
 
-        from .bq import get_bq_sink
-        from .providers.tote_api import ToteClient
-        from .ingest.tote_products import ingest_products
-
-        sink = get_bq_sink()
-        client = ToteClient()
-
-        # Re-ingest this specific product. The ingest_products function will fetch
-        # all data, including the latest probable odds, and store it.
-        updated_count = ingest_products(
-            db=sink,
-            client=client,
-            date_iso=None,
-            status=None,
-            first=1,
-            bet_types=None,
-            product_ids=[win_product_id]
-        )
-
-        if updated_count > 0:
-            return app.response_class(json.dumps({"ok": True, "product_id": win_product_id, "lines": "refreshed"}), mimetype="application/json")
-        else:
-            return app.response_class(json.dumps({"error": "ingest_products returned 0 updates", "product_id": win_product_id}), mimetype="application/json", status=500)
+        return app.response_class(json.dumps({"ok": True, "triggered": 1, "message_id": message_id, "event_id": event_id}), mimetype="application/json")
 
     except Exception as e:
         traceback.print_exc()
