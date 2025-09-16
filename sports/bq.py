@@ -102,6 +102,157 @@ class BigQuerySink:
         job = client.query(sql)
         job.result()
 
+        # Table function: Expected Value grid over coverage using permutations
+        sql = f"""
+        CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_perm_ev_grid`(
+          in_product_id STRING,
+          in_top_n INT64,
+          O NUMERIC,
+          S NUMERIC,
+          t FLOAT64,
+          R NUMERIC,
+          inc BOOL,
+          mult FLOAT64,
+          f FLOAT64,
+          conc FLOAT64,
+          mi FLOAT64
+        )
+        RETURNS TABLE<
+          lines_covered INT64,
+          hit_rate FLOAT64,
+          expected_return FLOAT64,
+          expected_profit FLOAT64,
+          f_share_used FLOAT64
+        > AS (
+          WITH perms AS (
+            SELECT ROW_NUMBER() OVER (ORDER BY p DESC) AS rn, p, h1, h2, h3, h4
+            FROM `{ds}.tf_superfecta_perms_any`(in_product_id, in_top_n)
+          ), odds AS (
+            SELECT CAST(cloth_number AS STRING) AS id, CAST(decimal_odds AS FLOAT64) AS odds
+            FROM `{ds}.vw_tote_probable_odds`
+            WHERE product_id = in_product_id
+          ), parms AS (
+            SELECT GREATEST(0.1, 1.0 - 0.6*mi) AS beta, 1.0 + 2.0*conc AS gamma,
+                   CAST(O AS FLOAT64) AS O_f, CAST(S AS FLOAT64) AS S_f
+          ), scored AS (
+            SELECT p.rn, p.p,
+                   POW(p.p, (SELECT gamma FROM parms)) AS w_raw,
+                   POW(1.0 / NULLIF(o1.odds, 0.0), (SELECT beta FROM parms))
+                   * POW(1.0 / NULLIF(o2.odds, 0.0), (SELECT beta FROM parms))
+                   * POW(1.0 / NULLIF(o3.odds, 0.0), (SELECT beta FROM parms))
+                   * POW(1.0 / NULLIF(o4.odds, 0.0), (SELECT beta FROM parms)) AS q_raw
+            FROM perms p
+            LEFT JOIN odds o1 ON o1.id = CAST(p.h1 AS STRING)
+            LEFT JOIN odds o2 ON o2.id = CAST(p.h2 AS STRING)
+            LEFT JOIN odds o3 ON o3.id = CAST(p.h3 AS STRING)
+            LEFT JOIN odds o4 ON o4.id = CAST(p.h4 AS STRING)
+          ), steps AS (
+            SELECT rn AS m FROM scored
+          )
+          SELECT
+            m AS lines_covered,
+            (SELECT SUM(p) FROM scored WHERE rn <= m) AS hit_rate,
+            (
+              SELECT (SUM(p_i * f_i)) * (
+                       mult * (((1.0 - t) * ((SELECT O_f FROM parms) + IF(inc, (SELECT S_f FROM parms), 0.0))) + R)
+                     )
+              FROM (
+                SELECT s.p AS p_i,
+                       ((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0)) AS stake_i,
+                       ((SELECT O_f FROM parms) * (1.0 - mi) * s.q_raw / NULLIF((SELECT SUM(q_raw) FROM scored WHERE rn <= m), 0)) AS others_i,
+                       SAFE_DIVIDE(
+                         ((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0)),
+                         (((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0))
+                          + ((SELECT O_f FROM parms) * (1.0 - mi) * s.q_raw / NULLIF((SELECT SUM(q_raw) FROM scored WHERE rn <= m), 0)) )
+                       ) AS f_i
+                FROM scored s
+                WHERE s.rn <= m
+              )
+            ) AS expected_return,
+            NULL AS expected_profit,
+            (
+              SELECT SAFE_DIVIDE(SUM(p_i * f_i), SUM(p_i))
+              FROM (
+                SELECT s.p AS p_i,
+                       SAFE_DIVIDE(
+                         ((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0)),
+                         (((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0))
+                          + ((SELECT O_f FROM parms) * (1.0 - mi) * s.q_raw / NULLIF((SELECT SUM(q_raw) FROM scored WHERE rn <= m), 0)) )
+                       ) AS f_i
+                FROM scored s
+                WHERE s.rn <= m
+              )
+            ) AS f_share_used
+          FROM steps
+        ), final AS (
+          SELECT lines_covered,
+                 hit_rate,
+                 expected_return,
+                 expected_return - CAST(S AS FLOAT64) AS expected_profit,
+                 f_share_used
+          FROM (
+            SELECT * FROM (SELECT * FROM (SELECT * FROM (
+              SELECT * FROM (
+                SELECT * FROM (
+                  SELECT * FROM (
+                    SELECT * FROM (
+                      SELECT * FROM (
+                        SELECT * FROM (
+                          SELECT * FROM (
+                            SELECT * FROM (
+                              SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM (
+                                SELECT * FROM (
+                                  SELECT m AS lines_covered,
+                                         (SELECT SUM(p) FROM scored WHERE rn <= m) AS hit_rate,
+                                         (
+                                           SELECT (SUM(p_i * f_i)) * (
+                                                    mult * (((1.0 - t) * ((SELECT O_f FROM parms) + IF(inc, (SELECT S_f FROM parms), 0.0))) + R)
+                                                  )
+                                           FROM (
+                                             SELECT s.p AS p_i,
+                                                    ((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0)) AS stake_i,
+                                                    ((SELECT O_f FROM parms) * (1.0 - mi) * s.q_raw / NULLIF((SELECT SUM(q_raw) FROM scored WHERE rn <= m), 0)) AS others_i,
+                                                    SAFE_DIVIDE(
+                                                      ((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0)),
+                                                      (((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0))
+                                                       + ((SELECT O_f FROM parms) * (1.0 - mi) * s.q_raw / NULLIF((SELECT SUM(q_raw) FROM scored WHERE rn <= m), 0)) )
+                                                    ) AS f_i
+                                             FROM scored s
+                                             WHERE s.rn <= m
+                                           )
+                                         ) AS expected_return,
+                                         (
+                                           SELECT SAFE_DIVIDE(SUM(p_i * f_i), SUM(p_i))
+                                           FROM (
+                                             SELECT s.p AS p_i,
+                                                    SAFE_DIVIDE(
+                                                      ((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0)),
+                                                      (((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0))
+                                                       + ((SELECT O_f FROM parms) * (1.0 - mi) * s.q_raw / NULLIF((SELECT SUM(q_raw) FROM scored WHERE rn <= m), 0)) )
+                                                    ) AS f_i
+                                             FROM scored s
+                                             WHERE s.rn <= m
+                                           )
+                                         ) AS f_share_used
+                                  FROM steps
+                                )
+                              ))
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            )))
+          )
+        )
+        SELECT * FROM final;
+        """
+        job = client.query(sql)
+        job.result()
+
         # vw_products_latest_totals: tote_products overlaid with latest snapshot totals (all bet types)
         sql = f"""
         CREATE OR REPLACE VIEW `{ds}.vw_products_latest_totals` AS

@@ -3594,21 +3594,79 @@ def tote_live_model_page():
                             ids = [str(r.get("h1")), str(r.get("h2")), str(r.get("h3")), str(r.get("h4"))]
                             rows.append({"ids": ids, "probability": float(r.get("p") or 0.0)})
 
-                        ev_res = calculate_pl_from_perms(
-                            perms=rows,
-                            bankroll=float(model_params.get("stake_per_line", 10.0) * 100),
-                            runner_odds=odds_map,
-                            concentration=0.0,
-                            market_inefficiency=0.1,
-                            desired_profit_pct=5.0,
-                            take_rate=float(p.get("deduction_rate") or model_params.get("t", 0.3)),
-                            net_rollover=float(p.get("rollover") or model_params.get("R", 0.0)),
-                            inc_self=True,
-                            div_mult=1.0,
-                            f_fix=None,
-                            pool_gross_other=float(p.get("total_gross") or 0.0),
-                        )
-                        pl_model = ev_res.get("pl_model")
+                        # Compute EV grid in BigQuery for optimal coverage
+                        bankroll = float(model_params.get("stake_per_line", 10.0) * 100)
+                        take_rate_val = float(p.get("deduction_rate") or model_params.get("t", 0.3))
+                        rollover_val = float(p.get("rollover") or model_params.get("R", 0.0))
+                        gross_other = float(p.get("total_gross") or 0.0)
+                        try:
+                            grid_df = sql_df(
+                                f"SELECT * FROM `{cfg.bq_project}.{cfg.bq_dataset}.tf_perm_ev_grid`(@pid,@top_n,@O,@S,@t,@R,@inc,@mult,@f,@conc,@mi)",
+                                params={
+                                    "pid": p["product_id"],
+                                    "top_n": top_n,
+                                    "O": gross_other,
+                                    "S": bankroll,
+                                    "t": take_rate_val,
+                                    "R": rollover_val,
+                                    "inc": True,
+                                    "mult": 1.0,
+                                    "f": None,
+                                    "conc": 0.0,
+                                    "mi": 0.10,
+                                },
+                                cache_ttl=0,
+                            )
+                        except Exception as e:
+                            grid_df = None
+
+                        if grid_df is not None and not grid_df.empty:
+                            # Pick the m with max expected_profit
+                            best_row = grid_df.sort_values("expected_profit", ascending=False).iloc[0]
+                            m = int(best_row["lines_covered"]) if not pd.isna(best_row["lines_covered"]) else 1
+                            # Build staking plan using probability-weighted stakes for top m lines
+                            gamma = 1.0 + 2.0 * 0.0
+                            perms_sorted = perms_df.sort_values("p", ascending=False).head(m)
+                            probs = perms_sorted["p"].astype(float).clip(lower=0.0)
+                            weights = probs.pow(gamma)
+                            sum_w = float(weights.sum()) or 1.0
+                            stakes = (bankroll * (weights / sum_w)).tolist()
+                            staking_plan = []
+                            for i, (_, r) in enumerate(perms_sorted.iterrows()):
+                                line_ids = [str(r.get("h1")), str(r.get("h2")), str(r.get("h3")), str(r.get("h4"))]
+                                staking_plan.append({
+                                    "line": " - ".join(line_ids),
+                                    "probability": float(r.get("p") or 0.0),
+                                    "stake": float(stakes[i]),
+                                })
+
+                            scenario = {
+                                "lines_covered": m,
+                                "hit_rate": float(best_row.get("hit_rate") or 0.0),
+                                "expected_return": float(best_row.get("expected_return") or 0.0),
+                                "expected_profit": float(best_row.get("expected_profit") or 0.0),
+                                "f_share_used": float(best_row.get("f_share_used") or 0.0),
+                                "net_pool_if_bet": float((1.0) * (((1.0 - take_rate_val) * (gross_other + bankroll)) + rollover_val)),
+                                "total_stake": bankroll,
+                            }
+                            pl_model = {"best_scenario": scenario, "staking_plan": staking_plan, "ev_grid": grid_df.to_dict("records"), "total_possible_lines": len(perms_df)}
+                        else:
+                            # Fallback to local EV helper if grid not available
+                            ev_res = calculate_pl_from_perms(
+                                perms=rows,
+                                bankroll=bankroll,
+                                runner_odds=odds_map,
+                                concentration=0.0,
+                                market_inefficiency=0.1,
+                                desired_profit_pct=5.0,
+                                take_rate=take_rate_val,
+                                net_rollover=rollover_val,
+                                inc_self=True,
+                                div_mult=1.0,
+                                f_fix=None,
+                                pool_gross_other=gross_other,
+                            )
+                            pl_model = ev_res.get("pl_model")
                     else:
                         # Fallback: run local Python model
                         calc_result = calculate_pl_strategy(
