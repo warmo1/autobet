@@ -357,6 +357,29 @@ def main(argv=None):
             print(f"[Audit Bets] Synced {n} bet(s)")
     sp_list.set_defaults(func=_cmd_list)
 
+    # --- Streamlit Dashboard ---
+    # Runs the Streamlit performance dashboard.
+    sp_streamlit = sub.add_parser("streamlit", help="Run the Streamlit performance dashboard")
+    def _cmd_streamlit(args):
+        """
+        Uses a subprocess to run the Streamlit app. This is the standard
+        and most reliable way to launch Streamlit from a script.
+        """
+        import subprocess
+        import sys
+        from pathlib import Path
+        
+        # Construct the path to the streamlit_app.py file
+        app_file = Path(__file__).parent / "streamlit_app.py"
+        
+        # Command to run using the same Python interpreter
+        # We enable CORS to allow the dashboard to be embedded in an iframe
+        # in the main Flask webapp.
+        cmd = [sys.executable, "-m", "streamlit", "run", str(app_file), "--server.enableCORS", "true"]
+        
+        print(f"Running command: {' '.join(cmd)}")
+        subprocess.run(cmd)
+    sp_streamlit.set_defaults(func=_cmd_streamlit)
     
     # This command does not interact with the database and is preserved.
     # Exports BigQuery schema to a CSV file

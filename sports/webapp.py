@@ -188,6 +188,16 @@ def stream():
     return Response(event_generator(), mimetype='text/event-stream')
 
 
+@app.route("/dashboard")
+def dashboard():
+    """
+    Renders the Streamlit dashboard in an iframe.
+    Assumes the Streamlit app is running separately on the default port (8501).
+    """
+    streamlit_url = "http://localhost:8501"
+    return render_template("dashboard.html", streamlit_url=streamlit_url)
+
+
 def _use_bq() -> bool:
     return bool(cfg.bq_project and cfg.bq_dataset)
 
