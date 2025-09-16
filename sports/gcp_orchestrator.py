@@ -27,7 +27,7 @@ def scan_and_publish_pre_race_jobs():
     # open products for GB races starting in the next 60 minutes.
     try:
         upcoming_df = db.query(
-            "SELECT product_id, event_id FROM vw_gb_open_superfecta_next60"
+            "SELECT product_id, event_id FROM `autobet-470818.autobet.vw_gb_open_superfecta_next60`"
         ).to_dataframe()
     except Exception as e:
         print(f"Error querying for upcoming races: {e}")
@@ -112,8 +112,8 @@ def scan_and_publish_results_jobs():
         # and for which no results exist in hr_horse_runs.
         results_needed_df = db.query("""
             SELECT p.event_id, p.product_id
-            FROM tote_products p
-            LEFT JOIN hr_horse_runs r ON p.event_id = r.event_id
+            FROM `autobet-470818.autobet.tote_products` p
+            LEFT JOIN `autobet-470818.autobet.hr_horse_runs` r ON p.event_id = r.event_id
             WHERE p.status = 'CLOSED'
               AND TIMESTAMP(p.start_iso) BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 3 HOUR) AND CURRENT_TIMESTAMP()
               AND r.event_id IS NULL
@@ -190,7 +190,7 @@ def scan_and_publish_probable_sweep():
         df = db.query(
             """
             SELECT DISTINCT event_id
-            FROM tote_products
+            FROM `autobet-470818.autobet.tote_products`
             WHERE UPPER(bet_type)='WIN' AND status='OPEN'
               AND TIMESTAMP(start_iso) BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 15 MINUTE)
                                            AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)

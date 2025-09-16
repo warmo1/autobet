@@ -423,7 +423,7 @@ def index():
 
     ev_sql = (
         "SELECT event_id, name, venue, country, start_iso, sport, status "
-        "FROM tote_events WHERE start_iso BETWEEN @start AND @end "
+        "FROM `autobet-470818.autobet.tote_events` WHERE start_iso BETWEEN @start AND @end "
         "ORDER BY start_iso ASC LIMIT 100"
     )
     evs = sql_df(ev_sql, params={"start": start_iso, "end": end_iso})
@@ -431,8 +431,8 @@ def index():
     # Upcoming Superfecta (prefer 60m GB view with breakeven); graceful fallback if missing.
     try:
         sfs = sql_df(
-            "SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, COALESCE(total_net,0.0) AS total_net "
-            "FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso LIMIT 20",
+            "SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, COALESCE(total_net,0.0) AS total_net " +
+            "FROM `autobet-470818.autobet.vw_gb_open_superfecta_next60_be` ORDER BY start_iso LIMIT 20",
             cache_ttl=0,
         )
     except Exception:
@@ -440,7 +440,7 @@ def index():
         sf_fallback = (
             "SELECT p.product_id, p.event_id, p.event_name, COALESCE(e.venue,p.venue) AS venue, "
             "UPPER(COALESCE(e.country,p.currency)) AS country, p.start_iso, COALESCE(p.status,'') AS status, p.currency, COALESCE(p.total_net,0.0) AS total_net "
-            "FROM vw_products_latest_totals p LEFT JOIN tote_events e USING(event_id) "
+            "FROM `autobet-470818.autobet.vw_products_latest_totals` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) "
             "WHERE UPPER(p.bet_type)='SUPERFECTA' "
             "AND TIMESTAMP(p.start_iso) BETWEEN CURRENT_TIMESTAMP() AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 60 MINUTE) "
             "AND UPPER(COALESCE(e.country,p.currency))='GB' "
@@ -609,7 +609,7 @@ def tote_events_page():
         where.append("SUBSTR(start_iso,1,10) <= ?"); params.append(date_to)
     base_sql = ( # noqa
         "SELECT event_id, name, venue, country, start_iso, sport, status, competitors_json, home, away "
-        "FROM tote_events"
+        "FROM `autobet-470818.autobet.tote_events`"
     )
     count_sql = base_sql.replace("SELECT event_id, name, venue, country, start_iso, sport, status, competitors_json, home, away", "SELECT COUNT(1) AS c")
     if where:
@@ -625,9 +625,9 @@ def tote_events_page():
     # Bypass cache for paged results to avoid any unexpected truncation/staleness
     df = sql_df(base_sql, params=tuple(params_paged), cache_ttl=0)
     total = int(sql_df(count_sql, params=tuple(params), cache_ttl=0).iloc[0]["c"])
-    countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
-    sports_df = sql_df("SELECT DISTINCT sport FROM tote_events WHERE sport IS NOT NULL AND sport<>'' ORDER BY sport")
-    venues_df = sql_df("SELECT DISTINCT venue FROM tote_events WHERE venue IS NOT NULL AND venue<>'' ORDER BY venue")
+    countries_df = sql_df("SELECT DISTINCT country FROM `autobet-470818.autobet.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+    sports_df = sql_df("SELECT DISTINCT sport FROM `autobet-470818.autobet.tote_events` WHERE sport IS NOT NULL AND sport<>'' ORDER BY sport")
+    venues_df = sql_df("SELECT DISTINCT venue FROM `autobet-470818.autobet.tote_events` WHERE venue IS NOT NULL AND venue<>'' ORDER BY venue")
     events = df.to_dict("records") if not df.empty else []
     for ev in events:
         comps = []
@@ -692,8 +692,8 @@ def tote_superfecta_page():
         "SELECT p.product_id, p.event_id, p.event_name, COALESCE(e.venue, p.venue) AS venue, e.country, p.start_iso, "
         "COALESCE(p.status,'') AS status, p.currency, p.total_gross, p.total_net, p.rollover, "
         # UI Improvement: The product_id column can be de-emphasized in the template in favor of more user-friendly info.
-        "(SELECT COUNT(1) FROM tote_product_selections s WHERE s.product_id = p.product_id) AS n_runners "
-        "FROM vw_products_latest_totals p LEFT JOIN tote_events e USING(event_id) "
+        "(SELECT COUNT(1) FROM `autobet-470818.autobet.tote_product_selections` s WHERE s.product_id = p.product_id) AS n_runners "
+        "FROM `autobet-470818.autobet.vw_products_latest_totals` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) "
     )
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -702,13 +702,13 @@ def tote_superfecta_page():
         df = sql_df(sql, params=tuple(params))
     except Exception:
         # Fallback to raw tote_products if view not present
-        sql2 = sql.replace("FROM vw_products_latest_totals p", "FROM tote_products p")
+        sql2 = sql.replace("FROM `autobet-470818.autobet.vw_products_latest_totals` p", "FROM `autobet-470818.autobet.tote_products` p")
         df = sql_df(sql2, params=tuple(params))
 
     # Options for filters
-    cdf = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+    cdf = sql_df("SELECT DISTINCT country FROM `autobet-470818.autobet.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
     # UI Improvement: Dynamic venue options based on other filters for a better user experience.
-    vdf_sql = "SELECT DISTINCT COALESCE(e.venue, p.venue) AS venue FROM tote_products p LEFT JOIN tote_events e USING(event_id) WHERE UPPER(p.bet_type)='SUPERFECTA' AND COALESCE(e.venue, p.venue) IS NOT NULL AND COALESCE(e.venue, p.venue) <> ''"
+    vdf_sql = "SELECT DISTINCT COALESCE(e.venue, p.venue) AS venue FROM `autobet-470818.autobet.tote_products` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) WHERE UPPER(p.bet_type)='SUPERFECTA' AND COALESCE(e.venue, p.venue) IS NOT NULL AND COALESCE(e.venue, p.venue) <> ''"
     vdf_params: list[object] = []
     if country:
         vdf_sql += " AND (UPPER(e.country)=? OR UPPER(p.currency)=?)"
@@ -871,12 +871,12 @@ def tote_pools_page():
         "COALESCE(SAFE_CAST(p.rollover AS FLOAT64), 0.0) AS rollover, "
         "COALESCE(SAFE_CAST(p.deduction_rate AS FLOAT64), 0.0) AS deduction_rate, "
         "p.event_id, COALESCE(e.name, p.event_name) AS event_name, "
-        "divs.c AS dividend_count, "
-        "rc.going, rc.weather_temp_c, rc.weather_wind_kph, rc.weather_precip_mm "
-        "FROM vw_products_latest_totals p "
-        "LEFT JOIN tote_events e USING(event_id) "
-        "LEFT JOIN (SELECT product_id, COUNT(1) AS c FROM tote_product_dividends GROUP BY product_id) divs ON divs.product_id = p.product_id "
-        "LEFT JOIN race_conditions rc ON rc.event_id = p.event_id "
+        "divs.c AS dividend_count, " +
+        "rc.going, rc.weather_temp_c, rc.weather_wind_kph, rc.weather_precip_mm " +
+        "FROM `autobet-470818.autobet.vw_products_latest_totals` p " +
+        "LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) " +
+        "LEFT JOIN (SELECT product_id, COUNT(1) AS c FROM `autobet-470818.autobet.tote_product_dividends` GROUP BY product_id) divs ON divs.product_id = p.product_id " +
+        "LEFT JOIN `autobet-470818.autobet.race_conditions` rc ON rc.event_id = p.event_id "
     )
     where = ["COALESCE(p.status,'') <> ''"]
     params: list[object] = []
@@ -903,10 +903,10 @@ def tote_pools_page():
     df = sql_df(paged_sql, params=tuple(paged_params))
 
     # Options for filters # noqa
-    types_df = sql_df("SELECT DISTINCT TRIM(UPPER(bet_type)) AS bet_type FROM tote_products WHERE bet_type IS NOT NULL AND TRIM(bet_type) <> '' ORDER BY bet_type")
-    curr_df = sql_df("SELECT DISTINCT UPPER(COALESCE(e.country,p.currency)) AS country FROM tote_products p LEFT JOIN tote_events e USING(event_id) WHERE COALESCE(e.country,p.currency) IS NOT NULL AND COALESCE(e.country,p.currency) <> '' ORDER BY country")
+    types_df = sql_df("SELECT DISTINCT TRIM(UPPER(bet_type)) AS bet_type FROM `autobet-470818.autobet.tote_products` WHERE bet_type IS NOT NULL AND TRIM(bet_type) <> '' ORDER BY bet_type")
+    curr_df = sql_df("SELECT DISTINCT UPPER(COALESCE(e.country,p.currency)) AS country FROM `autobet-470818.autobet.tote_products` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) WHERE COALESCE(e.country,p.currency) IS NOT NULL AND COALESCE(e.country,p.currency) <> '' ORDER BY country")
     venues_df_sql = (
-        "SELECT DISTINCT COALESCE(e.venue,p.venue) AS venue FROM tote_products p LEFT JOIN tote_events e USING(event_id) "
+        "SELECT DISTINCT COALESCE(e.venue,p.venue) AS venue FROM `autobet-470818.autobet.tote_products` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) "
         "WHERE COALESCE(p.status,'') <> '' AND COALESCE(e.venue,p.venue) IS NOT NULL AND COALESCE(e.venue,p.venue)<>''"
     )
     venues_df_params: list[object] = []
@@ -963,14 +963,14 @@ def tote_pools_page():
 @app.route("/tote-pools/summary")
 def tote_pools_summary_page():
     """Aggregated view of pools by bet_type, status, and country with basic stats."""
-    by_type = sql_df("SELECT UPPER(bet_type) AS bet_type, COUNT(1) AS n FROM tote_products GROUP BY 1 ORDER BY n DESC")
-    by_status = sql_df("SELECT COALESCE(status,'') AS status, COUNT(1) AS n FROM tote_products GROUP BY 1 ORDER BY n DESC")
-    by_country = sql_df("SELECT COALESCE(currency,'') AS country, COUNT(1) AS n, ROUND(AVG(total_net),2) AS avg_total_net, ROUND(MAX(total_net),2) AS max_total_net FROM tote_products GROUP BY 1 ORDER BY n DESC")
+    by_type = sql_df("SELECT UPPER(bet_type) AS bet_type, COUNT(1) AS n FROM `autobet-470818.autobet.tote_products` GROUP BY 1 ORDER BY n DESC")
+    by_status = sql_df("SELECT COALESCE(status,'') AS status, COUNT(1) AS n FROM `autobet-470818.autobet.tote_products` GROUP BY 1 ORDER BY n DESC")
+    by_country = sql_df("SELECT COALESCE(currency,'') AS country, COUNT(1) AS n, ROUND(AVG(total_net),2) AS avg_total_net, ROUND(MAX(total_net),2) AS max_total_net FROM `autobet-470818.autobet.tote_products` GROUP BY 1 ORDER BY n DESC")
     recent_sql = (
         "SELECT UPPER(bet_type) AS bet_type, COUNT(1) AS n, ROUND(AVG(total_net),2) AS avg_total_net, "
         "APPROX_QUANTILES(total_net, 5)[SAFE_OFFSET(2)] AS p50, "
         "APPROX_QUANTILES(total_net, 5)[SAFE_OFFSET(4)] AS p90 "
-        "FROM tote_products "
+        "FROM `autobet-470818.autobet.tote_products` "
         "WHERE DATE(SUBSTR(start_iso,1,10)) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY) "
         "GROUP BY 1 ORDER BY n DESC"
     )
@@ -1038,10 +1038,10 @@ def tote_calculators_page():
     top_n = max(k_perm, min(10, req_top_n))
 
     # --- Filter Options ---
-    countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+    countries_df = sql_df("SELECT DISTINCT country FROM `autobet-470818.autobet.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
     # UI Improvement: Dynamic venue/course options based on other active filters.
     venues_df_sql = (
-        "SELECT DISTINCT COALESCE(e.venue,p.venue) AS venue FROM tote_products p LEFT JOIN tote_events e USING(event_id) "
+        "SELECT DISTINCT COALESCE(e.venue,p.venue) AS venue FROM `autobet-470818.autobet.tote_products` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) "
         "WHERE UPPER(p.bet_type)=? AND COALESCE(p.status,'') <> '' AND COALESCE(e.venue,p.venue) IS NOT NULL AND COALESCE(e.venue,p.venue)<>''"
     )
     venues_df_params: list[object] = [bet_type]
@@ -1060,9 +1060,9 @@ def tote_calculators_page():
         SELECT
           p.product_id, p.event_id, p.event_name, COALESCE(e.venue, p.venue) AS venue,
           p.start_iso, p.currency, p.total_gross, p.total_net, COALESCE(p.status,'') AS status,
-          (SELECT COUNT(1) FROM tote_product_selections s WHERE s.product_id = p.product_id) AS n_runners
-        FROM vw_products_latest_totals p
-        LEFT JOIN tote_events e USING(event_id)
+          (SELECT COUNT(1) FROM `autobet-470818.autobet.tote_product_selections` s WHERE s.product_id = p.product_id) AS n_runners
+        FROM `autobet-470818.autobet.vw_products_latest_totals` p
+        LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id)
         WHERE UPPER(p.bet_type)=@bt
     """
     opts_params = {"bt": bet_type}
@@ -1089,7 +1089,7 @@ def tote_calculators_page():
 
     if product_id:
         # 1. Fetch product, runners, probable odds, and pool size
-        prod_df = sql_df("SELECT * FROM tote_products WHERE product_id=?", params=(product_id,))
+        prod_df = sql_df("SELECT * FROM `autobet-470818.autobet.tote_products` WHERE product_id=?", params=(product_id,))
         if not prod_df.empty:
             prod = prod_df.iloc[0].to_dict()
 
@@ -1100,7 +1100,7 @@ def tote_calculators_page():
         R_val = float(net_rollover_in) if net_rollover_in not in (None, "") else (float(prod.get("rollover") or 0.0) if prod else 0.0)
 
         df_sel = sql_df((
-            "SELECT selection_id, competitor, number, total_units FROM tote_product_selections WHERE product_id=? AND leg_index=1 ORDER BY number"
+            "SELECT selection_id, competitor, number, total_units FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=? AND leg_index=1 ORDER BY number"
         ), params=(product_id,))
         have_units = (not df_sel.empty) and df_sel["total_units"].notnull().any()
         if have_units:
@@ -1119,14 +1119,14 @@ def tote_calculators_page():
             try:
                 # First try by the same product_id (works if WIN product ids are identical)
                 bq_probs = sql_df(
-                    "SELECT CAST(cloth_number AS INT64) AS number, CAST(decimal_odds AS FLOAT64) AS decimal_odds FROM vw_tote_probable_odds WHERE product_id = ?",
+                    "SELECT CAST(cloth_number AS INT64) AS number, CAST(decimal_odds AS FLOAT64) AS decimal_odds FROM `autobet-470818.autobet.vw_tote_probable_odds` WHERE product_id = ?",
                     params=(product_id,)
                 )
                 # If empty, map via event_id to the WIN product for the same event
                 if (bq_probs.empty) and prod and prod.get('event_id'):
                     bq_probs = sql_df(
                         "SELECT CAST(o.cloth_number AS INT64) AS number, CAST(o.decimal_odds AS FLOAT64) AS decimal_odds "
-                        "FROM vw_tote_probable_odds o JOIN tote_products p ON p.product_id = o.product_id "
+                        "FROM `autobet-470818.autobet.vw_tote_probable_odds` o JOIN `autobet-470818.autobet.tote_products` p ON p.product_id = o.product_id "
                         "WHERE p.event_id = ? AND UPPER(p.bet_type)='WIN'",
                         params=(prod.get('event_id'),)
                     )
@@ -1434,9 +1434,9 @@ def tote_viability_page():
 
     # --- Filter Options ---
     # Country options
-    cdf = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+    cdf = sql_df("SELECT DISTINCT country FROM `autobet-470818.autobet.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
     # UI Improvement: Dynamic venue options filtered by country and date.
-    vdf_sql = "SELECT DISTINCT venue FROM tote_events WHERE venue IS NOT NULL AND venue <> '' "
+    vdf_sql = "SELECT DISTINCT venue FROM `autobet-470818.autobet.tote_events` WHERE venue IS NOT NULL AND venue <> '' "
     vdf_params = []
     if country:
         vdf_sql += " AND country = ?"
@@ -1462,9 +1462,9 @@ def tote_viability_page():
           COALESCE(SAFE_CAST(p.total_gross AS FLOAT64), 0.0) AS total_gross,
           COALESCE(SAFE_CAST(p.total_net AS FLOAT64), 0.0) AS total_net,
           COALESCE(p.status,'') AS status,
-          (SELECT COUNT(1) FROM tote_product_selections s WHERE s.product_id = p.product_id) AS n_runners
-        FROM vw_products_latest_totals p
-        LEFT JOIN tote_events e USING(event_id)
+          (SELECT COUNT(1) FROM `autobet-470818.autobet.tote_product_selections` s WHERE s.product_id = p.product_id) AS n_runners
+        FROM `autobet-470818.autobet.vw_products_latest_totals` p
+        LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id)
         WHERE UPPER(p.bet_type)=@bt
     """
     opts_params = {"bt": bet_type}
@@ -1503,8 +1503,8 @@ def tote_viability_page():
             # to reduce latency and ensure the latest pool info is used.
             params_df = sql_df("""
                 SELECT
-                    (SELECT COUNT(1) FROM tote_product_selections WHERE product_id=@pid AND leg_index=1) AS n,
-                    (SELECT total_gross FROM tote_pool_snapshots WHERE product_id=@pid ORDER BY ts_ms DESC LIMIT 1) AS latest_gross
+                    (SELECT COUNT(1) FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=@pid AND leg_index=1) AS n,
+                    (SELECT total_gross FROM `autobet-470818.autobet.tote_pool_snapshots` WHERE product_id=@pid ORDER BY ts_ms DESC LIMIT 1) AS latest_gross
             """, params={"pid": product_id})
 
             if not params_df.empty:
@@ -1661,7 +1661,7 @@ def api_tote_viability():
     # Load product
     prod = None
     if product_id:
-        pdf = sql_df("SELECT * FROM vw_products_latest_totals WHERE product_id=?", params=(product_id,))
+        pdf = sql_df("SELECT * FROM `autobet-470818.autobet.vw_products_latest_totals` WHERE product_id=?", params=(product_id,))
         if not pdf.empty:
             prod = pdf.iloc[0].to_dict()
     # Params
@@ -1685,7 +1685,7 @@ def api_tote_viability():
             n = None
         if product_id and (n is None):
             try:
-                ndf = sql_df("SELECT COUNT(1) AS n FROM tote_product_selections WHERE product_id=?", params=(product_id,))
+                ndf = sql_df("SELECT COUNT(1) AS n FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=?", params=(product_id,))
                 n = int(ndf.iloc[0]["n"]) if not ndf.empty else None
             except Exception:
                 n = None
@@ -1742,7 +1742,7 @@ def api_tote_product_runners():
     if not pid:
         return app.response_class(json.dumps({"error": "missing product_id"}), mimetype="application/json", status=400)
     # Also return selection_id for the bet slip
-    rows = sql_df("SELECT DISTINCT selection_id, number, competitor FROM tote_product_selections WHERE product_id=? AND leg_index=1 ORDER BY number", params=(pid,))
+    rows = sql_df("SELECT DISTINCT selection_id, number, competitor FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=? AND leg_index=1 ORDER BY number", params=(pid,))
     return app.response_class(json.dumps(rows.to_dict("records") if not rows.empty else []), mimetype="application/json")
 
 @app.route("/api/tote/event_products/<event_id>")
@@ -1778,7 +1778,7 @@ def api_tote_event_products(event_id: str):
         # Fallback to BQ view, then base table, relaxing status if needed
         try:
             vdf = sql_df(
-                "SELECT product_id, bet_type, COALESCE(status,'') AS status FROM vw_products_latest_totals "
+                "SELECT product_id, bet_type, COALESCE(status,'') AS status FROM `autobet-470818.autobet.vw_products_latest_totals` "
                 "WHERE event_id=? AND UPPER(COALESCE(status,'')) IN ('OPEN','SELLING') ORDER BY bet_type",
                 params=(event_id,), cache_ttl=0,
             )
@@ -1788,7 +1788,7 @@ def api_tote_event_products(event_id: str):
         if not rows:
             try:
                 tdf = sql_df(
-                    "SELECT product_id, bet_type, COALESCE(status,'') AS status FROM tote_products "
+                    "SELECT product_id, bet_type, COALESCE(status,'') AS status FROM `autobet-470818.autobet.tote_products` "
                     "WHERE event_id=? AND UPPER(COALESCE(status,'')) IN ('OPEN','SELLING') ORDER BY bet_type",
                     params=(event_id,), cache_ttl=0,
                 )
@@ -1798,7 +1798,7 @@ def api_tote_event_products(event_id: str):
         if not rows:
             try:
                 anydf = sql_df(
-                    "SELECT product_id, bet_type, COALESCE(status,'') AS status FROM tote_products "
+                    "SELECT product_id, bet_type, COALESCE(status,'') AS status FROM `autobet-470818.autobet.tote_products` "
                     "WHERE event_id=? ORDER BY bet_type",
                     params=(event_id,), cache_ttl=0,
                 )
@@ -1818,7 +1818,7 @@ def api_tote_pool_snapshot(product_id: str):
     try:
         ss = sql_df(
             "SELECT product_id, event_id, currency, status, start_iso, ts_ms, total_gross, total_net, rollover, deduction_rate, 'snap' AS source "
-            "FROM tote_pool_snapshots WHERE product_id=? ORDER BY ts_ms DESC LIMIT 1",
+            "FROM `autobet-470818.autobet.tote_pool_snapshots` WHERE product_id=? ORDER BY ts_ms DESC LIMIT 1",
             params=(product_id,),
             cache_ttl=0,
         )
@@ -1827,7 +1827,7 @@ def api_tote_pool_snapshot(product_id: str):
         # Fallback to products
         pdf = sql_df(
             "SELECT product_id, event_id, currency, status, start_iso, total_gross, total_net, rollover, deduction_rate, NULL AS ts_ms, 'products_fallback' AS source "
-            "FROM vw_products_latest_totals WHERE product_id=?",
+            "FROM `autobet-470818.autobet.vw_products_latest_totals` WHERE product_id=?",
             params=(product_id,),
             cache_ttl=0,
         )
@@ -2597,9 +2597,9 @@ def event_detail(event_id: str):
                 COALESCE(s.competitor, o.selection_id) AS horse, -- Fallback to ID if name is missing
                 o.decimal_odds,
                 FORMAT_TIMESTAMP('%FT%T%Ez', TIMESTAMP_MILLIS(o.ts_ms)) AS odds_iso
-            FROM vw_tote_probable_odds o
-            JOIN tote_products p ON o.product_id = p.product_id
-            LEFT JOIN tote_product_selections s ON o.selection_id = s.selection_id AND o.product_id = p.product_id
+            FROM `autobet-470818.autobet.vw_tote_probable_odds` o
+            JOIN `autobet-470818.autobet.tote_products` p ON o.product_id = p.product_id
+            LEFT JOIN `autobet-470818.autobet.tote_product_selections` s ON o.selection_id = s.selection_id AND o.product_id = p.product_id
             WHERE p.event_id = @event_id AND UPPER(p.bet_type) = 'WIN' -- Use WIN market for probable odds
             ORDER BY o.cloth_number ASC
             """,
@@ -2629,169 +2629,91 @@ def event_detail(event_id: str):
 
 @app.post("/api/tote/refresh_event_pools/<event_id>")
 def api_refresh_event_pools(event_id: str):
-    """Synchronously poll Tote API for all products of this event and upsert totals.
-
-    This is a local, on-demand helper independent of Cloud Run.
-    """
+    """Triggers Cloud Run jobs to refresh pool info for all products of an event."""
     try:
         if not event_id:
             return app.response_class(json.dumps({"error": "missing event_id"}), mimetype="application/json", status=400)
-        # List products for the event (open + closed; we update whichever exist)
+
+        # Get project and topic from config/env
+        project_id = os.getenv("GCP_PROJECT") or cfg.bq_project
+        topic_id = os.getenv("PUBSUB_TOPIC_ID", "ingest-jobs")
+        if not project_id or not topic_id:
+            return app.response_class(json.dumps({"error": "GCP project or Pub/Sub topic not configured"}), mimetype="application/json", status=500)
+
+        # List all products for the event to trigger a refresh for each.
         df = sql_df("SELECT product_id FROM tote_products WHERE event_id=?", params=(event_id,), cache_ttl=0)
-        ids = ([] if df.empty else [r["product_id"] for _, r in df.iterrows()])
-        if not ids:
-            return app.response_class(json.dumps({"updated": 0}), mimetype="application/json")
-        from .bq import get_bq_sink
-        from .providers.tote_api import ToteClient
-        from .ingest.tote_products import ingest_products
-        sink = get_bq_sink()
-        client = ToteClient()
-        n = ingest_products(sink, client, date_iso=None, status=None, first=len(ids), bet_types=None, product_ids=ids)
-        # Create snapshots for each product (best-effort)
-        try:
-            pdf = sql_df("SELECT product_id, event_id, bet_type, status, currency, start_iso, total_gross, total_net, rollover, deduction_rate FROM tote_products WHERE event_id=?", params=(event_id,), cache_ttl=0)
-            if not pdf.empty:
-                ts = int(time.time() * 1000)
-                rows = []
-                for _, r in pdf.iterrows():
-                    rows.append({
-                        "product_id": r["product_id"],
-                        "event_id": r["event_id"],
-                        "bet_type": r["bet_type"],
-                        "status": r["status"],
-                        "currency": r["currency"],
-                        "start_iso": r["start_iso"],
-                        "ts_ms": ts,
-                        "total_gross": float(r.get("total_gross") or 0.0),
-                        "total_net": float(r.get("total_net") or 0.0),
-                        "rollover": float(r.get("rollover") or 0.0),
-                        "deduction_rate": float(r.get("deduction_rate") or 0.0),
-                    })
-                if rows:
-                    sink.upsert_tote_pool_snapshots(rows)
-        except Exception:
-            pass
-        return app.response_class(json.dumps({"updated": n, "product_ids": ids}), mimetype="application/json")
+        product_ids = [] if df.empty else [r["product_id"] for _, r in df.iterrows()]
+
+        if not product_ids:
+            return app.response_class(json.dumps({"triggered": 0, "product_ids": []}), mimetype="application/json")
+
+        # Publish one job per product
+        message_ids = []
+        for pid in product_ids:
+            try:
+                # This uses the same task as the manual trigger page
+                mid = publish_pubsub_message(project_id, topic_id, {"task": "ingest_single_product", "product_id": pid})
+                message_ids.append(mid)
+            except Exception as e:
+                # Log and continue
+                print(f"Failed to publish job for product {pid}: {e}")
+        
+        return app.response_class(json.dumps({"triggered": len(message_ids), "product_ids": product_ids}), mimetype="application/json")
+
     except Exception as e:
+        traceback.print_exc()
         return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
 @app.post("/api/tote/refresh_odds/<event_id>")
 def api_refresh_odds(event_id: str):
-    """Fetch WIN probable odds via REST, normalize, and store to raw_tote_probable_odds.
-
-    This does not depend on Cloud Run. It targets the partner gateway using the configured
-    TOTE_GRAPHQL_URL host and Api-Key header.
+    """
+    Refreshes probable odds by re-ingesting the WIN product for the event.
+    This uses the main GraphQL ingestion path for consistency and robustness.
     """
     try:
-        # Find an OPEN WIN product for this event
+        # Find an OPEN or SELLING WIN product for this event to re-ingest.
         pdf = sql_df(
-            "SELECT product_id FROM tote_products WHERE event_id=? AND UPPER(bet_type)='WIN' ORDER BY status DESC LIMIT 1",
+            "SELECT product_id FROM `autobet-470818.autobet.tote_products` WHERE event_id=? AND UPPER(bet_type)='WIN' AND UPPER(status) IN ('OPEN', 'SELLING') ORDER BY status DESC LIMIT 1",
             params=(event_id,)
         )
         if pdf.empty:
-            return app.response_class(json.dumps({"error": "no WIN product for event"}), mimetype="application/json", status=404)
+            # Fallback to any WIN product if none are open
+            pdf = sql_df(
+                "SELECT product_id FROM `autobet-470818.autobet.tote_products` WHERE event_id=? AND UPPER(bet_type)='WIN' ORDER BY start_iso DESC LIMIT 1",
+                params=(event_id,)
+            )
+
+        if pdf.empty:
+            return app.response_class(json.dumps({"error": "no WIN product found for event"}), mimetype="application/json", status=404)
+
         win_product_id = pdf.iloc[0]["product_id"]
 
-        # Build host root from configured GraphQL URL
-        base = cfg.tote_graphql_url or ""
-        host_root = ""
-        try:
-            if "/partner/" in base:
-                host_root = base.split("/partner/")[0].rstrip("/")
-            else:
-                from urllib.parse import urlparse
-                u = urlparse(base)
-                if u.scheme and u.netloc:
-                    host_root = f"{u.scheme}://{u.netloc}"
-        except Exception:
-            host_root = ""
-        if not host_root:
-            host_root = "https://hub.production.racing.tote.co.uk"
-
-        candidates = [
-            f"{host_root}/partner/gateway/probable-odds/v1/products/{win_product_id}",
-            f"{host_root}/partner/gateway/v1/products/{win_product_id}/probable-odds",
-            f"{host_root}/v1/products/{win_product_id}/probable-odds",
-        ]
-        headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
-        data = None; url_used = None
-        for url in candidates:
-            try:
-                r = requests.get(url, headers=headers, timeout=10)
-                if r.status_code == 200:
-                    data = r.json()
-                    url_used = url
-                    break
-            except Exception:
-                continue
-        if data is None:
-            return app.response_class(json.dumps({"error": "probable-odds fetch failed"}), mimetype="application/json", status=502)
-
-        # Normalize to the view's expected shape: {products:{nodes:[{id, lines:{nodes:[{legs:[{lineSelections:[{selectionId}]}], odds:{decimal}}]}}]}}
-        def _extract_lines(obj):
-            lines = []
-            if not isinstance(obj, dict):
-                return lines
-            # common shapes
-            try:
-                if isinstance(obj.get("lines"), dict) and isinstance(obj["lines"].get("nodes"), list):
-                    for ln in obj["lines"]["nodes"]:
-                        lines.append(ln)
-                elif isinstance(obj.get("lines"), list):
-                    lines.extend(obj["lines"])
-            except Exception:
-                pass
-            # nested scan
-            for k, v in list(obj.items()):
-                if isinstance(v, dict):
-                    lines.extend(_extract_lines(v))
-                elif isinstance(v, list):
-                    for it in v:
-                        if isinstance(it, dict):
-                            lines.extend(_extract_lines(it))
-            return lines
-
-        lines = _extract_lines(data)
-        norm_lines = []
-        for ln in lines:
-            try:
-                odds = ((ln.get("odds") or {}).get("decimal"))
-                legs = ln.get("legs") or []
-                sel_id = None
-                if legs:
-                    try:
-                        sels = (legs[0].get("lineSelections") or [])
-                        if sels:
-                            sel_id = sels[0].get("selectionId")
-                    except Exception:
-                        pass
-                if sel_id and odds is not None:
-                    norm_lines.append({
-                        "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
-                        "odds": {"decimal": float(odds)},
-                    })
-            except Exception:
-                continue
-
-        if not norm_lines:
-            return app.response_class(json.dumps({"error": "no lines found in response", "url": url_used}), mimetype="application/json", status=422)
-
-        payload = {
-            "products": {
-                "nodes": [
-                    {"id": win_product_id, "lines": {"nodes": norm_lines}}
-                ]
-            }
-        }
         from .bq import get_bq_sink
+        from .providers.tote_api import ToteClient
+        from .ingest.tote_products import ingest_products
+
         sink = get_bq_sink()
-        import time as _t
-        ts_ms = int(_t.time() * 1000)
-        sink.upsert_raw_tote_probable_odds([
-            {"raw_id": f"probable:{win_product_id}:{ts_ms}", "fetched_ts": ts_ms, "payload": json.dumps(payload), "product_id": win_product_id}
-        ])
-        return app.response_class(json.dumps({"ok": True, "product_id": win_product_id, "lines": len(norm_lines)}), mimetype="application/json")
+        client = ToteClient()
+
+        # Re-ingest this specific product. The ingest_products function will fetch
+        # all data, including the latest probable odds, and store it.
+        updated_count = ingest_products(
+            db=sink,
+            client=client,
+            date_iso=None,
+            status=None,
+            first=1,
+            bet_types=None,
+            product_ids=[win_product_id]
+        )
+
+        if updated_count > 0:
+            return app.response_class(json.dumps({"ok": True, "product_id": win_product_id, "lines": "refreshed"}), mimetype="application/json")
+        else:
+            return app.response_class(json.dumps({"error": "ingest_products returned 0 updates", "product_id": win_product_id}), mimetype="application/json", status=500)
+
     except Exception as e:
+        traceback.print_exc()
         return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
 @app.route("/api/tote/product_selections/<product_id>")
@@ -2801,7 +2723,7 @@ def api_tote_product_selections(product_id: str):
         return app.response_class(json.dumps({"error": "missing product_id"}), mimetype="application/json", status=400)
     try:
         df = sql_df(
-            "SELECT selection_id, number, competitor FROM tote_product_selections WHERE product_id=? ORDER BY CAST(number AS INT64) NULLS LAST",
+            "SELECT selection_id, number, competitor FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=? ORDER BY CAST(number AS INT64) NULLS LAST",
             params=(product_id,)
         )
         rows = df.to_dict("records") if not df.empty else []
@@ -2813,7 +2735,7 @@ def api_tote_product_selections(product_id: str):
 def horse_detail(horse_id: str):
     """Displays historical form for a single horse."""
     # Fetch horse details
-    horse_df = sql_df("SELECT * FROM hr_horses WHERE horse_id=?", params=(horse_id,))
+    horse_df = sql_df("SELECT * FROM `autobet-470818.autobet.hr_horses` WHERE horse_id=?", params=(horse_id,))
     if horse_df.empty:
         flash("Horse not found", "error")
         return redirect(url_for("index"))
@@ -2823,9 +2745,9 @@ def horse_detail(horse_id: str):
     runs_df = sql_df(
         """
         SELECT r.*, e.name as event_name, e.venue, c.going, c.weather_desc
-        FROM hr_horse_runs r
-        LEFT JOIN tote_events e ON e.event_id = r.event_id
-        LEFT JOIN race_conditions c ON c.event_id = r.event_id
+        FROM `autobet-470818.autobet.hr_horse_runs` r
+        LEFT JOIN `autobet-470818.autobet.tote_events` e ON e.event_id = r.event_id
+        LEFT JOIN `autobet-470818.autobet.race_conditions` c ON c.event_id = r.event_id
         WHERE r.horse_id = ?
         ORDER BY e.start_iso DESC
         LIMIT 10
@@ -2836,17 +2758,17 @@ def horse_detail(horse_id: str):
 
 @app.route("/tote-superfecta/<product_id>")
 def tote_superfecta_detail(product_id: str):
-    pdf = sql_df("SELECT * FROM vw_products_latest_totals WHERE product_id=?", params=(product_id,))
+    pdf = sql_df("SELECT * FROM `autobet-470818.autobet.vw_products_latest_totals` WHERE product_id=?", params=(product_id,))
     if pdf.empty:
         flash("Unknown product id", "error")
         return redirect(url_for("tote_superfecta_page"))
     p = pdf.iloc[0].to_dict()
-    runners_df = sql_df("SELECT DISTINCT number, competitor FROM tote_product_selections WHERE product_id=? ORDER BY number", params=(product_id,))
+    runners_df = sql_df("SELECT DISTINCT number, competitor FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=? ORDER BY number", params=(product_id,))
     runners = runners_df.to_dict("records") if not runners_df.empty else []
     # Fallback: if no runners recorded yet, infer cloth numbers from probable odds view
     if not runners:
         try:
-            odf = sql_df("SELECT DISTINCT CAST(cloth_number AS INT64) AS number FROM vw_tote_probable_odds WHERE product_id=? ORDER BY number", params=(product_id,))
+            odf = sql_df("SELECT DISTINCT CAST(cloth_number AS INT64) AS number FROM `autobet-470818.autobet.vw_tote_probable_odds` WHERE product_id=? ORDER BY number", params=(product_id,))
             if not odf.empty:
                 nums = odf["number"].dropna().astype(int).tolist()
                 name_map = {}
@@ -2868,7 +2790,7 @@ def tote_superfecta_detail(product_id: str):
     divs = sql_df(
         """
         SELECT selection, MAX(ts) AS ts, MAX(dividend) AS dividend
-        FROM tote_product_dividends
+        FROM `autobet-470818.autobet.tote_product_dividends`
         WHERE product_id=?
         GROUP BY selection
         ORDER BY dividend DESC
@@ -2879,14 +2801,14 @@ def tote_superfecta_detail(product_id: str):
     fr = sql_df(
         """
         SELECT horse_id, finish_pos, status, cloth_number
-        FROM hr_horse_runs WHERE event_id=? AND finish_pos IS NOT NULL
+        FROM `autobet-4f70818.autobet.hr_horse_runs` WHERE event_id=? AND finish_pos IS NOT NULL
         ORDER BY finish_pos ASC
         """,
         params=(p.get('event_id'),)
     )
     # Load conditions (going + weather)
     cond = sql_df(
-        "SELECT going, weather_temp_c, weather_wind_kph, weather_precip_mm FROM race_conditions WHERE event_id=?",
+        "SELECT going, weather_temp_c, weather_wind_kph, weather_precip_mm FROM `autobet-470818.autobet.race_conditions` WHERE event_id=?",
         params=(p.get('event_id'),)
     )
     # Runners with latest probable odds (if available)
@@ -3353,22 +3275,22 @@ def tote_live_model_page():
 
     # Fetch default model parameters from BigQuery
     try:
-        params_df = sql_df("SELECT * FROM tote_params ORDER BY ts_ms DESC LIMIT 1", cache_ttl=300)
+        params_df = sql_df("SELECT * FROM `autobet-470818.autobet.tote_params` ORDER BY ts_ms DESC LIMIT 1", cache_ttl=300)
         model_params = params_df.iloc[0].to_dict() if not params_df.empty else {}
     except Exception:
         model_params = {}
     
     # --- Filter Options ---
     try:
-        countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+        countries_df = sql_df("SELECT DISTINCT country FROM `autobet-470818.autobet.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
         country_options = countries_df['country'].tolist() if not countries_df.empty else []
     except Exception:
         country_options = []
     # Venue options based on filters (country/date) for convenience
     try:
         v_sql = (
-            "SELECT DISTINCT COALESCE(e.venue, p.venue) AS venue "
-            "FROM vw_products_latest_totals p LEFT JOIN tote_events e USING(event_id) "
+            "SELECT DISTINCT COALESCE(e.venue, p.venue) AS venue " +
+            "FROM `autobet-470818.autobet.vw_products_latest_totals` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) "
             "WHERE UPPER(p.bet_type)='SUPERFECTA'"
         )
         v_params: list[object] = []
@@ -3404,8 +3326,8 @@ def tote_live_model_page():
           p.deduction_rate,
           w.product_id AS win_product_id
         FROM
-          vw_products_latest_totals p
-        LEFT JOIN tote_events e ON p.event_id = e.event_id
+          `autobet-470818.autobet.vw_products_latest_totals` p
+        LEFT JOIN `autobet-470818.autobet.tote_events` e ON p.event_id = e.event_id
         LEFT JOIN (
           SELECT product_id, event_id
           FROM (
@@ -3413,7 +3335,7 @@ def tote_live_model_page():
               w.product_id,
               w.event_id,
               ROW_NUMBER() OVER(PARTITION BY w.event_id ORDER BY w.product_id) AS rn
-            FROM vw_products_latest_totals w
+            FROM `autobet-470818.autobet.vw_products_latest_totals` w
             WHERE UPPER(w.bet_type) = 'WIN' AND UPPER(COALESCE(w.status,'')) IN ('OPEN','SELLING')
           )
           WHERE rn = 1
@@ -3458,7 +3380,7 @@ def tote_live_model_page():
     except Exception as e:
         # Fallback to base table if the view is missing
         try:
-            sql_fb = sql.replace("vw_products_latest_totals", "tote_products")
+            sql_fb = sql.replace("`autobet-470818.autobet.vw_products_latest_totals`", "`autobet-470818.autobet.tote_products`")
             upcoming_df = sql_df(sql_fb, params=params, cache_ttl=30)
         except Exception as e2:
             flash(f"Query for upcoming events failed: {e2}", "error")
@@ -3468,14 +3390,28 @@ def tote_live_model_page():
     try:
         if (upcoming_df is None or upcoming_df.empty) and country == "GB" and date_filter == _today_iso():
             gb_df = sql_df(
-                "SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, total_gross, total_net \n"
-                "FROM vw_gb_open_superfecta_next60 ORDER BY start_iso",
+                "SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, total_gross, total_net, rollover \n"
+                "FROM `autobet-470818.autobet.vw_gb_open_superfecta_next60` ORDER BY start_iso",
                 cache_ttl=30,
             )
             if gb_df is not None and not gb_df.empty:
                 upcoming_df = gb_df
     except Exception:
         pass
+
+    # --- Calculate display pool values ---
+    if upcoming_df is not None and not upcoming_df.empty:
+        # Ensure columns exist and are numeric, fill NaNs with 0
+        for col in ['total_gross', 'total_net', 'rollover']:
+            if col not in upcoming_df.columns:
+                upcoming_df[col] = 0.0
+        upcoming_df['total_gross'] = pd.to_numeric(upcoming_df['total_gross'], errors='coerce').fillna(0.0)
+        upcoming_df['total_net'] = pd.to_numeric(upcoming_df['total_net'], errors='coerce').fillna(0.0)
+        upcoming_df['rollover'] = pd.to_numeric(upcoming_df['rollover'], errors='coerce').fillna(0.0)
+
+        # Calculate total pool and net pool as requested
+        upcoming_df['total_pool'] = upcoming_df['total_gross'] + upcoming_df['rollover']
+        upcoming_df['net_pool'] = upcoming_df['total_net'] + upcoming_df['rollover']
 
     calculation_result = None
     if calculate_product_id and not upcoming_df.empty:
@@ -3489,7 +3425,7 @@ def tote_live_model_page():
             else:
                 # Fetch runners and probable odds
                 odds_df = sql_df(
-                    "SELECT s.number, s.competitor as name, o.decimal_odds as odds FROM vw_tote_probable_odds o JOIN tote_product_selections s ON o.selection_id = s.selection_id AND s.product_id = o.product_id WHERE o.product_id = ? ORDER BY s.number",
+                    "SELECT s.number, s.competitor as name, o.decimal_odds as odds FROM `autobet-470818.autobet.vw_tote_probable_odds` o JOIN `autobet-470818.autobet.tote_product_selections` s ON o.selection_id = s.selection_id AND s.product_id = o.product_id WHERE o.product_id = ? ORDER BY s.number",
                     params=(p["win_product_id"],)
                 )
                 if odds_df.empty or odds_df['odds'].isnull().all():
@@ -3637,8 +3573,8 @@ def models_page():
                 pred_df = sql_df(
                     """
                     WITH ids AS (SELECT id FROM UNNEST(SPLIT(@ids, ',')) AS id)
-                    SELECT DISTINCT s.product_id
-                    FROM vw_superfecta_runner_strength s
+                    SELECT DISTINCT s.product_id " +
+                    "FROM `autobet-470818.autobet.vw_superfecta_runner_strength` s
                     JOIN ids ON ids.id = s.product_id
                     """,
                     params={"ids": csv_ids},
@@ -3647,8 +3583,8 @@ def models_page():
                 odds_df = sql_df(
                     """
                     WITH ids AS (SELECT id FROM UNNEST(SPLIT(@ids, ',')) AS id)
-                    SELECT DISTINCT s.product_id
-                    FROM vw_sf_strengths_from_win_horse s
+                    SELECT DISTINCT s.product_id " +
+                    "FROM `autobet-470818.autobet.vw_sf_strengths_from_win_horse` s
                     JOIN ids ON ids.id = s.product_id
                     """,
                     params={"ids": csv_ids},
@@ -3875,18 +3811,10 @@ def model_event_eval_page(model_id: str, event_id: str):
 def imports_page():
     """Show latest data imports and basic counts from BigQuery."""
     try:
-        prod_today = sql_df(
-            "SELECT COUNT(1) AS c, MAX(start_iso) AS max_start FROM tote_products WHERE DATE(SUBSTR(start_iso,1,10))=CURRENT_DATE()"
-        )
-        ev_today = sql_df(
-            "SELECT COUNT(1) AS c, MAX(start_iso) AS max_start FROM tote_events WHERE DATE(SUBSTR(start_iso,1,10))=CURRENT_DATE()"
-        )
-        raw_latest = sql_df(
-            "SELECT endpoint, fetched_ts FROM raw_tote ORDER BY fetched_ts DESC LIMIT 20"
-        )
-        prob_latest = sql_df(
-            "SELECT fetched_ts FROM raw_tote_probable_odds ORDER BY fetched_ts DESC LIMIT 20"
-        )
+        prod_today = sql_df("SELECT COUNT(1) AS c, MAX(start_iso) AS max_start FROM `autobet-470818.autobet.tote_products` WHERE DATE(SUBSTR(start_iso,1,10))=CURRENT_DATE()")
+        ev_today = sql_df("SELECT COUNT(1) AS c, MAX(start_iso) AS max_start FROM `autobet-470818.autobet.tote_events` WHERE DATE(SUBSTR(start_iso,1,10))=CURRENT_DATE()")
+        raw_latest = sql_df("SELECT endpoint, fetched_ts FROM `autobet-470818.autobet.raw_tote` ORDER BY fetched_ts DESC LIMIT 20")
+        prob_latest = sql_df("SELECT fetched_ts FROM `autobet-470818.autobet.raw_tote_probable_odds` ORDER BY fetched_ts DESC LIMIT 20")
     except Exception as e:
         flash(f"Import stats error: {e}", "error")
         prod_today = ev_today = raw_latest = prob_latest = None
@@ -3938,7 +3866,7 @@ def tote_bet_page():
             return redirect(request.referrer or url_for("tote_bet_page"))
 
         # Determine bet type
-        prod_df = sql_df("SELECT bet_type FROM tote_products WHERE product_id=?", params=(product_id,))
+        prod_df = sql_df("SELECT bet_type FROM `autobet-470818.autobet.tote_products` WHERE product_id=?", params=(product_id,))
         if prod_df.empty:
             flash(f"Product with ID '{product_id}' not found.", "error")
             return redirect(request.referrer or url_for("tote_bet_page"))
@@ -4027,7 +3955,7 @@ def tote_bet_page():
 
     ev_sql = (
         "SELECT event_id, name, venue, country, start_iso "
-        "FROM tote_events"
+        "FROM `autobet-470818.autobet.tote_events`"
     )
     if where:
         ev_sql += " WHERE " + " AND ".join(where)
@@ -4035,13 +3963,13 @@ def tote_bet_page():
     ev_sql += " ORDER BY start_iso ASC LIMIT 200"
 
     events_df = sql_df(ev_sql, params=params)
-    countries_df = sql_df("SELECT DISTINCT country FROM tote_events WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+    countries_df = sql_df("SELECT DISTINCT country FROM `autobet-470818.autobet.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
     # Optional preselect by product_id
     preselect = None
     try:
         pid = (request.args.get("product_id") or "").strip()
         if pid:
-            df = sql_df("SELECT event_id FROM tote_products WHERE product_id=?", params=(pid,))
+            df = sql_df("SELECT event_id FROM `autobet-470818.autobet.tote_products` WHERE product_id=?", params=(pid,))
             if not df.empty:
                 preselect = {"product_id": pid, "event_id": df.iloc[0]['event_id']}
     except Exception:
