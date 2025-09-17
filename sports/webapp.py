@@ -1574,18 +1574,7 @@ def tote_viability_page():
                     )
                     if viab_df is not None and not viab_df.empty:
                         viab = viab_df.iloc[0].to_dict()
-                    grid_df = sql_df(
-                        f"SELECT * FROM `{cfg.bq_project}.{cfg.bq_dataset}.tf_perm_viability_grid`(@N,@K,@O,@l,@t,@R,@inc,@mult,@f, @steps)",
-                        params={
-                            "N": N, "K": 2, "O": pool_gross, "l": stake_per_line, "t": take_rate,
-                            "R": net_rollover, "inc": True if inc_self else False, "mult": div_mult, "f": f_fix,
-                            "steps": 20,
-                        },
-                    )
-                    if grid_df is not None and not grid_df.empty:
-                        grid = grid_df.to_dict("records")
                     # The viability grid for combinations is not yet implemented.
-                    # Using the permutation grid would be mathematically incorrect.
                     flash("Viability grid is not yet supported for SWINGER bets.", "info")
                     if viab is None:
                         viab = _viability_local_perm(N, 2, pool_gross, M, stake_per_line, take_rate, net_rollover, inc_self, div_mult, f_fix if f_fix is not None else None)
@@ -2230,11 +2219,133 @@ def audit_bet_detail_page(bet_id: str):
 
     return render_template("audit_bet_detail.html", bet=detail)
 
+@app.route("/status")
+def status_page():
+    """Enhanced status dashboard (v2) showing GCP + data freshness."""
+    return render_template("status_v2.html")
+
+
+@app.get("/api/status/data_freshness")
+def api_status_data_freshness():
+    """Return counts and last-ingest timestamps for key tables."""
+    try:
+        # Events: count by start date; last ingest from job runs
+        ev_today = sql_df("SELECT COUNT(1) AS c FROM tote_events WHERE SUBSTR(start_iso,1,10)=FORMAT_DATE('%F', CURRENT_DATE())")
+        ev_last = sql_df(
+            "SELECT TIMESTAMP_MILLIS(MAX(ended_ts)) AS ts FROM ingest_job_runs WHERE task IN ('ingest_events_for_day','ingest_events_range') AND status='OK'"
+        )
+
+        # Products: count by start date; last ingest from job runs
+        pr_today = sql_df("SELECT COUNT(1) AS c FROM tote_products WHERE SUBSTR(start_iso,1,10)=FORMAT_DATE('%F', CURRENT_DATE())")
+        pr_last = sql_df(
+            "SELECT TIMESTAMP_MILLIS(MAX(ended_ts)) AS ts FROM ingest_job_runs WHERE task IN ('ingest_products_for_day','ingest_single_product') AND status='OK'"
+        )
+
+        # Probable odds
+        po_today = sql_df("SELECT COUNT(1) AS c FROM raw_tote_probable_odds WHERE DATE(TIMESTAMP_MILLIS(fetched_ts))=CURRENT_DATE()")
+        po_last = sql_df("SELECT TIMESTAMP_MILLIS(MAX(fetched_ts)) AS ts FROM raw_tote_probable_odds")
+
+        # Pool snapshots
+        ps_today = sql_df("SELECT COUNT(1) AS c FROM tote_pool_snapshots WHERE DATE(TIMESTAMP_MILLIS(ts_ms))=CURRENT_DATE()")
+        ps_last = sql_df("SELECT TIMESTAMP_MILLIS(MAX(ts_ms)) AS ts FROM tote_pool_snapshots")
+
+        out = {
+            "events": {
+                "today": int(ev_today.iloc[0]["c"]) if not ev_today.empty else 0,
+                "last": (str(ev_last.iloc[0]["ts"]) if not ev_last.empty else None),
+            },
+            "products": {
+                "today": int(pr_today.iloc[0]["c"]) if not pr_today.empty else 0,
+                "last": (str(pr_last.iloc[0]["ts"]) if not pr_last.empty else None),
+            },
+            "probable_odds": {
+                "today": int(po_today.iloc[0]["c"]) if not po_today.empty else 0,
+                "last": (str(po_last.iloc[0]["ts"]) if not po_last.empty else None),
+            },
+            "pool_snapshots": {
+                "today": int(ps_today.iloc[0]["c"]) if not ps_today.empty else 0,
+                "last": (str(ps_last.iloc[0]["ts"]) if not ps_last.empty else None),
+            },
+        }
+        return app.response_class(json.dumps(out), mimetype="application/json")
+    except Exception as e:
+        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
+
+
+@app.get("/api/status/qc")
+def api_status_qc():
+    """Return QC gaps and counts from QC views."""
+    try:
+        out: dict[str, Any] = {
+            "missing_runner_numbers": 0,
+            "missing_bet_rules": 0,
+            "probable_odds_avg_cov": None,
+            "gb_sf_missing_snapshots": 0,
+        }
+        # Missing runner numbers today
+        try:
+            df = sql_df("SELECT COUNT(DISTINCT product_id) AS c FROM vw_qc_today_missing_runner_numbers")
+            out["missing_runner_numbers"] = int(df.iloc[0]["c"]) if not df.empty else 0
+        except Exception:
+            pass  # Keep default 0
+        # Missing bet rules
+        try:
+            df = sql_df("SELECT COUNT(1) AS c FROM vw_qc_missing_bet_rules")
+            out["missing_bet_rules"] = int(df.iloc[0]["c"]) if not df.empty else 0
+        except Exception:
+            pass  # Keep default 0
+        # Probable odds coverage (average across products)
+        try:
+            df = sql_df("SELECT AVG(coverage) AS avg_cov FROM vw_qc_probable_odds_coverage")
+            if not df.empty and pd.notna(df.iloc[0]["avg_cov"]):
+                out["probable_odds_avg_cov"] = float(df.iloc[0]["avg_cov"])
+        except Exception:
+            pass  # Keep default None
+        # Today's GB Superfecta missing snapshots
+        try:
+            df = sql_df("SELECT COUNT(1) AS c FROM vw_qc_today_gb_sf_missing_snapshots")
+            out["gb_sf_missing_snapshots"] = int(df.iloc[0]["c"]) if not df.empty else 0
+        except Exception:
+            pass  # Keep default 0
+        return app.response_class(json.dumps(out), mimetype="application/json")
+    except Exception as e:
+        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
+
+
+@app.get("/api/status/upcoming")
+def api_status_upcoming():
+    """Return upcoming races/products in the next 4 hours if view exists."""
+    upcoming = []
+    try:
+        # Use the 60-minute view which is known to exist.
+        df = sql_df("SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, combos, S, roi_current, viable_now FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso")
+        upcoming = df.to_dict("records") if not df.empty else []
+    except Exception:
+        # Fallback: generic query for open products in the next 4 hours
+        try:
+            now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            df = sql_df(
+                "SELECT p.product_id, p.event_id, COALESCE(p.event_name, e.name) AS event_name, e.sport, COALESCE(p.venue, e.venue) AS venue, COALESCE(e.country, p.currency) AS country, p.start_iso, p.status, p.currency, qc.avg_cov "
+                "FROM vw_products_latest_totals p "
+                "LEFT JOIN tote_events e USING(event_id) "
+                "LEFT JOIN vw_qc_probable_odds_coverage qc ON p.product_id = qc.product_id "
+                "WHERE p.status='OPEN' AND TIMESTAMP(p.start_iso) BETWEEN TIMESTAMP(@now) AND TIMESTAMP_ADD(TIMESTAMP(@now), INTERVAL 4 HOUR) "
+                "ORDER BY p.start_iso",
+                params={"now": now_iso},
+            )
+            upcoming = df.to_dict("records") if not df.empty else []
+        except Exception:
+            # If all fallbacks fail, return an empty list.
+            upcoming = []
+    return app.response_class(json.dumps({"items": upcoming}), mimetype="application/json")
+
+
 def _gcp_project_region() -> tuple[str|None, str|None]:
     # Prefer standard GCP envs, then config
     proj = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCP_PROJECT") or cfg.bq_project
     region = os.getenv("GCP_REGION") or os.getenv("CLOUD_RUN_REGION") or os.getenv("REGION") or "europe-west2"
     return proj, region
+
 
 def _gcp_auth_session():
     try:
@@ -2247,17 +2358,23 @@ def _gcp_auth_session():
     except Exception:
         return None
 
-def _get_gcp_cloud_run_services() -> list[dict]:
+
+@app.get("/api/status/gcp")
+def api_status_gcp():
+    """Return Cloud Run, Cloud Scheduler, and Pub/Sub resource statuses."""
     project, region = _gcp_project_region()
     if not project:
-        return []
+        return app.response_class(json.dumps({"error": "GCP project not configured"}), mimetype="application/json", status=400)
 
     sess = _gcp_auth_session()
     if not sess:
-        return []
+        return app.response_class(json.dumps({"error": "GCP auth unavailable"}), mimetype="application/json", status=500)
 
-    services: list[dict] = []
+    out = {"project": project, "region": region, "cloud_run": {}, "scheduler": {}, "pubsub": {}, "app": {}}
+
+    # Cloud Run services (list all in region)
     try:
+        services: list[dict] = []
         url = f"https://run.googleapis.com/v2/projects/{project}/locations/{region}/services"
         r = sess.get(url, timeout=10)
         if r.status_code == 200:
@@ -2280,41 +2397,75 @@ def _get_gcp_cloud_run_services() -> list[dict]:
                     "updateTime": j.get("updateTime"),
                     "conditions": j.get("conditions", []),
                 })
+        else:
+            out["cloud_run"]["status_code"] = r.status_code
+        out["cloud_run"]["services"] = services
     except Exception as e:
-        flash(f"Error fetching Cloud Run services: {e}", "error")
-    return services
+        out["cloud_run"]["error"] = str(e)
 
-@app.route("/status")
-def status_page():
-    """Basic status dashboard showing data freshness."""
-    today = _today_iso()
-    # Products by type
-    prod_by_type_df = sql_df("SELECT bet_type, COUNT(1) AS n FROM tote_products WHERE substr(start_iso,1,10)=? GROUP BY bet_type", params=(today,))
-    # Superfecta stats
-    sf_stats_df = sql_df("SELECT COUNT(1) AS n_products, SUM(n_runners) AS total_selections FROM (SELECT p.product_id, (SELECT COUNT(1) FROM tote_product_selections s WHERE s.product_id=p.product_id) AS n_runners FROM tote_products p WHERE p.bet_type='SUPERFECTA' AND substr(p.start_iso,1,10)=?)", params=(today,))
-    # Probable odds
-    probable_today_df = sql_df("SELECT COUNT(1) AS n_rows FROM raw_tote_probable_odds WHERE DATE(TIMESTAMP_MILLIS(fetched_ts))=CURRENT_DATE()")
-    probable_last_df = sql_df("SELECT FORMAT_TIMESTAMP('%F %T', TIMESTAMP_MILLIS(MAX(fetched_ts))) AS last_ts FROM raw_tote_probable_odds")
-    # Snapshots
-    snap_today_df = sql_df("SELECT COUNT(1) AS n_rows FROM tote_pool_snapshots WHERE DATE(TIMESTAMP_MILLIS(ts_ms))=CURRENT_DATE()")
-    snap_last_df = sql_df("SELECT FORMAT_TIMESTAMP('%F %T', TIMESTAMP_MILLIS(MAX(ts_ms))) AS last_ts FROM tote_pool_snapshots")
-    # Recent superfecta
-    recent_sf_df = sql_df("SELECT p.product_id, p.start_iso, p.event_name, p.venue, p.status, p.total_gross, p.total_net, (SELECT COUNT(1) FROM tote_product_selections s WHERE s.product_id=p.product_id) AS n_runners FROM tote_products p WHERE p.bet_type='SUPERFECTA' AND substr(p.start_iso,1,10)=? ORDER BY p.start_iso DESC", params=(today,))
-    # GCP Cloud Run services
-    services = _get_gcp_cloud_run_services()
+    # Cloud Scheduler jobs
+    try:
+        url = f"https://cloudscheduler.googleapis.com/v1/projects/{project}/locations/{region}/jobs"
+        r = sess.get(url, timeout=10)
+        jobs = []
+        if r.status_code == 200:
+            for j in r.json().get("jobs", []):
+                jobs.append({
+                    "name": j.get("name"),
+                    "schedule": j.get("schedule"),
+                    "state": j.get("state"),
+                    "lastAttemptTime": j.get("lastAttemptTime") or (j.get("lastAttempt") or {}).get("dispatchTime"),
+                })
+        else:
+            out["scheduler"]["status_code"] = r.status_code
+        out["scheduler"]["jobs"] = jobs
+    except Exception as e:
+        out["scheduler"]["error"] = str(e)
 
-    return render_template(
-        "status.html",
-        prod_by_type=(prod_by_type_df.to_dict("records") if not prod_by_type_df.empty else []),
-        sf_stats=(sf_stats_df.iloc[0] if not sf_stats_df.empty else {}),
-        probable_today=(probable_today_df.iloc[0] if not probable_today_df.empty else {}),
-        probable_last=(probable_last_df.iloc[0] if not probable_last_df.empty else {}),
-        snap_today=(snap_today_df.iloc[0] if not snap_today_df.empty else {}),
-        snap_last=(snap_last_df.iloc[0] if not snap_last_df.empty else {}),
-        recent_sf=(recent_sf_df.to_dict("records") if not recent_sf_df.empty else []),
-        services=services,
-    )
+    # Pub/Sub topic + subscription (ingest)
+    try:
+        topic = f"projects/{project}/topics/ingest-jobs"
+        sub = f"projects/{project}/subscriptions/ingest-fetcher-sub"
+        t = sess.get(f"https://pubsub.googleapis.com/v1/{topic}", timeout=10)
+        s = sess.get(f"https://pubsub.googleapis.com/v1/{sub}", timeout=10)
+        t_info = {"exists": (t.status_code == 200)}
+        s_info = {"exists": (s.status_code == 200)}
+        if t.status_code == 200:
+            t_info.update({"name": t.json().get("name")})
+        if s.status_code == 200:
+            sj = s.json()
+            s_info.update({
+                "name": sj.get("name"),
+                "topic": sj.get("topic"),
+                "ackDeadlineSeconds": sj.get("ackDeadlineSeconds"),
+                "pushEndpoint": ((sj.get("pushConfig") or {}).get("pushEndpoint")),
+            })
+        out["pubsub"] = {"topic": t_info, "subscription": s_info}
+    except Exception as e:
+        out["pubsub"]["error"] = str(e)
 
+    # App-level subscription flags
+    try:
+        out["app"]["SUBSCRIBE_POOLS_env"] = os.getenv("SUBSCRIBE_POOLS", "0")
+        out["app"]["pool_subscriber_started"] = bool(_pool_thread_started)
+    except Exception:
+        pass
+
+    return app.response_class(json.dumps(out), mimetype="application/json")
+
+
+@app.get("/api/status/job_log")
+def api_status_job_log():
+    """Return recent job runs recorded in BigQuery by the services."""
+    try:
+        df = sql_df(
+            "SELECT job_id, component, task, status, started_ts, ended_ts, duration_ms, payload_json, error, metrics_json "
+            "FROM ingest_job_runs ORDER BY started_ts DESC LIMIT 50"
+        )
+        items = [] if df.empty else df.to_dict("records")
+        return app.response_class(json.dumps({"items": items}), mimetype="application/json")
+    except Exception as e:
+        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
 
 @app.post("/api/trigger")
@@ -2842,6 +2993,7 @@ def manual_calculator_page():
 def tote_product_calculator_page(product_id: str):
     """Pre-populated manual calculator for a specific product.
 
+
     - GET: Prefills runners from WIN probable odds for the product's event and product context
       (take rate, rollover, pool size). Runs an initial calculation.
     - POST: Re-runs the calculation with adjusted parameters from the form.
@@ -2955,13 +3107,14 @@ def tote_product_calculator_page(product_id: str):
             )
     else:
         # GET: Prefill runners from WIN probable odds (latest) for the event
+        manual_override_active = False # Not used on GET
         try:
             # Find an open WIN product for the same event
             wdf = sql_df(
                 """
                 SELECT product_id
                 FROM (
-                  SELECT w.product_id, ROW_NUMBER() OVER() rn
+                  SELECT w.product_id, ROW_NUMBER() OVER(PARTITION BY w.event_id ORDER BY CASE WHEN UPPER(COALESCE(w.status,'')) IN ('OPEN','SELLING') THEN 1 ELSE 2 END, w.start_iso DESC) as rn
                   FROM vw_products_latest_totals w
                   WHERE w.event_id=@eid AND UPPER(w.bet_type)='WIN' AND UPPER(COALESCE(w.status,'')) IN ('OPEN','SELLING')
                 ) WHERE rn=1
@@ -2969,137 +3122,182 @@ def tote_product_calculator_page(product_id: str):
                 params={"eid": prod.get("event_id")},
             )
         except Exception:
-            wdf = sql_df(
-                "SELECT product_id FROM tote_products WHERE event_id=? AND UPPER(bet_type)='WIN' ORDER BY status DESC LIMIT 1",
-                params=(prod.get("event_id"),),
-            )
+            wdf = pd.DataFrame()
+
         win_pid = wdf.iloc[0]["product_id"] if not wdf.empty else None
         runners = []
+        odds_df = pd.DataFrame()
+
         if win_pid:
             try:
-                odf = sql_df(
-                    """
-                    SELECT
-                      COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64)) AS cloth,
-                      COALESCE(s.competitor, CONCAT('#', CAST(COALESCE(s.number, o.cloth_number) AS STRING))) AS name,
-                      CAST(o.decimal_odds AS FLOAT64) AS odds
-                    FROM vw_tote_probable_odds o
-                    LEFT JOIN tote_product_selections s
-                      ON s.selection_id = o.selection_id AND s.product_id = o.product_id
-                    WHERE o.product_id = ?
-                    ORDER BY COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64))
-                    """,
-                    params=(win_pid,),
-                )
-                # If no odds found, try an inline refresh from the partner endpoint then re-query
-                if odf.empty or odf['odds'].isnull().all():
+                # Check if event is in the past to decide which odds source to use
+                is_past_event = False
+                if prod.get('start_iso'):
                     try:
-                        base = cfg.tote_graphql_url or ""
-                        host_root = ""
+                        start_time = datetime.fromisoformat(str(prod['start_iso']).replace('Z', '+00:00'))
+                        if start_time < datetime.now(timezone.utc):
+                            is_past_event = True
+                    except Exception:
+                        pass # Assume not past if parsing fails
+
+                if is_past_event:
+                    # For past events, get the last known odds before the race start from history
+                    odds_df = sql_df(
+                        """
+                        WITH odds_at_time AS (
+                            SELECT
+                                cloth_number,
+                                ARRAY_AGG(decimal_odds ORDER BY ts_ms DESC LIMIT 1)[OFFSET(0)] as odds
+                            FROM vw_tote_probable_history
+                            WHERE product_id = @win_pid
+                              AND TIMESTAMP_MILLIS(ts_ms) < TIMESTAMP(@start_iso)
+                            GROUP BY cloth_number
+                        )
+                        SELECT
+                            s.number as cloth,
+                            COALESCE(s.competitor, CONCAT('#', CAST(s.number AS STRING))) as name,
+                            o.odds
+                        FROM tote_product_selections s
+                        LEFT JOIN odds_at_time o ON s.number = o.cloth_number
+                        WHERE s.product_id = @product_id AND s.leg_index=1
+                        ORDER BY s.number
+                        """,
+                        params={"win_pid": win_pid, "start_iso": prod.get("start_iso"), "product_id": product_id}
+                    )
+                    if odds_df.empty or odds_df['odds'].isnull().all():
+                        flash("Could not find historical probable odds for this past event.", "warning")
+                else:
+                    # For live/upcoming events, use the latest probable odds
+                    odds_df = sql_df(
+                        """
+                        SELECT
+                          COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64)) AS cloth,
+                          COALESCE(s.competitor, CONCAT('#', CAST(COALESCE(s.number, o.cloth_number) AS STRING))) AS name,
+                          CAST(o.decimal_odds AS FLOAT64) AS odds
+                        FROM vw_tote_probable_odds o
+                        LEFT JOIN tote_product_selections s
+                          ON s.selection_id = o.selection_id AND s.product_id = o.product_id
+                        WHERE o.product_id = ?
+                        ORDER BY COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64))
+                        """,
+                        params=(win_pid,),
+                    )
+                    # If no odds found, try an inline refresh from the partner endpoint
+                    if odds_df.empty or odds_df['odds'].isnull().all():
                         try:
-                            if "/partner/" in base:
-                                host_root = base.split("/partner/")[0].rstrip("/")
-                            else:
-                                from urllib.parse import urlparse
-                                u = urlparse(base)
-                                if u.scheme and u.netloc:
-                                    host_root = f"{u.scheme}://{u.netloc}"
-                        except Exception:
+                            base = cfg.tote_graphql_url or ""
                             host_root = ""
-                        if not host_root:
-                            host_root = "https://hub.production.racing.tote.co.uk"
-                        candidates = [
-                            f"{host_root}/partner/gateway/probable-odds/v1/products/{win_pid}",
-                            f"{host_root}/partner/gateway/v1/products/{win_pid}/probable-odds",
-                            f"{host_root}/v1/products/{win_pid}/probable-odds",
-                        ]
-                        headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
-                        data = None
-                        for url in candidates:
                             try:
-                                r = requests.get(url, headers=headers, timeout=10)
-                                if r.status_code == 200:
-                                    data = r.json(); break
+                                if "/partner/" in base:
+                                    host_root = base.split("/partner/")[0].rstrip("/")
+                                else:
+                                    from urllib.parse import urlparse
+                                    u = urlparse(base)
+                                    if u.scheme and u.netloc:
+                                        host_root = f"{u.scheme}://{u.netloc}"
                             except Exception:
-                                continue
-                        if data:
-                            def _extract_lines(obj):
-                                lines = []
-                                if not isinstance(obj, dict):
-                                    return lines
+                                host_root = ""
+                            if not host_root:
+                                host_root = "https://hub.production.racing.tote.co.uk"
+                            candidates = [
+                                f"{host_root}/partner/gateway/probable-odds/v1/products/{win_pid}",
+                                f"{host_root}/partner/gateway/v1/products/{win_pid}/probable-odds",
+                                f"{host_root}/v1/products/{win_pid}/probable-odds",
+                            ]
+                            headers = {"Authorization": f"Api-Key {cfg.tote_api_key}", "Accept": "application/json"}
+                            data = None
+                            for url in candidates:
                                 try:
-                                    if isinstance(obj.get("lines"), dict) and isinstance(obj["lines"].get("nodes"), list):
-                                        for ln in obj["lines"]["nodes"]:
-                                            lines.append(ln)
-                                    elif isinstance(obj.get("lines"), list):
-                                        lines.extend(obj["lines"])
-                                except Exception:
-                                    pass
-                                for k, v in list(obj.items()):
-                                    if isinstance(v, dict):
-                                        lines.extend(_extract_lines(v))
-                                    elif isinstance(v, list):
-                                        for it in v:
-                                            if isinstance(it, dict):
-                                                lines.extend(_extract_lines(it))
-                                return lines
-                            lines = _extract_lines(data)
-                            norm_lines = []
-                            for ln in lines:
-                                try:
-                                    odds = ((ln.get("odds") or {}).get("decimal"))
-                                    legs = ln.get("legs") or []
-                                    sel_id = None
-                                    if legs:
-                                        try:
-                                            sels = (legs[0].get("lineSelections") or [])
-                                            if sels:
-                                                sel_id = sels[0].get("selectionId")
-                                        except Exception:
-                                            pass
-                                    if sel_id and odds is not None:
-                                        norm_lines.append({
-                                            "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
-                                            "odds": {"decimal": float(odds)},
-                                        })
+                                    r = requests.get(url, headers=headers, timeout=10)
+                                    if r.status_code == 200:
+                                        data = r.json(); break
                                 except Exception:
                                     continue
-                            if norm_lines:
-                                from .bq import get_bq_sink
-                                sink = get_bq_sink()
-                                import time as _t
-                                ts_ms = int(_t.time() * 1000)
-                                payload = {"products": {"nodes": [{"id": win_pid, "lines": {"nodes": norm_lines}}]}}
-                                sink.upsert_raw_tote_probable_odds([
-                                    {"raw_id": f"probable:{win_pid}:{ts_ms}", "fetched_ts": ts_ms, "payload": json.dumps(payload), "product_id": win_pid}
-                                ])
-                                # Re-query odds
-                                odf = sql_df(
-                                    """
-                                    SELECT
-                                      COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64)) AS cloth,
-                                      COALESCE(s.competitor, CONCAT('#', CAST(COALESCE(s.number, o.cloth_number) AS STRING))) AS name,
-                                      CAST(o.decimal_odds AS FLOAT64) AS odds
-                                    FROM vw_tote_probable_odds o
-                                    LEFT JOIN tote_product_selections s
-                                      ON s.selection_id = o.selection_id AND s.product_id = o.product_id
-                                    WHERE o.product_id = ?
-                                    ORDER BY COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64))
-                                    """,
-                                    params=(win_pid,),
-                                )
-                    except Exception:
-                        pass
-                for _, r in odf.iterrows():
-                    try:
-                        name = str(r.get("name") or f"#{r.get('cloth')}")
-                        odds = float(r.get("odds") or 0.0)
-                        if odds and odds > 1.0:
-                            runners.append({"name": name, "odds": odds, "is_key": False, "is_poor": False})
-                    except Exception:
-                        continue
-            except Exception:
-                pass
+                            if data:
+                                def _extract_lines(obj):
+                                    lines = []
+                                    if not isinstance(obj, dict):
+                                        return lines
+                                    try:
+                                        if isinstance(obj.get("lines"), dict) and isinstance(obj["lines"].get("nodes"), list):
+                                            for ln in obj["lines"]["nodes"]:
+                                                lines.append(ln)
+                                        elif isinstance(obj.get("lines"), list):
+                                            lines.extend(obj["lines"])
+                                    except Exception:
+                                        pass
+                                    for k, v in list(obj.items()):
+                                        if isinstance(v, dict):
+                                            lines.extend(_extract_lines(v))
+                                        elif isinstance(v, list):
+                                            for it in v:
+                                                if isinstance(it, dict):
+                                                    lines.extend(_extract_lines(it))
+                                    return lines
+                                lines = _extract_lines(data)
+                                norm_lines = []
+                                for ln in lines:
+                                    try:
+                                        odds = ((ln.get("odds") or {}).get("decimal"))
+                                        legs = ln.get("legs") or []
+                                        sel_id = None
+                                        if legs:
+                                            try:
+                                                sels = (legs[0].get("lineSelections") or [])
+                                                if sels:
+                                                    sel_id = sels[0].get("selectionId")
+                                            except Exception:
+                                                pass
+                                        if sel_id and odds is not None:
+                                            norm_lines.append({
+                                                "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
+                                                "odds": {"decimal": float(odds)},
+                                            })
+                                    except Exception:
+                                        continue
+                                if norm_lines:
+                                    from .bq import get_bq_sink
+                                    sink = get_bq_sink()
+                                    import time as _t
+                                    ts_ms = int(_t.time() * 1000)
+                                    payload = {"products": {"nodes": [{"id": win_pid, "lines": {"nodes": norm_lines}}]}}
+                                    sink.upsert_raw_tote_probable_odds([
+                                        {"raw_id": f"probable:{win_pid}:{ts_ms}", "fetched_ts": ts_ms, "payload": json.dumps(payload), "product_id": win_pid}
+                                    ])
+                                    # Re-query odds
+                                    odds_df = sql_df(
+                                        """
+                                        SELECT
+                                          COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64)) AS cloth,
+                                          COALESCE(s.competitor, CONCAT('#', CAST(COALESCE(s.number, o.cloth_number) AS STRING))) AS name,
+                                          CAST(o.decimal_odds AS FLOAT64) AS odds
+                                        FROM vw_tote_probable_odds o
+                                        LEFT JOIN tote_product_selections s
+                                          ON s.selection_id = o.selection_id AND s.product_id = o.product_id
+                                        WHERE o.product_id = ?
+                                        ORDER BY COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64))
+                                        """,
+                                        params=(win_pid,),
+                                    )
+                        except Exception:
+                            pass
+            except Exception as e:
+                errors.append(f"Error fetching runner odds: {e}")
+
+        # Process the fetched odds_df into the runners list
+        if not odds_df.empty:
+            for _, r in odds_df.iterrows():
+                try:
+                    name = str(r.get("name") or f"#{r.get('cloth')}")
+                    odds = float(r.get("odds") or 0.0)
+                    if odds and odds > 1.0:
+                        runners.append({"name": name, "odds": odds, "is_key": False, "is_poor": False})
+                except Exception:
+                    continue
+
+        if win_pid:
+            pass # Fallback below will handle it
+
         if not runners:
             # Fallback: load runner list without odds
             try:

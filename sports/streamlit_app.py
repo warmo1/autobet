@@ -855,7 +855,18 @@ elif page == "Viability Calculator":
             if bet_type == "SWINGER":
                 C_all = int(N*(N-1)/2) if (N and N>=2) else 0
                 M = int(round(max(0.0, min(1.0, coverage_in)) * C_all)) if C_all > 0 else 0
-                viab = _viability_local_perm(N, 2, pool_gross, M, stake_per_line, take_rate, net_rollover, inc_self, div_mult, f_fix)
+            # Use the correct BQ function for combinations
+            viab_df = sql_df(
+                f"SELECT * FROM `{cfg.bq_project}.{cfg.bq_dataset}.tf_combo_viability_simple`(@N,@K,@O,@M,@l,@t,@R,@inc,@mult,@f)",
+                params={
+                    "N": N, "K": 2, "O": pool_gross, "M": M, "l": stake_per_line, "t": take_rate,
+                    "R": net_rollover, "inc": inc_self, "mult": div_mult, "f": f_fix,
+                },
+            )
+            if not viab_df.empty:
+                viab = viab_df.iloc[0].to_dict()
+            else:
+                viab = None
                 st.warning("Viability grid is not yet supported for SWINGER bets in this view.")
             else:
                 C_all = 1
