@@ -1646,29 +1646,28 @@ class BigQuerySink:
         """
         job = client.query(sql); job.result()
 
-        # Runner strength view (predictions-based): choose latest ts for configured model_id (from tote_params)
+        # Runner strength view (predictions-based): latest row per runner/product from model dataset
+        model_dataset = os.getenv("BQ_MODEL_DATASET", f"{self.dataset}_model")
         sql = f"""
-        CREATE VIEW IF NOT EXISTS `{ds}.vw_superfecta_runner_strength` AS
-        WITH prm AS (
-          SELECT model_id, ts_ms, updated_ts
-          FROM `{ds}.tote_params`
-          WHERE model_id IS NOT NULL
-          ORDER BY updated_ts DESC LIMIT 1
-        ), latest AS (
-          SELECT p.model_id, IFNULL((SELECT ts_ms FROM prm LIMIT 1), MAX(p.ts_ms)) AS ts_ms
-          FROM `{ds}.predictions` p
-          WHERE p.model_id = (SELECT model_id FROM prm LIMIT 1)
-          GROUP BY p.model_id
-        )
+        CREATE OR REPLACE VIEW `{ds}.vw_superfecta_runner_strength` AS
         SELECT
-          tp.product_id,
-          p.event_id,
-          p.horse_id AS runner_id,
-          GREATEST(p.proba, 1e-9) AS strength
-        FROM `{ds}.predictions` p
-        JOIN latest l ON l.model_id = p.model_id AND l.ts_ms = p.ts_ms
-        JOIN `{ds}.tote_products` tp ON tp.event_id = p.event_id
-        WHERE UPPER(tp.bet_type) = 'SUPERFECTA';
+          product_id,
+          event_id,
+          horse_id AS runner_id,
+          GREATEST(p_place1, 1e-9) AS strength
+        FROM (
+          SELECT
+            product_id,
+            event_id,
+            horse_id,
+            p_place1,
+            ROW_NUMBER() OVER (
+              PARTITION BY product_id, horse_id
+              ORDER BY scored_at DESC
+            ) AS rn
+          FROM `{self.project}.{model_dataset}.superfecta_runner_predictions`
+        )
+        WHERE rn = 1;
         """
         job = client.query(sql); job.result()
 
@@ -2541,39 +2540,39 @@ class BigQuerySink:
             job = client.query(sql)
             job.result()
 
-            sql = f"""
-            CREATE OR REPLACE VIEW `{ds}.vw_superfecta_runner_live_features` AS
-            SELECT
-              p.product_id,
-              f.event_id,
-              DATE(SUBSTR(COALESCE(te.start_iso, p.start_iso),1,10)) AS event_date,
-              p.event_name,
-              COALESCE(te.venue, p.venue) AS venue,
-              te.country,
-              p.start_iso,
-              COALESCE(p.status, te.status) AS status,
-              p.total_net,
-              COALESCE(rc.going, f.going) AS going,
-              COALESCE(rc.weather_temp_c, f.weather_temp_c) AS weather_temp_c,
-              COALESCE(rc.weather_wind_kph, f.weather_wind_kph) AS weather_wind_kph,
-              COALESCE(rc.weather_precip_mm, f.weather_precip_mm) AS weather_precip_mm,
-              f.horse_id,
-              f.cloth_number,
-              f.recent_runs,
-              f.avg_finish,
-              f.wins_last5,
-              f.places_last5,
-              f.days_since_last_run,
-              f.weight_kg,
-              f.weight_lbs
-            FROM `{ds}.tote_products` p
-            JOIN `{ds}.features_runner_event` f ON f.event_id = p.event_id AND f.horse_id IS NOT NULL
-            LEFT JOIN `{ds}.race_conditions` rc ON rc.event_id = p.event_id
-            LEFT JOIN `{ds}.tote_events` te ON te.event_id = p.event_id
-            WHERE UPPER(p.bet_type) = 'SUPERFECTA';
-            """
-            job = client.query(sql)
-            job.result()
+        sql = f"""
+        CREATE OR REPLACE VIEW `{ds}.vw_superfecta_runner_live_features` AS
+        SELECT
+          p.product_id,
+          f.event_id,
+          DATE(SUBSTR(COALESCE(te.start_iso, p.start_iso), 1, 10)) AS event_date,
+          p.event_name,
+          COALESCE(te.venue, p.venue) AS venue,
+          te.country,
+          p.start_iso,
+          COALESCE(p.status, te.status) AS status,
+          p.total_net,
+          COALESCE(rc.going, f.going) AS going,
+          COALESCE(rc.weather_temp_c, f.weather_temp_c) AS weather_temp_c,
+          COALESCE(rc.weather_wind_kph, f.weather_wind_kph) AS weather_wind_kph,
+          COALESCE(rc.weather_precip_mm, f.weather_precip_mm) AS weather_precip_mm,
+          f.horse_id,
+          f.cloth_number,
+          f.recent_runs,
+          f.avg_finish,
+          f.wins_last5,
+          f.places_last5,
+          f.days_since_last_run,
+          f.weight_kg,
+          f.weight_lbs
+        FROM `{ds}.tote_products` p
+        JOIN `{ds}.features_runner_event` f ON f.event_id = p.event_id AND f.horse_id IS NOT NULL
+        LEFT JOIN `{ds}.race_conditions` rc ON rc.event_id = p.event_id
+        LEFT JOIN `{ds}.tote_events` te ON te.event_id = p.event_id
+        WHERE UPPER(p.bet_type) = 'SUPERFECTA';
+        """
+        job = client.query(sql)
+        job.result()
 
         # Ensure features table carries optional columns referenced by ML views
         if self._table_exists("features_runner_event"):
@@ -2618,6 +2617,66 @@ class BigQuerySink:
         """
         job = client.query(sql)
         job.result()
+
+        # Latest model probabilities enriched with product context
+        model_dataset = os.getenv("BQ_MODEL_DATASET", f"{self.dataset}_model")
+        sql = f"""
+        CREATE OR REPLACE VIEW `{ds}.vw_superfecta_predictions_latest` AS
+        WITH ranked AS (
+          SELECT
+            product_id,
+            event_id,
+            horse_id,
+            runner_key,
+            p_place1,
+            model_id,
+            model_version,
+            scored_at,
+            ROW_NUMBER() OVER (
+              PARTITION BY product_id, horse_id
+              ORDER BY scored_at DESC
+            ) AS rn
+          FROM `{self.project}.{model_dataset}.superfecta_runner_predictions`
+        )
+        SELECT
+          r.product_id,
+          r.event_id,
+          DATE(SUBSTR(COALESCE(tp.start_iso, te.start_iso), 1, 10)) AS event_date,
+          COALESCE(tp.event_name, te.name) AS event_name,
+          COALESCE(te.venue, tp.venue) AS venue,
+          te.country,
+          tp.start_iso,
+          COALESCE(tp.status, te.status) AS status,
+          tp.currency,
+          SAFE_CAST(tp.total_gross AS FLOAT64) AS total_gross,
+          SAFE_CAST(tp.total_net AS FLOAT64) AS total_net,
+          SAFE_CAST(tp.rollover AS FLOAT64) AS rollover,
+          SAFE_CAST(tp.deduction_rate AS FLOAT64) AS deduction_rate,
+          r.horse_id,
+          h.name AS horse_name,
+          fe.cloth_number,
+          fe.recent_runs,
+          fe.avg_finish,
+          fe.wins_last5,
+          fe.places_last5,
+          fe.days_since_last_run,
+          fe.weight_kg,
+          fe.weight_lbs,
+          fe.going,
+          r.p_place1,
+          r.model_id,
+          r.model_version,
+          r.scored_at
+        FROM ranked r
+        JOIN `{ds}.tote_products` tp
+          ON tp.product_id = r.product_id AND tp.event_id = r.event_id
+        LEFT JOIN `{ds}.tote_events` te ON te.event_id = r.event_id
+        LEFT JOIN `{ds}.hr_horses` h ON h.horse_id = r.horse_id
+        LEFT JOIN `{ds}.features_runner_event` fe
+          ON fe.event_id = r.event_id AND fe.horse_id = r.horse_id
+        WHERE r.rn = 1;
+        """
+        job = client.query(sql); job.result()
 
         # Maintain backward-compatible name for downstream consumers
         sql = f"""

@@ -2,22 +2,31 @@ PROJECT ?= autobet-470818
 REGION ?= europe-west2
 REPO ?= autobet-services
 
-# Service names deployed by Terraform
+# Service names deployed by Terraform / Cloud Run
 SRV_FETCHER ?= ingestion-fetcher
 SRV_ORCH ?= ingestion-orchestrator
+SRV_SUPERFECTA ?= superfecta-trainer
 
 # Image tag defaults to timestamp + git sha for immutability
 TAG ?= $(shell date +%Y%m%d%H%M%S)-$(shell git rev-parse --short HEAD)
 
 IMAGE_FETCHER := $(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_FETCHER):$(TAG)
 IMAGE_ORCH := $(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_ORCH):$(TAG)
+IMAGE_SUPERFECTA := $(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_SUPERFECTA):$(TAG)
+
+ML_BQ_PROJECT ?= $(PROJECT)
+ML_BQ_DATASET ?= autobet
+ML_BQ_MODEL_DATASET ?= autobet_model
+ML_JOB_ARGS ?= scripts/train_superfecta_model.py,--countries,GB,IE,--window-start-minutes,-180,--window-end-minutes,720
+RUN_JOB_SA ?=
 
 .PHONY: help
 help:
 	@echo "Targets:"
 	@echo "  enable-apis                Enable required Google Cloud APIs"
 	@echo "  create-repo               Create Artifact Registry repo ($(REPO))"
-	@echo "  build-and-push-gcb        Build + push both images via Cloud Build (tag: $(TAG))"
+	@echo "  build-and-push-gcb        Build + push service images via Cloud Build (tag: $(TAG))"
+	@echo "  deploy-superfecta-job     Deploy/update the Superfecta trainer Cloud Run Job"
 	@echo "  terraform-init            Init Terraform in sports/"
 	@echo "  terraform-plan            Plan Terraform with project/region vars"
 	@echo "  terraform-apply           Apply Terraform with project/region vars"
@@ -49,14 +58,15 @@ create-repo:
 .PHONY: build-and-push-gcb
 build-and-push-gcb:
 	@echo "Building images via Cloud Build (source: parent dir):"
-	@echo "  FETCHER:     $(IMAGE_FETCHER)"
-	@echo "  ORCHESTRATOR:$(IMAGE_ORCH)"
+	@echo "  FETCHER:        $(IMAGE_FETCHER)"
+	@echo "  ORCHESTRATOR:   $(IMAGE_ORCH)"
+	@echo "  SUPERFECTA JOB: $(IMAGE_SUPERFECTA)"
 	# Submit the parent directory so the workspace contains the 'autobet/' folder.
 	# This keeps Dockerfile paths like autobet/sports/Dockerfile.* valid and preserves
 	# the autobet.sports.* import path inside the container.
 	gcloud builds submit .. \
 	  --config sports/cloudbuild.yaml \
-	  --substitutions _IMAGE_FETCHER="$(IMAGE_FETCHER)",_IMAGE_ORCHESTRATOR="$(IMAGE_ORCH)" \
+	  --substitutions _IMAGE_FETCHER="$(IMAGE_FETCHER)",_IMAGE_ORCHESTRATOR="$(IMAGE_ORCH)",_IMAGE_SUPERFECTA="$(IMAGE_SUPERFECTA)" \
 	  --project "$(PROJECT)"
 	@echo "$(TAG)" > .last_tag
 	@echo "Saved tag to .last_tag: $(TAG)"
@@ -100,6 +110,41 @@ set-images:
 .PHONY: deploy
 deploy: enable-apis create-repo build-and-push-gcb terraform-init terraform-apply set-images
 	@echo "Deployment complete."
+
+.PHONY: deploy-superfecta-job
+deploy-superfecta-job:
+	@TAG_EFF=$${TAG:-$$(cat .last_tag 2>/dev/null || echo "$(TAG)")}; \
+	IMAGE_TAGGED="$(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_SUPERFECTA):$$TAG_EFF"; \
+	IMAGE_DIGEST=$$(gcloud artifacts docker images describe "$$IMAGE_TAGGED" --project "$(PROJECT)" --format='value(image_summary.digest)' 2>/dev/null || true); \
+	if [ -n "$$IMAGE_DIGEST" ]; then \
+	  IMAGE_FQ="$(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_SUPERFECTA)@$$IMAGE_DIGEST"; \
+	else \
+	  IMAGE_FQ="$$IMAGE_TAGGED"; \
+	fi; \
+	echo "Deploying Cloud Run Job $(SRV_SUPERFECTA) with image $$IMAGE_FQ"; \
+	if [ -n "$(RUN_JOB_SA)" ]; then \
+	  gcloud run jobs deploy "$(SRV_SUPERFECTA)" \
+	    --project "$(PROJECT)" \
+	    --region "$(REGION)" \
+	    --image "$$IMAGE_FQ" \
+	    --memory 1Gi \
+	    --cpu 1 \
+	    --set-env-vars BQ_PROJECT=$(ML_BQ_PROJECT),BQ_DATASET=$(ML_BQ_DATASET),BQ_MODEL_DATASET=$(ML_BQ_MODEL_DATASET) \
+	    --service-account "$(RUN_JOB_SA)" \
+	    --command python \
+	    --args "$(ML_JOB_ARGS)"; \
+	else \
+	  gcloud run jobs deploy "$(SRV_SUPERFECTA)" \
+	    --project "$(PROJECT)" \
+	    --region "$(REGION)" \
+	    --image "$$IMAGE_FQ" \
+	    --memory 1Gi \
+	    --cpu 1 \
+	    --set-env-vars BQ_PROJECT=$(ML_BQ_PROJECT),BQ_DATASET=$(ML_BQ_DATASET),BQ_MODEL_DATASET=$(ML_BQ_MODEL_DATASET) \
+	    --command python \
+	    --args "$(ML_JOB_ARGS)"; \
+	fi
+	@echo "Cloud Run Job $(SRV_SUPERFECTA) deployed."
 
 .PHONY: secrets-push
 secrets-push:

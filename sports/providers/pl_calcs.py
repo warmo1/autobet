@@ -247,6 +247,8 @@ def calculate_pl_from_perms(
                 "line": line['line'],
                 "probability": p_i,
                 "stake": stake_i,
+                "ids": [rd.get('id') for rd in line['runners_detail']],
+                "names": [rd.get('name') for rd in line['runners_detail']],
             })
 
         expected_profit = expected_return - S

@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% block title %}Superfecta ML Planner{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-3">
+  <h1 class="mb-0">Superfecta ML Planner</h1>
+  <form class="row g-2" method="get">
+    <div class="col-auto">
+      <label class="form-label mb-0" for="date">Date</label>
+      <input type="date" class="form-control" id="date" name="date" value="{{ date_str }}">
+    </div>
+    <div class="col-auto">
+      <label class="form-label mb-0">Countries</label>
+      <div class="d-flex gap-2">
+        {% for code in country_options %}
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" value="{{ code }}" id="country-{{ code }}" name="country" {% if code in countries %}checked{% endif %}>
+            <label class="form-check-label" for="country-{{ code }}">{{ code }}</label>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="col-auto align-self-end">
+      <button type="submit" class="btn btn-primary">Refresh</button>
+    </div>
+  </form>
+</div>
+
+{% if not events %}
+  <div class="alert alert-info">No Superfecta predictions available for the selected filters.</div>
+{% else %}
+  <div class="table-responsive mb-4">
+    <table class="table table-sm table-striped align-middle">
+      <thead class="table-light">
+        <tr>
+          <th scope="col">Race</th>
+          <th scope="col">Venue</th>
+          <th scope="col">Country</th>
+          <th scope="col">Start</th>
+          <th scope="col">Pool (Net)</th>
+          <th scope="col">Top Model Picks</th>
+          <th scope="col"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for event in events %}
+          <tr {% if event.product_id == selected_product_id %}class="table-primary"{% endif %}>
+            <td>{{ event.event_name or event.event_id }}</td>
+            <td>{{ event.venue or "–" }}</td>
+            <td>{{ event.country }}</td>
+            <td><span class="time-iso" data-iso="{{ event.start_iso }}">{{ event.start_iso }}</span></td>
+            <td>£{{ event.total_net|default(0.0)|float|round(2) }}</td>
+            <td>
+              {% for runner in event.top_runners %}
+                <div>{{ runner.horse_name or runner.horse_id }} <small class="text-muted">({{ (runner.p_place1 * 100)|round(1) }}%)</small></div>
+              {% endfor %}
+            </td>
+            <td>
+              <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('superfecta_ml_page', date=date_str, country=countries, product_id=event.product_id, risk_profile=selected_risk, tote_bank=tote_bank_display) }}">Plan</a>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+
+{% if selected_event %}
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <div>
+        <h2 class="h4 mb-0">{{ selected_event.event_name or selected_event.event_id }}</h2>
+        <small class="text-muted">{{ selected_event.venue or "–" }} · {{ selected_event.country }} · <span class="time-iso" data-iso="{{ selected_event.start_iso }}">{{ selected_event.start_iso }}</span></small>
+      </div>
+      <div class="text-muted small">
+        Model {{ selected_event.model_id or "n/a" }} · Version {{ selected_event.model_version or "n/a" }} · Scored {{ selected_event.scored_at or "n/a" }}
+      </div>
+    </div>
+    <div class="card-body">
+      <form method="post" class="row g-3 mb-4">
+        <input type="hidden" name="product_id" value="{{ selected_event.product_id }}">
+        <input type="hidden" name="date" value="{{ date_str }}">
+        {% for code in countries %}
+          <input type="hidden" name="country" value="{{ code }}">
+        {% endfor %}
+        <div class="col-12 col-md-3">
+          <label for="tote_bank" class="form-label">Tote bank (£)</label>
+          <input type="text" class="form-control" id="tote_bank" name="tote_bank" value="{{ tote_bank_display }}">
+        </div>
+        <div class="col-12 col-md-3">
+          <label for="risk_profile" class="form-label">Risk profile</label>
+          <select class="form-select" id="risk_profile" name="risk_profile">
+            {% for key, preset in risk_presets.items() %}
+              <option value="{{ key }}" {% if key == selected_risk %}selected{% endif %}>{{ preset.label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-12 align-self-end">
+          <button type="submit" class="btn btn-primary">Generate plan</button>
+        </div>
+      </form>
+
+      {% if plan_errors %}
+        <div class="alert alert-danger">
+          <ul class="mb-0">
+            {% for err in plan_errors %}
+              <li>{{ err }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
+
+      {% if plan_summary %}
+        {% if plan_adjustment %}
+          <div class="alert alert-info">
+            Auto-adjusted parameters applied: concentration {{ (plan_adjustment.concentration * 100)|round(1) }}%, market inefficiency {{ (plan_adjustment.market_inefficiency * 100)|round(1) }}%.
+          </div>
+        {% endif %}
+        <div class="row g-3">
+          <div class="col-12 col-xl-7">
+            <div class="table-responsive">
+              <table class="table table-sm table-bordered">
+                <thead class="table-light">
+                  <tr>
+                    <th scope="col">Permutation</th>
+                    <th scope="col">Model Hit %</th>
+                    <th scope="col">Stake (£)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for line in plan_summary.lines %}
+                    <tr>
+                      <td>{{ line.line }}</td>
+                      <td>{{ (line.probability * 100)|round(2) }}</td>
+                      <td>£{{ line.stake_rounded }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="col-12 col-xl-5">
+            <div class="card h-100">
+              <div class="card-body">
+                <h3 class="h5">Plan Summary</h3>
+                <ul class="list-unstyled mb-3">
+                  <li><strong>Total stake:</strong> £{{ plan_summary.total_stake_rounded }}</li>
+                  <li><strong>Bankroll allocation:</strong> £{{ plan_summary.bankroll_allocated|round(2) }}</li>
+                  <li><strong>Expected return:</strong> £{{ plan_summary.expected_return|default(0)|round(2) }}</li>
+                  <li><strong>Expected profit:</strong> £{{ plan_summary.expected_profit|default(0)|round(2) }}</li>
+                  <li><strong>Hit rate:</strong> {{ (plan_summary.hit_rate or 0) * 100 | round(1) }}%</li>
+                </ul>
+                <form method="post" action="{{ url_for('tote_audit_superfecta_post') }}">
+                  <input type="hidden" name="product_id" value="{{ selected_event.product_id }}">
+                  <input type="hidden" name="currency" value="{{ selected_event.currency or 'GBP' }}">
+                  <input type="hidden" name="selections_text" value="{{ plan_summary.selections_text }}">
+                  <input type="hidden" name="stake_type" value="total">
+                  <div class="mb-3">
+                    <label for="stake" class="form-label">Total stake (£)</label>
+                    <input type="number" step="0.01" min="0" class="form-control" id="stake" name="stake" value="{{ plan_summary.total_stake_rounded }}">
+                  </div>
+                  <div class="form-check form-switch mb-3">
+                    <input class="form-check-input" type="checkbox" id="postFlag" name="post" value="1">
+                    <label class="form-check-label" for="postFlag">Submit as live bet (if enabled)</label>
+                  </div>
+                  <button type="submit" class="btn btn-success">Schedule audit bet</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}
+{% endblock %}

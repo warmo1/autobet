@@ -21,6 +21,39 @@ import itertools
 import math
 import requests
 
+SUPERFECTA_RISK_PRESETS = {
+    "conservative": {
+        "label": "Conservative",
+        "bankroll_pct": 0.02,
+        "desired_profit_pct": 12.0,
+        "concentration": 0.15,
+        "market_inefficiency": 0.05,
+        "key_horses": 1,
+        "poor_horses": 1,
+        "min_stake_per_line": 0.1,
+    },
+    "balanced": {
+        "label": "Balanced",
+        "bankroll_pct": 0.03,
+        "desired_profit_pct": 25.0,
+        "concentration": 0.25,
+        "market_inefficiency": 0.08,
+        "key_horses": 2,
+        "poor_horses": 1,
+        "min_stake_per_line": 0.1,
+    },
+    "aggressive": {
+        "label": "Aggressive",
+        "bankroll_pct": 0.05,
+        "desired_profit_pct": 40.0,
+        "concentration": 0.4,
+        "market_inefficiency": 0.12,
+        "key_horses": 3,
+        "poor_horses": 0,
+        "min_stake_per_line": 0.0,
+    },
+}
+
 # Simple in-process TTL cache for sql_df results
 _SQLDF_CACHE_LOCK = threading.Lock()
 _SQLDF_CACHE: dict[tuple, tuple[float, pd.DataFrame]] = {}
@@ -115,6 +148,168 @@ def _sql_is_readonly(sql: str) -> bool:
 from .realtime import bus as event_bus
 
 
+def _clean_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _group_superfecta_predictions(df: pd.DataFrame) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    events: list[dict[str, Any]] = []
+    events_map: dict[str, dict[str, Any]] = {}
+    if df.empty:
+        return events, events_map
+
+    for product_id, group in df.groupby("product_id"):
+        group_sorted = group.sort_values("p_place1", ascending=False)
+        anchor = group_sorted.iloc[0]
+        start_iso = anchor.get("start_iso") or ""
+        event = {
+            "product_id": product_id,
+            "event_id": anchor.get("event_id"),
+            "event_name": anchor.get("event_name"),
+            "venue": anchor.get("venue"),
+            "country": anchor.get("country"),
+            "start_iso": start_iso,
+            "status": anchor.get("status"),
+            "currency": anchor.get("currency"),
+            "total_gross": _clean_float(anchor.get("total_gross")),
+            "total_net": _clean_float(anchor.get("total_net")),
+            "rollover": _clean_float(anchor.get("rollover")),
+            "deduction_rate": _clean_float(anchor.get("deduction_rate"), 0.3),
+            "model_id": anchor.get("model_id"),
+            "model_version": anchor.get("model_version"),
+            "scored_at": anchor.get("scored_at"),
+            "event_date": anchor.get("event_date"),
+            "runners": [],
+        }
+        for _, runner in group_sorted.iterrows():
+            event["runners"].append(
+                {
+                    "horse_id": runner.get("horse_id"),
+                    "horse_name": runner.get("horse_name"),
+                    "cloth_number": runner.get("cloth_number"),
+                    "p_place1": float(runner.get("p_place1") or 0.0),
+                    "recent_runs": runner.get("recent_runs"),
+                    "avg_finish": runner.get("avg_finish"),
+                    "wins_last5": runner.get("wins_last5"),
+                    "places_last5": runner.get("places_last5"),
+                    "days_since_last_run": runner.get("days_since_last_run"),
+                    "going": runner.get("going"),
+                }
+            )
+        event["top_runners"] = event["runners"][:4]
+        events.append(event)
+        events_map[product_id] = event
+
+    events.sort(key=lambda ev: ev.get("start_iso") or "")
+    return events, events_map
+
+
+def _compute_superfecta_plan(
+    event: dict[str, Any],
+    preset_key: str,
+    tote_bank: float,
+) -> dict[str, Any]:
+    preset = SUPERFECTA_RISK_PRESETS.get(preset_key, SUPERFECTA_RISK_PRESETS["balanced"])
+    errors: list[str] = []
+
+    bankroll = tote_bank * float(preset.get("bankroll_pct", 0.0))
+    if bankroll <= 0:
+        errors.append("Bankroll allocation must be positive.")
+
+    runners = event.get("runners") or []
+    if len(runners) < 4:
+        errors.append("Not enough runners with predictions to build a Superfecta plan.")
+
+    if errors:
+        return {"errors": errors}
+
+    runners_sorted = sorted(runners, key=lambda r: r.get("p_place1", 0.0), reverse=True)
+    key_count = min(int(preset.get("key_horses", 0)), len(runners_sorted))
+    poor_count = min(int(preset.get("poor_horses", 0)), len(runners_sorted))
+
+    prepared_runners: list[dict[str, Any]] = []
+    for idx, runner in enumerate(runners_sorted):
+        prob = max(float(runner.get("p_place1") or 0.0), 1e-6)
+        fair_odds = max(1.05, 1.0 / prob)
+        cloth = runner.get("cloth_number") or (idx + 1)
+        prepared_runners.append(
+            {
+                "name": runner.get("horse_name") or runner.get("horse_id") or f"Runner {idx+1}",
+                "odds": fair_odds,
+                "number": cloth,
+                "is_key": idx < key_count,
+                "is_poor": idx >= len(runners_sorted) - poor_count if poor_count else False,
+            }
+        )
+
+    take_rate = event.get("deduction_rate")
+    take_rate = float(take_rate) if take_rate is not None else 0.30
+    pool_other = max(_clean_float(event.get("total_net")) - bankroll, 0.0)
+    rollover = _clean_float(event.get("rollover"))
+
+    result = calculate_pl_strategy(
+        runners=prepared_runners,
+        bet_type="SUPERFECTA",
+        bankroll=bankroll,
+        key_horse_mult=1.2,
+        poor_horse_mult=0.85,
+        concentration=float(preset.get("concentration", 0.2)),
+        market_inefficiency=float(preset.get("market_inefficiency", 0.05)),
+        desired_profit_pct=float(preset.get("desired_profit_pct", 20.0)),
+        take_rate=take_rate,
+        net_rollover=rollover,
+        inc_self=True,
+        div_mult=1.0,
+        f_fix=None,
+        pool_gross_other=pool_other,
+        min_stake_per_line=float(preset.get("min_stake_per_line", 0.0)),
+    )
+
+    errors.extend(result.get("errors", []))
+    if errors:
+        return {"errors": errors}
+
+    pl_model = result.get("pl_model") or {}
+    best = pl_model.get("best_scenario") or {}
+    staking_plan = pl_model.get("staking_plan") or []
+
+    total_stake = sum(float(line.get("stake", 0.0)) for line in staking_plan)
+    lines: list[dict[str, Any]] = []
+    selections: list[str] = []
+    for line in staking_plan:
+        ids = [str(x) for x in (line.get("ids") or [])]
+        combo = "-".join(ids)
+        selections.append(combo)
+        lines.append(
+            {
+                "line": combo or line.get("line"),
+                "probability": float(line.get("probability", 0.0)),
+                "stake": float(line.get("stake", 0.0)),
+                "stake_rounded": round(float(line.get("stake", 0.0)), 2),
+            }
+        )
+
+    adjustment = result.get("auto_adjusted_params")
+
+    summary = {
+        "lines": lines,
+        "total_stake": total_stake,
+        "total_stake_rounded": round(total_stake, 2),
+        "expected_profit": best.get("expected_profit"),
+        "expected_return": best.get("expected_return"),
+        "hit_rate": best.get("hit_rate"),
+        "f_share_used": best.get("f_share_used"),
+        "bankroll_allocated": bankroll,
+        "selections_text": "\n".join(selections),
+        "preset_key": preset_key,
+        "adjustment": adjustment,
+    }
+    return {"plan": summary, "errors": []}
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET", "dev-secret")
 
@@ -214,18 +409,40 @@ def _build_bq_query(sql: str, params: Any) -> tuple[str, list[bigquery.ScalarQue
         return sql, qp
     # Mapping (named parameters)
     if isinstance(params, Mapping):
+        from datetime import date as _date, datetime as _datetime
         for k, v in params.items():
+            name = str(k)
             if isinstance(v, bool):
-                qp.append(bigquery.ScalarQueryParameter(str(k), "BOOL", v))
+                qp.append(bigquery.ScalarQueryParameter(name, "BOOL", v))
+            elif isinstance(v, (list, tuple, set)):
+                seq = list(v)
+                elem_type = "STRING"
+                if seq:
+                    sample = seq[0]
+                    if isinstance(sample, bool):
+                        elem_type = "BOOL"
+                    elif isinstance(sample, int):
+                        elem_type = "INT64"
+                    elif isinstance(sample, float):
+                        elem_type = "FLOAT64"
+                    elif isinstance(sample, _datetime):
+                        elem_type = "TIMESTAMP"
+                    elif isinstance(sample, _date):
+                        elem_type = "DATE"
+                qp.append(bigquery.ArrayQueryParameter(name, elem_type, seq))
+            elif isinstance(v, _datetime):
+                qp.append(bigquery.ScalarQueryParameter(name, "TIMESTAMP", v))
+            elif isinstance(v, _date):
+                qp.append(bigquery.ScalarQueryParameter(name, "DATE", v))
             elif v is None:
                 # Default typed NULL to FLOAT64 for numeric expressions
-                qp.append(bigquery.ScalarQueryParameter(str(k), "FLOAT64", None))
+                qp.append(bigquery.ScalarQueryParameter(name, "FLOAT64", None))
             elif isinstance(v, float):
-                qp.append(bigquery.ScalarQueryParameter(str(k), "FLOAT64", v))
+                qp.append(bigquery.ScalarQueryParameter(name, "FLOAT64", v))
             elif isinstance(v, int):
-                qp.append(bigquery.ScalarQueryParameter(str(k), "INT64", v))
+                qp.append(bigquery.ScalarQueryParameter(name, "INT64", v))
             else:
-                qp.append(bigquery.ScalarQueryParameter(str(k), "STRING", str(v)))
+                qp.append(bigquery.ScalarQueryParameter(name, "STRING", str(v)))
         return sql, qp
     # Sequence (positional parameters)
     if isinstance(params, (list, tuple)):
@@ -3071,6 +3288,77 @@ def manual_calculator_page():
         bet_types=["WIN", "EXACTA", "TRIFECTA", "SUPERFECTA"],
         manual_override_active=manual_override_active,
     )
+
+
+@app.route("/superfecta/ml", methods=["GET", "POST"])
+def superfecta_ml_page():
+    if not _use_bq():
+        flash("BigQuery must be configured to use the ML planner.", "error")
+        return redirect(url_for("index"))
+
+    date_str = (request.values.get("date") or _today_iso()).strip()
+    selected_countries = request.values.getlist("country") or ["GB", "IE"]
+    countries_upper = [c.upper() for c in selected_countries if c]
+
+    try:
+        preds_df = sql_df(
+            "SELECT * FROM `autobet-470818.autobet.vw_superfecta_predictions_latest` "
+            "WHERE event_date = @event_date AND UPPER(country) IN UNNEST(@countries)",
+            params={"event_date": date_str, "countries": countries_upper},
+            cache_ttl=15,
+        )
+    except Exception as exc:
+        flash(f"Failed to load ML predictions: {exc}", "error")
+        preds_df = pd.DataFrame()
+
+    events, events_map = _group_superfecta_predictions(preds_df)
+
+    product_id = request.values.get("product_id") or (events[0]["product_id"] if events else None)
+    selected_event = events_map.get(product_id) if product_id else None
+
+    risk_profile = request.values.get("risk_profile") or request.form.get("risk_profile", "balanced")
+    if risk_profile not in SUPERFECTA_RISK_PRESETS:
+        risk_profile = "balanced"
+
+    tote_bank_input = request.form.get("tote_bank") if request.method == "POST" else None
+    tote_bank_display = tote_bank_input or "500"
+
+    plan_summary = None
+    plan_errors: list[str] = []
+    adjustment = None
+    if request.method == "POST":
+        try:
+            tote_bank_value = float(tote_bank_display or 0)
+        except ValueError:
+            tote_bank_value = 0.0
+            plan_errors.append("Tote bank must be numeric.")
+
+        if not selected_event:
+            plan_errors.append("Select a Superfecta race to build a plan.")
+        else:
+            result = _compute_superfecta_plan(selected_event, risk_profile, tote_bank_value)
+            plan_errors.extend(result.get("errors", []))
+            plan_data = result.get("plan")
+            if plan_data:
+                plan_summary = plan_data
+                adjustment = plan_data.get("adjustment")
+
+    context = {
+        "date_str": date_str,
+        "countries": countries_upper,
+        "country_options": ["GB", "IE"],
+        "events": events,
+        "selected_event": selected_event,
+        "selected_product_id": product_id,
+        "risk_presets": SUPERFECTA_RISK_PRESETS,
+        "selected_risk": risk_profile,
+        "tote_bank_display": tote_bank_display,
+        "plan_summary": plan_summary,
+        "plan_errors": plan_errors,
+        "plan_adjustment": adjustment,
+    }
+    return render_template("superfecta_ml.html", **context)
+
 
 @app.route("/tote/calculator/<product_id>", methods=["GET", "POST"])
 def tote_product_calculator_page(product_id: str):

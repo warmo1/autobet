@@ -11,10 +11,18 @@ steps:
   - name: gcr.io/cloud-builders/docker
     id: push-orchestrator
     args: ["push", "$_IMAGE_ORCHESTRATOR"]
+  - name: gcr.io/cloud-builders/docker
+    id: build-superfecta
+    args: ["build", "-f", "autobet/sports/Dockerfile.superfecta", "-t", "$_IMAGE_SUPERFECTA", "."]
+  - name: gcr.io/cloud-builders/docker
+    id: push-superfecta
+    args: ["push", "$_IMAGE_SUPERFECTA"]
 substitutions:
   _IMAGE_FETCHER: ""
   _IMAGE_ORCHESTRATOR: ""
+  _IMAGE_SUPERFECTA: ""
 timeout: "1800s"
 images:
   - "$_IMAGE_FETCHER"
   - "$_IMAGE_ORCHESTRATOR"
+  - "$_IMAGE_SUPERFECTA"

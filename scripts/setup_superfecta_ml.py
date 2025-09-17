@@ -138,6 +138,64 @@ VIEW_STATEMENTS = [
     LEFT JOIN `autobet-470818.autobet.tote_events` te ON te.event_id = p.event_id
     WHERE UPPER(p.bet_type) = 'SUPERFECTA';
     """,
+    """
+    CREATE OR REPLACE VIEW `autobet-470818.autobet.vw_superfecta_predictions_latest` AS
+    WITH ranked AS (
+      SELECT
+        product_id,
+        event_id,
+        horse_id,
+        runner_key,
+        p_place1,
+        model_id,
+        model_version,
+        scored_at,
+        ROW_NUMBER() OVER (
+          PARTITION BY product_id, horse_id
+          ORDER BY scored_at DESC
+        ) AS rn
+      FROM `autobet-470818.autobet_model.superfecta_runner_predictions`
+    )
+    SELECT
+      r.product_id,
+      r.event_id,
+      DATE(SUBSTR(COALESCE(tp.start_iso, te.start_iso), 1, 10)) AS event_date,
+      COALESCE(tp.event_name, te.name) AS event_name,
+      COALESCE(te.venue, tp.venue) AS venue,
+      te.country,
+      tp.start_iso,
+      COALESCE(tp.status, te.status) AS status,
+      tp.currency,
+      SAFE_CAST(tp.total_gross AS FLOAT64) AS total_gross,
+      SAFE_CAST(tp.total_net AS FLOAT64) AS total_net,
+      SAFE_CAST(tp.rollover AS FLOAT64) AS rollover,
+      SAFE_CAST(tp.deduction_rate AS FLOAT64) AS deduction_rate,
+      r.horse_id,
+      h.name AS horse_name,
+      fe.cloth_number,
+      fe.recent_runs,
+      fe.avg_finish,
+      fe.wins_last5,
+      fe.places_last5,
+      fe.days_since_last_run,
+      fe.weight_kg,
+      fe.weight_lbs,
+      fe.going,
+      r.p_place1,
+      r.model_id,
+      r.model_version,
+      r.scored_at
+    FROM ranked r
+    JOIN `autobet-470818.autobet.tote_products` tp
+      ON tp.product_id = r.product_id AND tp.event_id = r.event_id
+    LEFT JOIN `autobet-470818.autobet.tote_events` te
+      ON te.event_id = r.event_id
+    LEFT JOIN `autobet-470818.autobet.hr_horses` h
+      ON h.horse_id = r.horse_id
+    LEFT JOIN `autobet-470818.autobet.features_runner_event` fe
+      ON fe.event_id = r.event_id AND fe.horse_id = r.horse_id
+    WHERE r.rn = 1;
+    """,
 ]
 
 

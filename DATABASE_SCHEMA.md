@@ -114,4 +114,5 @@ A number of views are created in BigQuery to facilitate analysis. These views ar
 *   **`vw_superfecta_training_base`**: Historic Superfecta runners with clean `horse_id` linkage for modeling.
 *   **`vw_superfecta_runner_training_features`**: Labeled training runners enriched with per-runner features.
 *   **`vw_superfecta_runner_live_features`**: Live runner feature snapshots joined to upcoming Superfecta products for scoring.
+*   **`vw_superfecta_predictions_latest`**: Latest model probabilities per runner with event/product context.
 *   **`vw_superfecta_training`**: Compatibility alias exposing the same rows as `vw_superfecta_training_base`.
