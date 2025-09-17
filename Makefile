@@ -34,6 +34,7 @@ enable-apis:
 	  secretmanager.googleapis.com \
 	  artifactregistry.googleapis.com \
 	  bigquery.googleapis.com \
+	  bigquerystorage.googleapis.com \
 	  --project "$(PROJECT)"
 
 .PHONY: create-repo

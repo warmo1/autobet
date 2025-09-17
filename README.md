@@ -17,8 +17,10 @@ pip install -r requirements.txt
 cp .env.example .env
 # edit .env: TOTE_API_KEY, TOTE_GRAPHQL_URL, and BQ_* variables
 # authenticate to GCP (choose one):
+#  - service account path (recommended):
+#      ./scripts/setup_service_account.sh autobet-470818 run-ingest-sa
+#      export GOOGLE_APPLICATION_CREDENTIALS="$REPO_ROOT/.secrets/gcp-service-account.json"
 #  - gcloud ADC (dev): gcloud auth application-default login
-#  - service account path: export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
 #  - service account inline JSON: export GCP_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
 ```
 

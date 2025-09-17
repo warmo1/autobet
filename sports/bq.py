@@ -5,6 +5,7 @@ import json
 from typing import Iterable, Mapping, Any
 
 from .config import cfg
+from .gcp import sanitize_adc_env
 
 
 class BigQuerySink:
@@ -13,6 +14,8 @@ class BigQuerySink:
         self.dataset = dataset
         self.location = location
         self._client = None
+        self.auth_mode = "init"
+        self.auth_subject = None  # e.g., service account email or 'adc'
 
     @property
     def enabled(self) -> bool:
@@ -25,6 +28,8 @@ class BigQuerySink:
             except Exception as e:
                 raise RuntimeError("google-cloud-bigquery not installed") from e
             self._bq = bigquery
+            # Ensure placeholder GOOGLE_APPLICATION_CREDENTIALS is ignored so ADC can work
+            sanitize_adc_env()
             # Prefer explicit service account credentials if provided to avoid
             # accidental reliance on user ADC tokens that may require reauth.
             creds = None
@@ -46,11 +51,40 @@ class BigQuerySink:
                 creds = None
 
             if creds is not None:
+                try:
+                    print("[BQ] Using explicit service account credentials from env.")
+                except Exception:
+                    pass
                 self._client = bigquery.Client(project=self.project, credentials=creds, location=self.location)
+                self.auth_mode = "service_account"
+                try:
+                    self.auth_subject = getattr(creds, "service_account_email", None) or "service_account"
+                except Exception:
+                    self.auth_subject = "service_account"
             else:
                 # Fall back to Application Default Credentials (gcloud auth, metadata, etc.)
+                try:
+                    print("[BQ] Using Application Default Credentials (ADC).")
+                except Exception:
+                    pass
                 self._client = bigquery.Client(project=self.project, location=self.location)
+                self.auth_mode = "adc"
+                try:
+                    cred = getattr(self._client, "_credentials", None) or getattr(self._client, "credentials", None)
+                    # This can be user OAuth or GCE metadata default
+                    self.auth_subject = getattr(cred, "service_account_email", None) or getattr(cred, "quota_project_id", None) or "adc"
+                except Exception:
+                    self.auth_subject = "adc"
         return self._client
+
+    def auth_info(self) -> dict:
+        return {
+            "mode": self.auth_mode,
+            "subject": self.auth_subject,
+            "project": self.project,
+            "dataset": self.dataset,
+            "location": self.location,
+        }
 
     def query(self, sql: str, **kwargs):
         """Run a query and return the results.
