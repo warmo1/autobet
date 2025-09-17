@@ -2221,8 +2221,8 @@ def audit_bet_detail_page(bet_id: str):
 
 @app.route("/status")
 def status_page():
-    """Enhanced status dashboard (v2) showing GCP + data freshness."""
-    return render_template("status_v2.html")
+    """Status dashboard showing GCP + data freshness."""
+    return render_template("status.html")
 
 
 @app.get("/api/status/data_freshness")

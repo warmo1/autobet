@@ -1,0 +1,263 @@
+{% extends "base.html" %}
+
+{% block title %}System Status{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h1>System Status</h1>
+        <button id="refresh-all-btn" class="btn btn-primary">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-arrow-clockwise" viewBox="0 0 16 16">
+                <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2z"/>
+                <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466"/>
+            </svg>
+            Refresh All
+        </button>
+    </div>
+    <p class="text-muted">Live status of data ingestion, quality checks, and underlying cloud infrastructure.</p>
+
+    <!-- Data Freshness -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5>Data Freshness</h5>
+        </div>
+        <div class="card-body">
+            <div id="data-freshness-container" class="row">
+                <div class="col text-center"><div class="spinner-border spinner-border-sm" role="status"></div></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Data Quality -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5>Data Quality Checks</h5>
+        </div>
+        <div class="card-body">
+            <div id="data-quality-container" class="row">
+                <div class="col text-center"><div class="spinner-border spinner-border-sm" role="status"></div></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- GCP Status -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5>GCP Infrastructure Status</h5>
+        </div>
+        <div class="card-body">
+            <div id="gcp-status-container">
+                <div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Upcoming Races -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5>Upcoming Races (Next 4 Hours)</h5>
+        </div>
+        <div class="card-body">
+            <div id="upcoming-races-container" class="table-responsive">
+                <div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Job Log -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5>Recent Ingest Jobs</h5>
+        </div>
+        <div class="card-body">
+            <div id="job-log-container" class="table-responsive">
+                <div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+
+    function formatLocalTime(isoString) {
+        if (!isoString) return 'N/A';
+        try {
+            const d = new Date(isoString);
+            return d.toLocaleString();
+        } catch (e) {
+            return isoString;
+        }
+    }
+
+    async function fetchData(endpoint, containerId, renderer) {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+        container.innerHTML = '<div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div></div>';
+        try {
+            const response = await fetch(endpoint);
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            const data = await response.json();
+            if (data.error) throw new Error(data.error);
+            renderer(container, data);
+        } catch (error) {
+            container.innerHTML = `<div class="alert alert-danger" role="alert">Failed to load data: ${error.message}</div>`;
+        }
+    }
+
+    function renderFreshness(container, data) {
+        container.innerHTML = `
+            <div class="col-md-3">
+                <div class="stat-card text-center p-3 border rounded">
+                    <h6 class="text-muted">Events Today</h6>
+                    <p class="fs-4 fw-bold mb-0">${data.events?.today || 0}</p>
+                    <small class="text-muted">Last: ${formatLocalTime(data.events?.last)}</small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card text-center p-3 border rounded">
+                    <h6 class="text-muted">Products Today</h6>
+                    <p class="fs-4 fw-bold mb-0">${data.products?.today || 0}</p>
+                    <small class="text-muted">Last: ${formatLocalTime(data.products?.last)}</small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card text-center p-3 border rounded">
+                    <h6 class="text-muted">Probable Odds Today</h6>
+                    <p class="fs-4 fw-bold mb-0">${data.probable_odds?.today || 0}</p>
+                    <small class="text-muted">Last: ${formatLocalTime(data.probable_odds?.last)}</small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card text-center p-3 border rounded">
+                    <h6 class="text-muted">Pool Snapshots Today</h6>
+                    <p class="fs-4 fw-bold mb-0">${data.pool_snapshots?.today || 0}</p>
+                    <small class="text-muted">Last: ${formatLocalTime(data.pool_snapshots?.last)}</small>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderQuality(container, data) {
+        container.innerHTML = `
+            <div class="col-md-4">
+                <div class="stat-card text-center p-3 border rounded">
+                    <h6 class="text-muted">Products w/ Missing Runners</h6>
+                    <p class="fs-4 fw-bold mb-0">${data.missing_runner_numbers ?? 'N/A'}</p>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="stat-card text-center p-3 border rounded">
+                    <h6 class="text-muted">Products w/ Missing Bet Rules</h6>
+                    <p class="fs-4 fw-bold mb-0">${data.missing_bet_rules ?? 'N/A'}</p>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="stat-card text-center p-3 border rounded">
+                    <h6 class="text-muted">GB SF Missing Snapshots</h6>
+                    <p class="fs-4 fw-bold mb-0">${data.gb_sf_missing_snapshots ?? 'N/A'}</p>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderGcp(container, data) {
+        let runHtml = '<h6>Cloud Run Services</h6>';
+        if (data.cloud_run?.services?.length > 0) {
+            runHtml += '<ul class="list-group list-group-flush">';
+            data.cloud_run.services.forEach(s => {
+                runHtml += `<li class="list-group-item">${s.ready ? '✅' : '❌'} ${s.name}</li>`;
+            });
+            runHtml += '</ul>';
+        } else {
+            runHtml += '<p class="text-muted">No services found.</p>';
+        }
+
+        let schedulerHtml = '<h6 class="mt-3">Cloud Scheduler Jobs</h6>';
+        if (data.scheduler?.jobs?.length > 0) {
+            schedulerHtml += '<ul class="list-group list-group-flush">';
+            data.scheduler.jobs.forEach(j => {
+                schedulerHtml += `<li class="list-group-item">${j.state === 'ENABLED' ? '✅' : '⏸️'} ${j.name.split('/').pop()} (${j.schedule})</li>`;
+            });
+            schedulerHtml += '</ul>';
+        } else {
+            schedulerHtml += '<p class="text-muted">No jobs found.</p>';
+        }
+
+        let pubsubHtml = `
+            <h6 class="mt-3">Pub/Sub</h6>
+            <ul class="list-group list-group-flush">
+                <li class="list-group-item">${data.pubsub?.topic?.exists ? '✅' : '❌'} Ingest Topic Exists</li>
+                <li class="list-group-item">${data.pubsub?.subscription?.exists ? '✅' : '❌'} Ingest Subscription Exists</li>
+            </ul>
+        `;
+
+        container.innerHTML = `
+            <p class="text-muted small">Project: <code>${data.project}</code> | Region: <code>${data.region}</code></p>
+            <div class="row">
+                <div class="col-md-4">${runHtml}</div>
+                <div class="col-md-4">${schedulerHtml}</div>
+                <div class="col-md-4">${pubsubHtml}</div>
+            </div>
+        `;
+    }
+
+    function renderTable(container, data, columns) {
+        if (!data.items || data.items.length === 0) {
+            container.innerHTML = '<p class="text-muted">No data available.</p>';
+            return;
+        }
+        let table = '<table class="table table-sm table-striped table-hover">';
+        table += '<thead><tr>';
+        columns.forEach(col => {
+            table += `<th>${col.header}</th>`;
+        });
+        table += '</tr></thead><tbody>';
+        data.items.forEach(item => {
+            table += '<tr>';
+            columns.forEach(col => {
+                let value = item[col.key];
+                if (col.formatter) {
+                    value = col.formatter(value);
+                }
+                table += `<td>${value ?? ''}</td>`;
+            });
+            table += '</tr>';
+        });
+        table += '</tbody></table>';
+        container.innerHTML = table;
+    }
+
+    const upcomingCols = [
+        { header: 'Start Time', key: 'start_iso', formatter: formatLocalTime },
+        { header: 'Event', key: 'event_name' },
+        { header: 'Venue', key: 'venue' },
+        { header: 'ROI', key: 'roi_current', formatter: v => v ? `${(v * 100).toFixed(2)}%` : 'N/A' },
+        { header: 'Viable', key: 'viable_now', formatter: v => v === true ? '✅' : (v === false ? '❌' : 'N/A') },
+    ];
+
+    const jobLogCols = [
+        { header: 'Started', key: 'started_ts', formatter: v => formatLocalTime(new Date(v)) },
+        { header: 'Component', key: 'component' },
+        { header: 'Task', key: 'task' },
+        { header: 'Status', key: 'status', formatter: v => `<span class="badge bg-${v === 'OK' ? 'success' : 'danger'}">${v}</span>` },
+        { header: 'Duration (ms)', key: 'duration_ms' },
+        { header: 'Error', key: 'error' },
+    ];
+
+    function loadAll() {
+        fetchData('/api/status/data_freshness', 'data-freshness-container', renderFreshness);
+        fetchData('/api/status/qc', 'data-quality-container', renderQuality);
+        fetchData('/api/status/gcp', 'gcp-status-container', renderGcp);
+        fetchData('/api/status/upcoming', 'upcoming-races-container', (c, d) => renderTable(c, d, upcomingCols));
+        fetchData('/api/status/job_log', 'job-log-container', (c, d) => renderTable(c, d, jobLogCols));
+    }
+
+    document.getElementById('refresh-all-btn').addEventListener('click', loadAll);
+
+    loadAll();
+});
+</script>
+{% endblock %}
