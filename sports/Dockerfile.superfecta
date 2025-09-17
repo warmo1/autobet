@@ -2,14 +2,18 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    POETRY_VIRTUALENVS_CREATE=false
+    POETRY_VIRTUALENVS_CREATE=false \
+    PYTHONPATH=/app/autobet
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy dependency file from repo root (available as autobet/requirements.txt in Cloud Build context)
+COPY autobet/requirements.txt ./requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Copy project sources
+COPY autobet/ ./autobet/
 
-ENTRYPOINT ["python", "scripts/train_superfecta_model.py"]
+ENTRYPOINT ["python", "autobet/scripts/train_superfecta_model.py"]
 CMD []
