@@ -90,22 +90,20 @@ def handle_pubsub() -> tuple[str, int]:
         elif task == "ingest_multiple_probable_odds":
             event_ids = payload.get("event_ids")
             if not event_ids: return ("Missing 'event_ids' for task", 400)
-            
-            # Find open WIN products for all events in one query
-            event_id_list = ", ".join([f"'{eid}'" for eid in event_ids])
-            win_prods_df = sink.query(f"""
-                SELECT product_id, event_id FROM `autobet-470818.autobet.tote_products`
-                WHERE event_id IN ({event_id_list}) AND bet_type = 'WIN' AND status = 'OPEN'
-            """).to_dataframe()
 
-            if win_prods_df.empty:
-                print(f"No open WIN products found for events: {event_ids}")
-                return ("", 204)
-            
-            # Trigger a single ingest job for all the WIN products to get their odds
-            win_product_ids = win_prods_df["product_id"].tolist()
-            # Pass all required arguments to ingest_products, similar to ingest_multiple_products task
-            n_ingested = ingest_products(sink, client, date_iso=None, status=None, first=len(win_product_ids), bet_types=None, product_ids=win_product_ids)
+            # This task is now a simple wrapper around the `ingest_probable_odds` task for multiple events.
+            # This avoids duplicating logic and ensures consistency.
+            published_count = 0
+            for event_id in event_ids:
+                try:
+                    # Re-use the existing `ingest_probable_odds` task logic for each event.
+                    # This is more robust as it uses the GraphQL endpoint directly.
+                    job_payload = {"task": "ingest_probable_odds", "event_id": event_id}
+                    publish_pubsub_message(cfg.bq_project, "ingest-jobs", job_payload)
+                    published_count += 1
+                except Exception as e:
+                    print(f"Failed to publish probable odds job for event {event_id}: {e}")
+            n_ingested = published_count
             metrics["refreshed_probable_odds_for_events"] = len(event_ids)
             metrics["ingested_products_for_odds"] = n_ingested
 

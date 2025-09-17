@@ -3240,6 +3240,19 @@ def tote_product_calculator_page(product_id: str):
                 params={"eid": prod.get("event_id")},
                 cache_ttl=0,
             )
+            if wdf.empty:
+                # Fallback: use most recent WIN market regardless of status
+                wdf = sql_df(
+                    f"""
+                    SELECT product_id
+                    FROM `{dataset_fq}.tote_products`
+                    WHERE event_id = @eid AND UPPER(bet_type) = 'WIN'
+                    ORDER BY start_iso DESC
+                    LIMIT 1
+                    """,
+                    params={"eid": prod.get("event_id")},
+                    cache_ttl=0,
+                )
         except Exception:
             wdf = pd.DataFrame()
 
@@ -3258,6 +3271,8 @@ def tote_product_calculator_page(product_id: str):
                             is_past_event = True
                     except Exception:
                         pass # Assume not past if parsing fails
+
+                api_runner_odds: dict[str, float] = {}
 
                 if is_past_event:
                     # For past events, get the last known odds before the race start from history
@@ -3374,6 +3389,7 @@ def tote_product_calculator_page(product_id: str):
                                                 "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
                                                 "odds": {"decimal": float(odds)},
                                             })
+                                            api_runner_odds[str(sel_id)] = float(odds)
                                     except Exception:
                                         continue
                                 if norm_lines:
@@ -3416,6 +3432,26 @@ def tote_product_calculator_page(product_id: str):
                         runners.append({"name": name, "odds": odds, "is_key": False, "is_poor": False})
                 except Exception:
                     continue
+        elif api_runner_odds:
+            try:
+                sel_df = sql_df(
+                    f"SELECT selection_id, number, COALESCE(competitor, CAST(number AS STRING)) AS name FROM `{dataset_fq}.tote_product_selections` WHERE product_id=@pid AND leg_index=1",
+                    params={"pid": product_id},
+                    cache_ttl=0,
+                )
+                if not sel_df.empty:
+                    for _, row in sel_df.iterrows():
+                        sel_id = str(row.get("selection_id"))
+                        odds_val = api_runner_odds.get(sel_id)
+                        if odds_val and odds_val >= 1.0:
+                            runners.append({
+                                "name": str(row.get("name") or f"#{row.get('number')}") ,
+                                "odds": float(odds_val),
+                                "is_key": False,
+                                "is_poor": False,
+                            })
+            except Exception:
+                pass
 
         if win_pid:
             pass # Fallback below will handle it
