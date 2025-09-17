@@ -253,7 +253,7 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
     rows_events: List[Dict[str, Any]] = []
     rows_rules: List[Dict[str, Any]] = []
     rows_dividends: List[Dict[str, Any]] = []
-    rows_finishing_positions: List[Dict[str, Any]] = []
+    rows_runs: List[Dict[str, Any]] = []
     for p in products_nodes:
         # Map current schema (BettingProduct fragment), supporting two shapes:
         # 1) fields directly on node
@@ -354,6 +354,22 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
             "source": "tote_api",
         })
 
+        # Build a map from selection_id to cloth number for this product to use for results
+        sel_to_cloth_map: Dict[str, int] = {}
+        for leg in legs:
+            sels = ((leg.get("selections") or {}).get("nodes")) or []
+            for sel in sels:
+                sid = sel.get("id")
+                event_comp = sel.get("eventCompetitor") or {}
+                n = event_comp.get("clothNumber") or event_comp.get("trapNumber")
+                if n is None: # Legacy fallback
+                    det = (sel.get("competitor") or {}).get("details") or {}
+                    n = det.get("clothNumber") or det.get("trapNumber")
+                if sid and n is not None:
+                    try:
+                        sel_to_cloth_map[sid] = int(n)
+                    except (ValueError, TypeError):
+                        pass
         # Collect selections for each leg
         for idx, leg in enumerate(legs, start=1):
             product_leg_id = leg.get("productLegId") or leg.get("id")
@@ -374,13 +390,17 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
                 if n is None: # Legacy fallback
                     det = (sel.get("competitor") or {}).get("details") or {}
                     n = det.get("clothNumber") or det.get("trapNumber")
+                try:
+                    num_val = int(n) if n is not None else None
+                except (ValueError, TypeError):
+                    num_val = None
                 rows_selections.append({
                     "product_id": (bp.get("id") or src.get("id")),
                     "leg_index": idx,
                     "selection_id": sid,
                     "product_leg_id": product_leg_id,
                     "competitor": comp_name,
-                    "number": int(n) if n is not None else None,
+                    "number": num_val,
                     "leg_event_id": l_ev_id,
                     "leg_event_name": l_ev_name,
                     "leg_venue": l_ev_venue,
@@ -441,14 +461,19 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
                             "dividend": float(amt),
                             "ts": ts_iso,
                         })
-                    # Store finishing position if present
+                    # Store finishing position for hr_horse_runs
                     if sel_id and finish_pos is not None:
-                        rows_finishing_positions.append({
-                            "product_id": (bp.get("id") or src.get("id")),
+                        try:
+                            pos_val = int(finish_pos)
+                        except (ValueError, TypeError):
+                            continue # Skip if not an integer
+                        rows_runs.append({
+                            "horse_id": sel_id,
                             "event_id": (event or {}).get("id"),
-                            "selection_id": sel_id,
-                            "finish_pos": int(finish_pos),
-                            "ts": ts_iso,
+                            "finish_pos": pos_val,
+                            "status": "RESULTED",
+                            "cloth_number": sel_to_cloth_map.get(sel_id),
+                            "recorded_ts": ts_iso,
                         })
     
     try:
@@ -512,15 +537,15 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
                 db.upsert_tote_bet_rules(rules_rows)
             except Exception as ee:
                 print(f"Warning: bet rules upsert failed: {ee}")
-        if rows_finishing_positions:
-            # Deduplicate by (product_id, selection_id)
+        if rows_runs:
+            # Deduplicate by (horse_id, event_id)
             _fmap: Dict[tuple, Dict[str, Any]] = {}
-            for r in rows_finishing_positions:
-                k = (r.get("product_id"), r.get("selection_id"))
+            for r in rows_runs:
+                k = (r.get("horse_id"), r.get("event_id"))
                 _fmap[k] = r
             finish_rows = list(_fmap.values())
-            print(f"Inserting {len(finish_rows)} rows into tote_horse_finishing_positions")
-            db.upsert_tote_horse_finishing_positions(finish_rows)
+            print(f"Inserting {len(finish_rows)} rows into hr_horse_runs")
+            db.upsert_hr_horse_runs(finish_rows)
         print("Successfully ingested product data.")
         return len(rows_products)
     except Exception as e:
