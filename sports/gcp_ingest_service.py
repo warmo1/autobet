@@ -61,6 +61,14 @@ def handle_pubsub() -> tuple[str, int]:
             bet_types = payload.get("bet_types")
             ingest_products(sink, client, date_iso=date_iso, status=status_filter, first=1000, bet_types=bet_types)
 
+        elif task == "ingest_multiple_products":
+            product_ids = payload.get("product_ids")
+            if not product_ids: return ("Missing 'product_ids' for task", 400)
+            # Ingest all products in one batch
+            n_ingested = ingest_products(sink, client, date_iso=None, status=None, first=len(product_ids), bet_types=None, product_ids=product_ids)
+            metrics["ingested_products"] = n_ingested
+            print(f"Ingested {n_ingested} products from batch.")
+
         elif task == "ingest_events_for_day":
             date_iso = payload.get("date", time.strftime("%Y-%m-%d"))
             if date_iso == "today": date_iso = time.strftime("%Y-%m-%d")
@@ -73,29 +81,31 @@ def handle_pubsub() -> tuple[str, int]:
         elif task == "ingest_single_product":
             product_id = payload.get("product_id")
             if not product_id: return ("Missing 'product_id' for task", 400)
-            # This will update the tote_products table
+            # This task is now a simple wrapper around the batch ingest for one product.
+            # This maintains compatibility with any manual triggers.
             n_ingested = ingest_products(sink, client, date_iso=None, status=None, first=1, bet_types=None, product_ids=[product_id])
+            metrics["ingested_products"] = n_ingested
+            print(f"Ingested single product {product_id}")
 
-            # Only proceed if we actually got the product data from the API.
-            if n_ingested == 0:
-                print(f"Product {product_id} not found via API, skipping snapshot creation.")
+        elif task == "ingest_multiple_probable_odds":
+            event_ids = payload.get("event_ids")
+            if not event_ids: return ("Missing 'event_ids' for task", 400)
+            
+            # Find open WIN products for all events in one query
+            event_id_list = ", ".join([f"'{eid}'" for eid in event_ids])
+            win_prods_df = sink.query(f"""
+                SELECT product_id, event_id FROM `autobet-470818.autobet.tote_products`
+                WHERE event_id IN ({event_id_list}) AND bet_type = 'WIN' AND status = 'OPEN'
+            """).to_dataframe()
+
+            if win_prods_df.empty:
+                print(f"No open WIN products found for events: {event_ids}")
                 return ("", 204)
-
-            # Also create a snapshot from the data just ingested.
-            # This makes the polling mechanism behave like a subscription for the UI.
-            prod_df = sink.query(
-                "SELECT * FROM `autobet-470818.autobet.tote_products` WHERE product_id = @pid LIMIT 1",
-                job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("pid", "STRING", product_id)])
-            ).to_dataframe()
-
-            if not prod_df.empty:
-                # Replace pandas NaN/NaT with None before converting to dict to ensure JSON compatibility
-                prod = prod_df.where(pd.notnull(prod_df), None).iloc[0].to_dict()
-                snapshot = {k: prod.get(k) for k in ["product_id", "event_id", "bet_type", "status", "currency", "start_iso", "total_gross", "total_net", "rollover", "deduction_rate"]}
-                snapshot["ts_ms"] = int(time.time() * 1000)
-                sink.upsert_tote_pool_snapshots([snapshot])
-                metrics["created_pool_snapshot"] = True
-                print(f"Created pool snapshot for product {product_id}")
+            
+            # Trigger a single ingest job for all the WIN products to get their odds
+            win_product_ids = win_prods_df["product_id"].tolist()
+            ingest_products(sink, client, product_ids=win_product_ids)
+            metrics["refreshed_probable_odds_for_events"] = len(event_ids)
 
         elif task == "ingest_probable_odds":
             event_id = payload.get("event_id")

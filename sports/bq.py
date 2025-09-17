@@ -5,7 +5,6 @@ import json
 from typing import Iterable, Mapping, Any
 
 from .config import cfg
-from .gcp import sanitize_adc_env
 
 
 class BigQuerySink:
@@ -14,8 +13,6 @@ class BigQuerySink:
         self.dataset = dataset
         self.location = location
         self._client = None
-        self.auth_mode = "init"
-        self.auth_subject = None  # e.g., service account email or 'adc'
 
     @property
     def enabled(self) -> bool:
@@ -28,8 +25,6 @@ class BigQuerySink:
             except Exception as e:
                 raise RuntimeError("google-cloud-bigquery not installed") from e
             self._bq = bigquery
-            # Ensure placeholder GOOGLE_APPLICATION_CREDENTIALS is ignored so ADC can work
-            sanitize_adc_env()
             # Prefer explicit service account credentials if provided to avoid
             # accidental reliance on user ADC tokens that may require reauth.
             creds = None
@@ -51,40 +46,11 @@ class BigQuerySink:
                 creds = None
 
             if creds is not None:
-                try:
-                    print("[BQ] Using explicit service account credentials from env.")
-                except Exception:
-                    pass
                 self._client = bigquery.Client(project=self.project, credentials=creds, location=self.location)
-                self.auth_mode = "service_account"
-                try:
-                    self.auth_subject = getattr(creds, "service_account_email", None) or "service_account"
-                except Exception:
-                    self.auth_subject = "service_account"
             else:
                 # Fall back to Application Default Credentials (gcloud auth, metadata, etc.)
-                try:
-                    print("[BQ] Using Application Default Credentials (ADC).")
-                except Exception:
-                    pass
                 self._client = bigquery.Client(project=self.project, location=self.location)
-                self.auth_mode = "adc"
-                try:
-                    cred = getattr(self._client, "_credentials", None) or getattr(self._client, "credentials", None)
-                    # This can be user OAuth or GCE metadata default
-                    self.auth_subject = getattr(cred, "service_account_email", None) or getattr(cred, "quota_project_id", None) or "adc"
-                except Exception:
-                    self.auth_subject = "adc"
         return self._client
-
-    def auth_info(self) -> dict:
-        return {
-            "mode": self.auth_mode,
-            "subject": self.auth_subject,
-            "project": self.project,
-            "dataset": self.dataset,
-            "location": self.location,
-        }
 
     def query(self, sql: str, **kwargs):
         """Run a query and return the results.
@@ -607,6 +573,27 @@ class BigQuerySink:
                 "deduction_rate=S.deduction_rate",
             ]),
         )
+
+    def stream_tote_pool_snapshots(self, rows: Iterable[Mapping[str, Any]]):
+        """Stream rows into the tote_pool_snapshots table using the BQ Streaming API.
+        
+        This is preferred for high-frequency appends to avoid DML quota issues.
+        """
+        client = self._client_obj()
+        self._ensure_dataset() # Make sure dataset exists
+        table_id = f"{self.project}.{self.dataset}.tote_pool_snapshots"
+        
+        rows_to_insert = list(rows)
+        if not rows_to_insert:
+            return
+
+        # The streaming API is less strict about schema on insert, but the table must exist.
+        # We can rely on ensure_views() to have created it.
+        errors = client.insert_rows_json(table_id, rows_to_insert)
+        if errors:
+            # For production, consider more robust error handling like logging to another service.
+            print(f"BigQuery streaming insert errors for table {table_id}: {errors}")
+            raise RuntimeError(f"BigQuery streaming insert failed: {errors}")
 
     def upsert_tote_dividend_updates(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_dividend_updates", rows, schema_hint={

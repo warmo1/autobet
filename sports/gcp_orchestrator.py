@@ -69,16 +69,19 @@ def scan_and_publish_pre_race_jobs():
         return "GCP_PROJECT not set", 500
 
     published_count = 0
-    # Publish pool refresh jobs for each product
-    for product_id in upcoming_df["product_id"].unique():
-        pool_job = {"task": "ingest_single_product", "product_id": product_id}
-        publish_pubsub_message(project_id, topic_id, pool_job)
+    product_ids_to_refresh = upcoming_df["product_id"].unique().tolist()
+    event_ids_to_refresh = upcoming_df["event_id"].unique().tolist()
+
+    # Publish one job for all products
+    if product_ids_to_refresh:
+        products_job = {"task": "ingest_multiple_products", "product_ids": product_ids_to_refresh}
+        publish_pubsub_message(project_id, topic_id, products_job)
         published_count += 1
 
-    # Publish odds refresh jobs for each unique event
-    for event_id in upcoming_df["event_id"].unique():
-        probable_odds_job = {"task": "ingest_probable_odds", "event_id": event_id}
-        publish_pubsub_message(project_id, topic_id, probable_odds_job)
+    # Publish one job for all events needing odds refresh
+    if event_ids_to_refresh:
+        odds_job = {"task": "ingest_multiple_probable_odds", "event_ids": event_ids_to_refresh}
+        publish_pubsub_message(project_id, topic_id, odds_job)
         published_count += 1
 
     # Log run with metrics
