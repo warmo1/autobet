@@ -24,14 +24,14 @@
       <div class="card"><div class="card-body">
         <div class="text-muted small">Probable Odds</div>
         <div>Rows Today: {{ probable_today.n_rows or 0 }}</div>
-        <div>Last Ingest: {{ probable_last.last_ts }}</div>
+        <div>Last Ingest: <span class="time-iso" data-iso="{{ probable_last.last_ts }}">{{ probable_last.last_ts }}</span></div>
       </div></div>
     </div>
     <div class="col-md-3">
       <div class="card"><div class="card-body">
         <div class="text-muted small">Pool Snapshots</div>
         <div>Rows Today: {{ snap_today.n_rows or 0 }}</div>
-        <div>Last Snapshot: {{ snap_last.last_ts }}</div>
+        <div>Last Snapshot: <span class="time-iso" data-iso="{{ snap_last.last_ts }}">{{ snap_last.last_ts }}</span></div>
       </div></div>
     </div>
   </div>
@@ -61,5 +61,54 @@
       </div>
     </div>
   </div>
+
+  <div class="card mt-3">
+    <div class="card-header">GCP Cloud Run Services</div>
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-sm table-striped mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>Service Name</th>
+              <th>Status</th>
+              <th>URL</th>
+              <th>Last Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for service in services %}
+            <tr>
+              <td>{{ service.name }}</td>
+              <td>
+                {% if service.ready %}
+                  <span class="badge bg-success">Ready</span>
+                {% else %}
+                  <span class="badge bg-danger">Not Ready</span>
+                {% endif %}
+              </td>
+              <td><a href="{{ service.uri }}" target="_blank">{{ service.uri }}</a></td>
+              <td><span class="time-iso" data-iso="{{ service.updateTime }}">{{ service.updateTime }}</span></td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4" class="text-center text-muted">No services found.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
 </div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    const timeElements = document.querySelectorAll('.time-iso');
+    timeElements.forEach(function(element) {
+      const isoTime = element.getAttribute('data-iso');
+      if (isoTime) {
+        const localTime = new Date(isoTime).toLocaleString();
+        element.textContent = localTime;
+      }
+    });
+  });
+</script>
 {% endblock %}
