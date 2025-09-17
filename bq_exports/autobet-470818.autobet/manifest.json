@@ -1,0 +1,19 @@
+{
+  "exported_at": "2025-09-17T14:08:08.884479Z",
+  "project": "autobet-470818",
+  "dataset": "autobet",
+  "paths": {
+    "base": "/Users/jonwalmsley/Documents/autobet/autobet/bq_exports/autobet-470818.autobet",
+    "tables": "/Users/jonwalmsley/Documents/autobet/autobet/bq_exports/autobet-470818.autobet/tables",
+    "views": "/Users/jonwalmsley/Documents/autobet/autobet/bq_exports/autobet-470818.autobet/views",
+    "materialized_views": "/Users/jonwalmsley/Documents/autobet/autobet/bq_exports/autobet-470818.autobet/materialized_views",
+    "routines": "/Users/jonwalmsley/Documents/autobet/autobet/bq_exports/autobet-470818.autobet/routines"
+  },
+  "counts": {
+    "tables": 25,
+    "views": 37,
+    "materialized_views": 4,
+    "routines": 25,
+    "other": 0
+  }
+}

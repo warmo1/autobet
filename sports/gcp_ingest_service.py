@@ -104,8 +104,10 @@ def handle_pubsub() -> tuple[str, int]:
             
             # Trigger a single ingest job for all the WIN products to get their odds
             win_product_ids = win_prods_df["product_id"].tolist()
-            ingest_products(sink, client, product_ids=win_product_ids)
+            # Pass all required arguments to ingest_products, similar to ingest_multiple_products task
+            n_ingested = ingest_products(sink, client, date_iso=None, status=None, first=len(win_product_ids), bet_types=None, product_ids=win_product_ids)
             metrics["refreshed_probable_odds_for_events"] = len(event_ids)
+            metrics["ingested_products_for_odds"] = n_ingested
 
         elif task == "ingest_probable_odds":
             event_id = payload.get("event_id")
