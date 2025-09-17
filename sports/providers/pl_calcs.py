@@ -1,5 +1,74 @@
 import itertools
+import math
 from typing import Any, Dict, List, Optional
+
+_EPS = 1e-9
+
+
+def _allocate_with_min(weights: List[float], total: float, min_line: float) -> Optional[List[float]]:
+    """Distribute `total` across weights while enforcing a per-line minimum.
+
+    Returns a list of stakes or ``None`` if the minimum constraint makes the
+    allocation infeasible.
+    """
+
+    n = len(weights)
+    if n == 0:
+        return []
+    total = float(total)
+    min_line = max(0.0, float(min_line or 0.0))
+    if min_line > 0.0 and (min_line * n) - total > 1e-6:
+        return None
+
+    stakes = [0.0] * n
+    remaining = set(range(n))
+    remaining_total = total
+    adj_weights = [max(0.0, float(w)) for w in weights]
+
+    while remaining:
+        count = len(remaining)
+        if remaining_total <= 0:
+            break
+
+        sum_w = sum(adj_weights[i] for i in remaining)
+        if sum_w <= _EPS:
+            even = remaining_total / count
+            for i in remaining:
+                stakes[i] += even
+            remaining_total = 0.0
+            break
+
+        updated = False
+        # First pass: enforce minimums by fixing under-allocated positions.
+        for i in list(remaining):
+            stake_i = remaining_total * (adj_weights[i] / sum_w)
+            if stake_i + _EPS < min_line:
+                stakes[i] += min_line
+                remaining_total -= min_line
+                adj_weights[i] = 0.0
+                remaining.remove(i)
+                updated = True
+                if remaining_total <= _EPS:
+                    remaining_total = 0.0
+                    remaining.clear()
+                    break
+        if updated:
+            continue
+
+        # Second pass: allocate residue proportionally now that all min checks pass.
+        for i in remaining:
+            stakes[i] += remaining_total * (adj_weights[i] / sum_w)
+        remaining_total = 0.0
+        break
+
+    # Numeric cleanup so the total matches exactly
+    assigned = sum(stakes)
+    if abs(assigned - total) > 1e-6 and stakes:
+        stakes[0] += (total - assigned)
+
+    # Clamp tiny negatives that can arise from floating point adjustments
+    stakes = [0.0 if s < 0 and abs(s) <= 1e-6 else s for s in stakes]
+    return stakes
 
 def calculate_pl_from_perms(
     *,
@@ -16,6 +85,7 @@ def calculate_pl_from_perms(
     div_mult: float,
     f_fix: Optional[float],
     pool_gross_other: float,
+    min_stake_per_line: float = 0.0,
 ) -> Dict[str, Any]:
     """Compute EV, optimal coverage and weighted staking from a list of
     precomputed permutations with probabilities. Designed for BigQuery-backed
@@ -58,6 +128,16 @@ def calculate_pl_from_perms(
     O_effective = O * (1.0 - mi)
     net_pool_if_bet = mult * (((1.0 - t) * (O + S_inc)) + R)
 
+    min_line = max(0.0, float(min_stake_per_line or 0.0))
+    max_lines_feasible = C
+    if min_line > 0:
+        max_lines_feasible = min(C, int(math.floor((S + 1e-9) / min_line)))
+        if max_lines_feasible <= 0:
+            results["errors"].append(
+                f"Bankroll £{S:.2f} is below the minimum stake per line (£{min_line:.2f})."
+            )
+            return results
+
     def _crowd_score(line):
         # Approximate others' stake allocation across lines
         # If runner odds are available, mirror the local approach using product of 1/odds^beta.
@@ -75,14 +155,15 @@ def calculate_pl_from_perms(
         return max(1e-12, line.get('probability', 0.0)) ** beta
 
     # Evaluate EV for covering top m lines
-    for m in range(1, C + 1):
+    for m in range(1, max_lines_feasible + 1):
         covered_lines = pl_permutations[:m]
 
         gamma = 1.0 + 2.0 * concentration
         probs = [max(0.0, p['probability']) for p in covered_lines]
         weights = [(p ** gamma) for p in probs]
-        sum_w = sum(weights) or 1.0
-        stakes = [S * (w / sum_w) for w in weights]
+        stakes = _allocate_with_min(weights, S, min_line)
+        if stakes is None:
+            continue
 
         qs = [_crowd_score(line) for line in covered_lines]
         sum_q = sum(qs) or 1.0
@@ -109,6 +190,10 @@ def calculate_pl_from_perms(
                 "net_pool_if_bet": net_pool_if_bet, "total_stake": S,
             }
 
+    if not ev_grid:
+        results["errors"].append("No feasible staking configuration met the minimum stake per line constraint.")
+        return results
+
     # Target handling: choose max EV among those meeting the target
     target_profit = bankroll * (desired_profit_pct / 100.0)
     base_scenario = optimal_ev_scenario
@@ -131,12 +216,16 @@ def calculate_pl_from_perms(
         current_concentration = concentration
         gamma = 1.0 + 2.0 * current_concentration
         final_lines_to_cover = max(1, int(round(base_scenario['lines_covered'] * (1.0 - current_concentration) + 1.0 * current_concentration)))
+        if min_line > 0:
+            final_lines_to_cover = min(final_lines_to_cover, max_lines_feasible)
+        final_lines_to_cover = min(final_lines_to_cover, C)
         final_covered_lines = pl_permutations[:final_lines_to_cover]
 
         probs_f = [max(0.0, p['probability']) for p in final_covered_lines]
         weights_f = [(p ** gamma) for p in probs_f]
-        sum_wf = sum(weights_f) or 1.0
-        stakes_f = [S * (w / sum_wf) for w in weights_f]
+        stakes_f = _allocate_with_min(weights_f, S, min_line)
+        if stakes_f is None:
+            stakes_f = [S / final_lines_to_cover] * final_lines_to_cover if final_lines_to_cover else []
 
         qs_f = [_crowd_score(line) for line in final_covered_lines]
         sum_qf = sum(qs_f) or 1.0
@@ -193,6 +282,7 @@ def calculate_pl_strategy(
     div_mult: float,
     f_fix: Optional[float],
     pool_gross_other: float,
+    min_stake_per_line: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Calculates a betting strategy using a Plackett-Luce model and EV optimization.
@@ -288,14 +378,23 @@ def calculate_pl_strategy(
     O_effective = O * (1.0 - mi)
     net_pool_if_bet = mult * (((1.0 - t) * (O + S_inc)) + R)
 
-    for m in range(1, C + 1):
+    min_line = max(0.0, float(min_stake_per_line or 0.0))
+    max_lines_feasible = C
+    if min_line > 0:
+        max_lines_feasible = min(C, int(math.floor((S + 1e-9) / min_line)))
+        if max_lines_feasible <= 0:
+            errors.append(f"Bankroll £{S:.2f} is below the minimum stake per line (£{min_line:.2f}).")
+            return results
+
+    for m in range(1, max_lines_feasible + 1):
         covered_lines = pl_permutations[:m]
-        
+
         gamma = 1.0 + 2.0 * concentration
         probs = [max(0.0, p['probability']) for p in covered_lines]
         weights = [(p ** gamma) for p in probs]
-        sum_w = sum(weights) or 1.0
-        stakes = [S * (w / sum_w) for w in weights]
+        stakes = _allocate_with_min(weights, S, min_line)
+        if stakes is None:
+            continue
 
         def _crowd_score(line):
             q = 1.0
@@ -331,6 +430,10 @@ def calculate_pl_strategy(
                 "net_pool_if_bet": net_pool_if_bet, "total_stake": S,
             }
 
+    if not ev_grid:
+        errors.append("No feasible staking configuration met the minimum stake per line constraint.")
+        return results
+
     # --- Determine Base Strategy ---
     target_profit = bankroll * (desired_profit_pct / 100.0)
     base_scenario = optimal_ev_scenario
@@ -355,7 +458,7 @@ def calculate_pl_strategy(
     if base_scenario:
         current_concentration = concentration
         current_mi = market_inefficiency
-        
+
         if base_scenario['expected_profit'] <= 0:
             # Auto-adjust logic to find a profitable scenario
             # This part is complex and remains as is, but now it can suggest changes
@@ -364,13 +467,17 @@ def calculate_pl_strategy(
 
         # Final calculation with either original or auto-adjusted params
         final_lines_to_cover = max(1, int(round(base_scenario['lines_covered'] * (1.0 - current_concentration) + 1.0 * current_concentration)))
+        if min_line > 0:
+            final_lines_to_cover = min(final_lines_to_cover, max_lines_feasible)
+        final_lines_to_cover = min(final_lines_to_cover, C)
         final_covered_lines = pl_permutations[:final_lines_to_cover]
 
         gamma = 1.0 + 2.0 * current_concentration
         probs_f = [max(0.0, p['probability']) for p in final_covered_lines]
         weights_f = [(p ** gamma) for p in probs_f]
-        sum_wf = sum(weights_f) or 1.0
-        stakes_f = [S * (w / sum_wf) for w in weights_f]
+        stakes_f = _allocate_with_min(weights_f, S, min_line)
+        if stakes_f is None:
+            stakes_f = [S / final_lines_to_cover] * final_lines_to_cover if final_lines_to_cover else []
         
         qs_f = [_crowd_score(line) for line in final_covered_lines]
         sum_qf = sum(qs_f) or 1.0

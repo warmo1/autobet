@@ -141,6 +141,11 @@
                         <div class="form-text">Factor applied to the dividend (e.g., 1.0).</div>
                     </div>
                     <div class="col-md-3">
+                        <label for="min_stake_per_line" class="form-label">Minimum Stake per Line (£)</label>
+                        <input type="number" step="0.01" class="form-control" id="min_stake_per_line" name="min_stake_per_line" value="{{ calc_params.min_stake_per_line }}" min="0.00" required>
+                        <div class="form-text">Minimum unit stake for each line (e.g., £0.10 Tote minimum).</div>
+                    </div>
+                    <div class="col-md-3">
                         <label for="f_fix" class="form-label">Your f-share Override (optional)</label>
                         <input type="number" step="0.0001" class="form-control" id="f_fix" name="f_fix" value="{{ calc_params.f_fix if calc_params.f_fix is not none }}" placeholder="Auto-calculate if blank">
                         <div class="form-text">Your proportion of the winning dividend.</div>
@@ -186,6 +191,10 @@
                                     <li class="list-group-item d-flex justify-content-between align-items-center">
                                         Total Bankroll to Stake:
                                         <strong>£{{ "%.2f"|format(calc_params.bankroll) }}</strong>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Minimum Stake / Line:
+                                        <strong>£{{ "%.2f"|format(calc_params.min_stake_per_line) }}</strong>
                                     </li>
                                      <li class="list-group-item d-flex justify-content-between align-items-center">
                                         Lines to Cover:

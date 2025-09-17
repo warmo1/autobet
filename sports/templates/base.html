@@ -74,5 +74,45 @@
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      (function(){
+        const formatter = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+
+        function updateElement(el){
+          if (!el) return;
+          const iso = (el.dataset && el.dataset.iso ? el.dataset.iso : (el.textContent || '').trim());
+          if (!iso) return;
+          const dt = new Date(iso);
+          if (Number.isNaN(dt.getTime())) return;
+          el.textContent = formatter.format(dt);
+          if (el.dataset) el.dataset.localTimeApplied = '1';
+          if (!el.dataset || !el.dataset.titleLocked) {
+            el.setAttribute('title', iso);
+            if (el.dataset) el.dataset.titleLocked = '1';
+          }
+        }
+
+        function updateAll(root){
+          const scope = root || document;
+          scope.querySelectorAll('.time-iso').forEach(updateElement);
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+          updateAll();
+          const observer = new MutationObserver((mutations) => {
+            for (const mutation of mutations){
+              mutation.addedNodes.forEach(node => {
+                if (!(node instanceof HTMLElement)) return;
+                if (node.classList && node.classList.contains('time-iso')){
+                  updateElement(node);
+                }
+                updateAll(node);
+              });
+            }
+          });
+          observer.observe(document.body, { childList: true, subtree: true });
+        });
+      })();
+    </script>
   </body>
 </html>

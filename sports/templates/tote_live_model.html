@@ -76,6 +76,12 @@
                             Total Stake
                             <span>£{{ calculation_result.total_stake | f2 }}</span>
                         </li>
+                        {% if calculation_result.min_stake_per_line is not none %}
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            Minimum Stake / Line (model)
+                            <span>£{{ calculation_result.min_stake_per_line | f2 }}</span>
+                        </li>
+                        {% endif %}
                     </ul>
                 </div>
                 <div class="col-md-8">
@@ -84,6 +90,9 @@
                         <input type="hidden" name="product_id" value="{{ calculation_result.product.product_id }}">
                         <input type="hidden" name="stake" value="{{ calculation_result.total_stake }}">
                         <textarea name="selections_text" class="form-control" rows="5" readonly>{{ calculation_result.staking_plan_text }}</textarea>
+                        {% if calculation_result.weighted_lines %}
+                        <input type="hidden" name="lines_json" value='{{ calculation_result.weighted_lines | tojson }}'>
+                        {% endif %}
                         <div class="mt-3">
                             <button type="submit" name="mode" value="audit" class="btn btn-info">Place Bet (Audit)</button>
                             <button type="submit" name="mode" value="live" class="btn btn-danger" onclick="return confirm('Place LIVE bet of £{{ calculation_result.total_stake | f2 }}?');">Place Bet (Live)</button>
@@ -93,6 +102,30 @@
             </div>
         </div>
     </div>
+    {% if calculation_result.ev_grid %}
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5>Expected Profit vs. Lines Covered</h5>
+            <p class="small text-muted mb-0">Explore how coverage impacts expected value. The slider defaults to the model's suggested number of lines.</p>
+        </div>
+        <div class="card-body">
+            <div class="row g-3 align-items-center">
+                <div class="col-lg-8">
+                    <canvas id="liveEvChart"></canvas>
+                </div>
+                <div class="col-lg-4">
+                    <label for="evLinesRange" class="form-label">Lines to Cover</label>
+                    <input type="range" class="form-range" id="evLinesRange" min="1" max="{{ calculation_result.ev_grid | length }}" value="1" data-default-lines="{{ calculation_result.scenario.lines_covered }}">
+                    <div class="mt-3">
+                        <div><strong>Lines Selected:</strong> <span id="evLinesValue">-</span></div>
+                        <div><strong>Expected Profit:</strong> £<span id="evProfitValue">-</span></div>
+                        <div><strong>Hit Rate:</strong> <span id="evHitRateValue">-</span></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
     <hr>
     {% endif %}
 
@@ -134,6 +167,9 @@
 {% endblock %}
 
 {% block scripts %}
+{% if calculation_result and calculation_result.ev_grid %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endif %}
 <script>
 document.addEventListener('DOMContentLoaded', function(){
   document.querySelectorAll('.btn-refresh-odds').forEach(btn => {
@@ -166,6 +202,74 @@ document.addEventListener('DOMContentLoaded', function(){
       }
     });
   });
+
+  {% if calculation_result and calculation_result.ev_grid %}
+  (function(){
+    const evData = {{ calculation_result.ev_grid | tojson }};
+    if (!Array.isArray(evData) || evData.length === 0) {
+      return;
+    }
+
+    const labels = evData.map(r => r.lines_covered);
+    const profits = evData.map(r => r.expected_profit);
+    const ctx = document.getElementById('liveEvChart')?.getContext('2d');
+    if (ctx) {
+      const chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: 'Expected Profit (£)',
+            data: profits,
+            tension: 0.18,
+            fill: true,
+            borderColor: 'rgb(54, 162, 235)',
+            backgroundColor: 'rgba(54, 162, 235, 0.2)',
+            pointRadius: 0,
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { title: { display: true, text: 'Lines Covered' } },
+            y: { title: { display: true, text: 'Expected Profit (£)' } }
+          }
+        }
+      });
+
+      const slider = document.getElementById('evLinesRange');
+      const linesEl = document.getElementById('evLinesValue');
+      const profitEl = document.getElementById('evProfitValue');
+      const hitEl = document.getElementById('evHitRateValue');
+      const hitRates = evData.map(r => typeof r.hit_rate === 'number' ? r.hit_rate : 0);
+
+      function sync(idx){
+        const row = evData[idx];
+        if (!row) return;
+        linesEl.textContent = row.lines_covered;
+        const profit = typeof row.expected_profit === 'number' ? row.expected_profit : 0;
+        profitEl.textContent = profit.toFixed(2);
+        const hr = hitRates[idx] || 0;
+        hitEl.textContent = (hr * 100).toFixed(2) + '%';
+        chart.setActiveElements([{ datasetIndex: 0, index: idx }]);
+        chart.tooltip.setActiveElements([{ datasetIndex: 0, index: idx }], { x: 0, y: 0 });
+        chart.update();
+      }
+
+      if (slider) {
+        const defaultLines = parseInt(slider.dataset.defaultLines || '0', 10);
+        const defaultIndex = Math.max(0, labels.findIndex(v => v === defaultLines));
+        slider.value = defaultIndex >= 0 ? defaultIndex + 1 : 1;
+        sync(defaultIndex >= 0 ? defaultIndex : 0);
+        slider.addEventListener('input', (ev) => {
+          const idx = Math.min(evData.length - 1, Math.max(0, parseInt(ev.target.value, 10) - 1));
+          sync(idx);
+        });
+      }
+    }
+  })();
+  {% endif %}
 });
 </script>
 {% endblock %}

@@ -2885,10 +2885,12 @@ def manual_calculator_page():
         "div_mult": 1.0,
         "f_fix": None,
         "pool_gross_other": 10000.0,
+        "min_stake_per_line": 0.0,
     }
 
     results = {}
     errors = []
+    manual_override_active = False
 
     if request.method == "POST":
         # This flag is used to prevent auto-adjustment on subsequent POSTs if the user
@@ -2916,6 +2918,7 @@ def manual_calculator_page():
             calc_params["div_mult"] = float(request.form.get("div_mult", calc_params["div_mult"]))
             calc_params["f_fix"] = float(request.form.get("f_fix")) if request.form.get("f_fix") else None
             calc_params["pool_gross_other"] = float(request.form.get("pool_gross_other", calc_params["pool_gross_other"]))
+            calc_params["min_stake_per_line"] = float(request.form.get("min_stake_per_line", calc_params["min_stake_per_line"]))
 
             # Validate inputs
             if calc_params["num_runners"] <= 0:
@@ -2924,6 +2927,8 @@ def manual_calculator_page():
                 errors.append("Bankroll must be positive.")
             if not (0 <= calc_params["take_rate"] <= 1):
                 errors.append("Takeout rate must be between 0% and 100%.")
+            if calc_params["min_stake_per_line"] < 0:
+                errors.append("Minimum stake per line cannot be negative.")
 
             # Parse runner grid
             runners_from_form = []
@@ -2969,6 +2974,7 @@ def manual_calculator_page():
                 div_mult=calc_params["div_mult"],
                 f_fix=calc_params["f_fix"],
                 pool_gross_other=calc_params["pool_gross_other"],
+                min_stake_per_line=calc_params["min_stake_per_line"],
             )
             errors.extend(results.get("errors", []))
 
@@ -3040,6 +3046,7 @@ def tote_product_calculator_page(product_id: str):
         # Default: do not force f-share; user can override via form
         "f_fix": None,
         "pool_gross_other": float(prod.get("total_gross") or 0.0),
+        "min_stake_per_line": float(prod.get("min_line") or prod.get("line_increment") or 0.0),
     }
 
     errors: list[str] = []
@@ -3065,6 +3072,7 @@ def tote_product_calculator_page(product_id: str):
             calc_params["div_mult"] = float(request.form.get("div_mult", calc_params["div_mult"]))
             calc_params["f_fix"] = float(request.form.get("f_fix")) if request.form.get("f_fix") else None
             calc_params["pool_gross_other"] = float(request.form.get("pool_gross_other", calc_params["pool_gross_other"]))
+            calc_params["min_stake_per_line"] = float(request.form.get("min_stake_per_line", calc_params["min_stake_per_line"]))
 
             # Parse runners grid from form
             runners_from_form = []
@@ -3087,6 +3095,8 @@ def tote_product_calculator_page(product_id: str):
         k_perm = k_map.get(calc_params["bet_type"], 4)
         if calc_params["num_runners"] < k_perm:
             errors.append(f"Not enough runners ({calc_params['num_runners']}) for {calc_params['bet_type']}")
+        if calc_params["min_stake_per_line"] < 0:
+            errors.append("Minimum stake per line cannot be negative.")
 
         if not errors:
             results = calculate_pl_strategy(
@@ -3104,6 +3114,7 @@ def tote_product_calculator_page(product_id: str):
                 div_mult=calc_params["div_mult"],
                 f_fix=calc_params["f_fix"],
                 pool_gross_other=calc_params["pool_gross_other"],
+                min_stake_per_line=calc_params["min_stake_per_line"],
             )
     else:
         # GET: Prefill runners from WIN probable odds (latest) for the event
@@ -3329,6 +3340,7 @@ def tote_product_calculator_page(product_id: str):
                 div_mult=calc_params["div_mult"],
                 f_fix=calc_params["f_fix"],
                 pool_gross_other=calc_params["pool_gross_other"],
+                min_stake_per_line=calc_params["min_stake_per_line"],
             )
 
     # Build placeable lines list from results (ignore £0.00 lines)
@@ -3487,10 +3499,17 @@ def tote_live_model_page():
           p.total_net,
           p.rollover,
           p.deduction_rate,
+          br.min_line,
+          br.line_increment,
           w.product_id AS win_product_id
         FROM
           `autobet-470818.autobet.vw_products_latest_totals` p
         LEFT JOIN `autobet-470818.autobet.tote_events` e ON p.event_id = e.event_id
+        LEFT JOIN (
+          SELECT product_id, MAX(min_line) AS min_line, MAX(line_increment) AS line_increment
+          FROM `autobet-470818.autobet.tote_product_rules`
+          GROUP BY product_id
+        ) br ON br.product_id = p.product_id
         LEFT JOIN (
           SELECT product_id, event_id
           FROM (
@@ -3565,12 +3584,14 @@ def tote_live_model_page():
     # --- Calculate display pool values ---
     if upcoming_df is not None and not upcoming_df.empty:
         # Ensure columns exist and are numeric, fill NaNs with 0
-        for col in ['total_gross', 'total_net', 'rollover']:
+        for col in ['total_gross', 'total_net', 'rollover', 'min_line', 'line_increment']:
             if col not in upcoming_df.columns:
                 upcoming_df[col] = 0.0
         upcoming_df['total_gross'] = pd.to_numeric(upcoming_df['total_gross'], errors='coerce').fillna(0.0)
         upcoming_df['total_net'] = pd.to_numeric(upcoming_df['total_net'], errors='coerce').fillna(0.0)
         upcoming_df['rollover'] = pd.to_numeric(upcoming_df['rollover'], errors='coerce').fillna(0.0)
+        upcoming_df['min_line'] = pd.to_numeric(upcoming_df['min_line'], errors='coerce')
+        upcoming_df['line_increment'] = pd.to_numeric(upcoming_df['line_increment'], errors='coerce')
 
         # Calculate total pool and net pool as requested
         upcoming_df['total_pool'] = upcoming_df['total_gross'] + upcoming_df['rollover']
@@ -3605,7 +3626,7 @@ def tote_live_model_page():
                     flash(f"Could not fetch probable odds for {p['event_name']}. Cannot run model.", "warning")
                 else:
                     # Prefer BigQuery permutations for performance and accuracy
-                    calc_result = None
+                    pl_model = None
                     try:
                         if _use_bq():
                             top_n = int(max(1, len(odds_df)))
@@ -3620,7 +3641,21 @@ def tote_live_model_page():
                         perms_df = None
 
                     if perms_df is not None and not perms_df.empty:
-                        # Build runner odds map from WIN market
+                        stake_per_line_default = float(model_params.get("stake_per_line", 0.1) or 0.1)
+                        bankroll = float(stake_per_line_default * 100)
+                        take_rate_val = float(p.get("deduction_rate") or model_params.get("t", 0.3))
+                        rollover_val = float(p.get("rollover") or model_params.get("R", 0.0))
+                        gross_other = float(p.get("total_gross") or 0.0)
+                        raw_min_line = p.get("min_line")
+                        if pd.notna(raw_min_line) and raw_min_line is not None:
+                            min_line_val = float(raw_min_line)
+                        else:
+                            raw_inc = p.get("line_increment")
+                            if pd.notna(raw_inc) and raw_inc is not None:
+                                min_line_val = float(raw_inc)
+                            else:
+                                min_line_val = 0.0
+
                         odds_map = {}
                         try:
                             for _, r in odds_df.iterrows():
@@ -3630,17 +3665,12 @@ def tote_live_model_page():
                         except Exception:
                             odds_map = {}
 
-                        # Prepare perms for EV helper
                         rows = []
                         for _, r in perms_df.sort_values("p", ascending=False).iterrows():
                             ids = [str(r.get("h1")), str(r.get("h2")), str(r.get("h3")), str(r.get("h4"))]
                             rows.append({"ids": ids, "probability": float(r.get("p") or 0.0)})
 
-                        # Compute EV grid in BigQuery for optimal coverage
-                        bankroll = float(model_params.get("stake_per_line", 10.0) * 100)
-                        take_rate_val = float(p.get("deduction_rate") or model_params.get("t", 0.3))
-                        rollover_val = float(p.get("rollover") or model_params.get("R", 0.0))
-                        gross_other = float(p.get("total_gross") or 0.0)
+                        grid_records: list[dict[str, object]] = []
                         try:
                             grid_df = sql_df(
                                 f"SELECT * FROM `{cfg.bq_project}.{cfg.bq_dataset}.tf_perm_ev_grid`(@pid,@top_n,@O,@S,@t,@R,@inc,@mult,@f,@conc,@mi)",
@@ -3659,62 +3689,38 @@ def tote_live_model_page():
                                 },
                                 cache_ttl=0,
                             )
-                        except Exception as e:
-                            grid_df = None
+                            if grid_df is not None and not grid_df.empty:
+                                grid_records = grid_df.to_dict("records")
+                        except Exception:
+                            grid_records = []
 
-                        if grid_df is not None and not grid_df.empty:
-                            # Pick the m with max expected_profit
-                            best_row = grid_df.sort_values("expected_profit", ascending=False).iloc[0]
-                            m = int(best_row["lines_covered"]) if not pd.isna(best_row["lines_covered"]) else 1
-                            # Build staking plan using probability-weighted stakes for top m lines
-                            gamma = 1.0 + 2.0 * 0.0
-                            perms_sorted = perms_df.sort_values("p", ascending=False).head(m)
-                            probs = perms_sorted["p"].astype(float).clip(lower=0.0)
-                            weights = probs.pow(gamma)
-                            sum_w = float(weights.sum()) or 1.0
-                            stakes = (bankroll * (weights / sum_w)).tolist()
-                            staking_plan = []
-                            for i, (_, r) in enumerate(perms_sorted.iterrows()):
-                                line_ids = [str(r.get("h1")), str(r.get("h2")), str(r.get("h3")), str(r.get("h4"))]
-                                staking_plan.append({
-                                    "line": " - ".join(line_ids),
-                                    "probability": float(r.get("p") or 0.0),
-                                    "stake": float(stakes[i]),
-                                })
-
-                            scenario = {
-                                "lines_covered": m,
-                                "hit_rate": float(best_row.get("hit_rate") or 0.0),
-                                "expected_return": float(best_row.get("expected_return") or 0.0),
-                                "expected_profit": float(best_row.get("expected_profit") or 0.0),
-                                "f_share_used": float(best_row.get("f_share_used") or 0.0),
-                                "net_pool_if_bet": float((1.0) * (((1.0 - take_rate_val) * (gross_other + bankroll)) + rollover_val)),
-                                "total_stake": bankroll,
-                            }
-                            pl_model = {"best_scenario": scenario, "staking_plan": staking_plan, "ev_grid": grid_df.to_dict("records"), "total_possible_lines": len(perms_df)}
-                        else:
-                            # Fallback to local EV helper if grid not available
-                            ev_res = calculate_pl_from_perms(
-                                perms=rows,
-                                bankroll=bankroll,
-                                runner_odds=odds_map,
-                                concentration=0.0,
-                                market_inefficiency=0.1,
-                                desired_profit_pct=5.0,
-                                take_rate=take_rate_val,
-                                net_rollover=rollover_val,
-                                inc_self=True,
-                                div_mult=1.0,
-                                f_fix=None,
-                                pool_gross_other=gross_other,
-                            )
-                            pl_model = ev_res.get("pl_model")
+                        ev_res = calculate_pl_from_perms(
+                            perms=rows,
+                            bankroll=bankroll,
+                            runner_odds=odds_map,
+                            concentration=0.0,
+                            market_inefficiency=0.1,
+                            desired_profit_pct=5.0,
+                            take_rate=take_rate_val,
+                            net_rollover=rollover_val,
+                            inc_self=True,
+                            div_mult=1.0,
+                            f_fix=None,
+                            pool_gross_other=gross_other,
+                            min_stake_per_line=min_line_val,
+                        )
+                        if ev_res.get("errors"):
+                            for msg in ev_res["errors"]:
+                                flash(msg, "warning")
+                        pl_model = ev_res.get("pl_model")
+                        if pl_model and grid_records:
+                            pl_model["ev_grid"] = grid_records
                     else:
                         # Fallback: run local Python model
                         calc_result = calculate_pl_strategy(
                             runners=odds_df.to_dict("records"),
                             bet_type="SUPERFECTA",
-                            bankroll=float(model_params.get("stake_per_line", 10.0) * 100), # Example bankroll
+                            bankroll=float(stake_per_line_default * 100), # Example bankroll
                             key_horse_mult=2.0, # Default
                             poor_horse_mult=0.5, # Default
                             concentration=0.0, # Default
@@ -3727,6 +3733,7 @@ def tote_live_model_page():
                             # Let the model compute f-share automatically unless user overrides
                             f_fix=None,
                             pool_gross_other=float(p.get("total_gross") or 0.0),
+                            min_stake_per_line=min_line_val,
                         )
                         pl_model = calc_result.get("pl_model")
                     if pl_model and pl_model.get("best_scenario"):
@@ -3750,6 +3757,11 @@ def tote_live_model_page():
                             "staking_plan_text": "\n".join(filtered_lines),
                             "total_stake": scenario.get("total_stake", 0.0),
                             "weighted_lines": weighted_lines,
+                            "ev_grid": (pl_model.get("ev_grid") if isinstance(pl_model, dict) else []),
+                            "total_possible_lines": pl_model.get("total_possible_lines") if isinstance(pl_model, dict) else None,
+                            "base_scenario": pl_model.get("base_scenario") if isinstance(pl_model, dict) else None,
+                            "optimal_ev_scenario": pl_model.get("optimal_ev_scenario") if isinstance(pl_model, dict) else None,
+                            "min_stake_per_line": min_line_val,
                         }
                     else:
                         flash(f"Model did not find a profitable strategy for {p['event_name']}.", "info")

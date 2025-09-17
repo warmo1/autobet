@@ -1,70 +1,197 @@
-{% extends 'base.html' %}
-{% block content %}
-<div class="container mt-3">
-  <h3>Ingestion Status</h3>
-  <div class="row g-3 mt-1">
-    <div class="col-md-3">
-      <div class="card"><div class="card-body">
-        <div class="text-muted small">Products Today</div>
-        <ul class="mb-0">
-          {% for r in prod_by_type %}
-          <li>{{ r.bet_type }}: {{ r.n }}</li>
-          {% else %}<li>none</li>{% endfor %}
-        </ul>
-      </div></div>
-    </div>
-    <div class="col-md-3">
-      <div class="card"><div class="card-body">
-        <div class="text-muted small">Superfecta Today</div>
-        <div>Products: {{ sf_stats.n_products | f0 }}</div>
-        <div>Selections: {{ sf_stats.total_selections | f0 }}</div>
-      </div></div>
-    </div>
-    <div class="col-md-3">
-      <div class="card"><div class="card-body">
-        <div class="text-muted small">Probable Odds</div>
-        <div>Rows Today: {{ probable_today.n_rows or 0 }}</div>
-        <div>Last Ingest: <span class="time-iso" data-iso="{{ probable_last.last_ts }}">{{ probable_last.last_ts }}</span></div>
-      </div></div>
-    </div>
-    <div class="col-md-3">
-      <div class="card"><div class="card-body">
-        <div class="text-muted small">Pool Snapshots</div>
-        <div>Rows Today: {{ snap_today.n_rows or 0 }}</div>
-        <div>Last Snapshot: <span class="time-iso" data-iso="{{ snap_last.last_ts }}">{{ snap_last.last_ts }}</span></div>
-      </div></div>
-    </div>
-  </div>
+{% extends "base.html" %}
 
-  <div class="card mt-3">
-    <div class="card-header">Recent Superfecta (today)</div>
-    <div class="card-body p-0">
-      <div class="table-responsive" style="max-height: 50vh;">
-        <table class="table table-sm table-striped mb-0">
-          <thead class="table-light"><tr><th>Start</th><th>Event</th><th>Venue</th><th>Status</th><th class="text-end">Gross</th><th class="text-end">Net</th><th class="text-end">Runners</th></tr></thead>
-          <tbody>
-            {% for p in recent_sf %}
-            <tr>
-              <td><span class="time-iso" data-iso="{{ p.start_iso }}">{{ p.start_iso }}</span></td>
-              <td>{{ p.event_name }}</td>
-              <td>{{ p.venue }}</td>
-              <td>{{ p.status }}</td>
-              <td class="text-end">{{ p.total_gross | f0 }}</td>
-              <td class="text-end">{{ p.total_net | f0 }}</td>
-              <td class="text-end">{{ p.n_runners }}</td>
-            </tr>
-            {% else %}
-            <tr><td colspan="7" class="text-center text-muted">No data for today.</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
+{% block title %}System Status{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h1>System Status</h1>
+    <button id="refresh-all-btn" class="btn btn-primary">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-arrow-clockwise" viewBox="0 0 16 16">
+        <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2z"/>
+        <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466"/>
+      </svg>
+      Refresh All
+    </button>
+  </div>
+  <p class="text-muted">Live status of data ingestion, quality checks, and underlying cloud infrastructure.</p>
+
+  <div class="card mb-4">
+    <div class="card-header">
+      <h5>Data Freshness</h5>
+    </div>
+    <div class="card-body">
+      <div id="data-freshness-container" class="row">
+        <div class="col text-center"><div class="spinner-border spinner-border-sm" role="status"></div></div>
       </div>
     </div>
   </div>
 
-  <div class="card mt-3">
-    <div class="card-header">GCP Cloud Run Services</div>
-    <div class="card-body p-0">
+  <div class="card mb-4">
+    <div class="card-header">
+      <h5>Data Quality Checks</h5>
+    </div>
+    <div class="card-body">
+      <div id="data-quality-container" class="row">
+        <div class="col text-center"><div class="spinner-border spinner-border-sm" role="status"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header">
+      <h5>GCP Infrastructure Status</h5>
+    </div>
+    <div class="card-body">
+      <div id="gcp-status-container">
+        <div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header">
+      <h5>Upcoming Races (Next 4 Hours)</h5>
+    </div>
+    <div class="card-body">
+      <div id="upcoming-races-container" class="table-responsive">
+        <div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header">
+      <h5>Recent Ingest Jobs</h5>
+    </div>
+    <div class="card-body">
+      <div id="job-log-container" class="table-responsive">
+        <div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  function formatLocalTime(isoString) {
+    if (!isoString) return 'N/A';
+    try {
+      const d = new Date(isoString);
+      if (Number.isNaN(d.getTime())) {
+        return isoString;
+      }
+      return d.toLocaleString();
+    } catch (e) {
+      return isoString;
+    }
+  }
+
+  function safeText(value) {
+    if (value === null || value === undefined) return 'N/A';
+    if (typeof value === 'number' && !Number.isFinite(value)) return 'N/A';
+    return value;
+  }
+
+  function formatPercent(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return 'N/A';
+    const pct = num > 1 ? num : num * 100;
+    return pct.toFixed(1) + '%';
+  }
+
+  async function fetchData(endpoint, containerId, renderer) {
+    const container = document.getElementById(containerId);
+    if (!container) return Promise.resolve();
+    container.innerHTML = '<div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div></div>';
+    try {
+      const response = await fetch(endpoint);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      renderer(container, data);
+    } catch (error) {
+      container.innerHTML = `<div class="alert alert-danger" role="alert">Failed to load data: ${error.message}</div>`;
+    }
+  }
+
+  function renderFreshness(container, data) {
+    container.innerHTML = `
+      <div class="col-md-3">
+        <div class="stat-card text-center p-3 border rounded">
+          <h6 class="text-muted">Events Today</h6>
+          <p class="fs-4 fw-bold mb-0">${safeText(data.events?.today || 0)}</p>
+          <small class="text-muted">Last: ${formatLocalTime(data.events?.last)}</small>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="stat-card text-center p-3 border rounded">
+          <h6 class="text-muted">Products Today</h6>
+          <p class="fs-4 fw-bold mb-0">${safeText(data.products?.today || 0)}</p>
+          <small class="text-muted">Last: ${formatLocalTime(data.products?.last)}</small>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="stat-card text-center p-3 border rounded">
+          <h6 class="text-muted">Probable Odds Today</h6>
+          <p class="fs-4 fw-bold mb-0">${safeText(data.probable_odds?.today || 0)}</p>
+          <small class="text-muted">Last: ${formatLocalTime(data.probable_odds?.last)}</small>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="stat-card text-center p-3 border rounded">
+          <h6 class="text-muted">Pool Snapshots Today</h6>
+          <p class="fs-4 fw-bold mb-0">${safeText(data.pool_snapshots?.today || 0)}</p>
+          <small class="text-muted">Last: ${formatLocalTime(data.pool_snapshots?.last)}</small>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderQuality(container, data) {
+    container.innerHTML = `
+      <div class="col-md-3">
+        <div class="stat-card text-center p-3 border rounded">
+          <h6 class="text-muted">Missing Runners</h6>
+          <p class="fs-4 fw-bold mb-0">${safeText(data.missing_runner_numbers)}</p>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="stat-card text-center p-3 border rounded">
+          <h6 class="text-muted">Missing Bet Rules</h6>
+          <p class="fs-4 fw-bold mb-0">${safeText(data.missing_bet_rules)}</p>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="stat-card text-center p-3 border rounded">
+          <h6 class="text-muted">Probable Odds Coverage</h6>
+          <p class="fs-4 fw-bold mb-0">${formatPercent(data.probable_odds_avg_cov)}</p>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="stat-card text-center p-3 border rounded">
+          <h6 class="text-muted">GB SF Missing Snapshots</h6>
+          <p class="fs-4 fw-bold mb-0">${safeText(data.gb_sf_missing_snapshots)}</p>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderGcp(container, data) {
+    const services = Array.isArray(data.cloud_run?.services) ? data.cloud_run.services : [];
+    if (!services.length) {
+      container.innerHTML = '<div class="text-muted">No services found.</div>';
+      return;
+    }
+    const rows = services.map(service => `
+      <tr>
+        <td>${safeText(service.name)}</td>
+        <td>${service.ready ? '<span class="badge bg-success">Ready</span>' : '<span class="badge bg-danger">Not Ready</span>'}</td>
+        <td>${service.uri ? `<a href="${service.uri}" target="_blank" rel="noopener">${service.uri}</a>` : '—'}</td>
+        <td>${formatLocalTime(service.updateTime)}</td>
+      </tr>
+    `).join('');
+    container.innerHTML = `
       <div class="table-responsive">
         <table class="table table-sm table-striped mb-0">
           <thead class="table-light">
@@ -75,40 +202,101 @@
               <th>Last Updated</th>
             </tr>
           </thead>
-          <tbody>
-            {% for service in services %}
-            <tr>
-              <td>{{ service.name }}</td>
-              <td>
-                {% if service.ready %}
-                  <span class="badge bg-success">Ready</span>
-                {% else %}
-                  <span class="badge bg-danger">Not Ready</span>
-                {% endif %}
-              </td>
-              <td><a href="{{ service.uri }}" target="_blank">{{ service.uri }}</a></td>
-              <td><span class="time-iso" data-iso="{{ service.updateTime }}">{{ service.updateTime }}</span></td>
-            </tr>
-            {% else %}
-            <tr><td colspan="4" class="text-center text-muted">No services found.</td></tr>
-            {% endfor %}
-          </tbody>
+          <tbody>${rows}</tbody>
         </table>
       </div>
-    </div>
-  </div>
-</div>
+    `;
+  }
 
-<script>
-  document.addEventListener('DOMContentLoaded', function() {
-    const timeElements = document.querySelectorAll('.time-iso');
-    timeElements.forEach(function(element) {
-      const isoTime = element.getAttribute('data-iso');
-      if (isoTime) {
-        const localTime = new Date(isoTime).toLocaleString();
-        element.textContent = localTime;
-      }
+  function renderUpcoming(container, data) {
+    const races = Array.isArray(data.items) ? data.items : [];
+    if (!races.length) {
+      container.innerHTML = '<div class="text-muted">No upcoming races.</div>';
+      return;
+    }
+    const rows = races.map(r => `
+      <tr>
+        <td>${formatLocalTime(r.start_iso)}</td>
+        <td>${safeText(r.event_name)}</td>
+        <td>${safeText(r.venue)}</td>
+        <td>${safeText(r.country)}</td>
+        <td>${safeText(r.status || r.market_status)}</td>
+      </tr>
+    `).join('');
+    container.innerHTML = `
+      <table class="table table-striped table-sm mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>Start</th>
+            <th>Event</th>
+            <th>Venue</th>
+            <th>Country</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
+  function renderJobs(container, data) {
+    const jobs = Array.isArray(data.items) ? data.items : [];
+    if (!jobs.length) {
+      container.innerHTML = '<div class="text-muted">No recent jobs.</div>';
+      return;
+    }
+    const rows = jobs.map(job => {
+      const durationMs = Number(job.duration_ms);
+      const duration = Number.isFinite(durationMs) ? (durationMs / 1000).toFixed(1) : 'N/A';
+      return `
+        <tr>
+          <td>${safeText(job.task)}</td>
+          <td>${safeText(job.status)}</td>
+          <td>${duration}</td>
+          <td>${formatLocalTime(job.started_ts)}</td>
+          <td>${formatLocalTime(job.ended_ts)}</td>
+        </tr>
+      `;
+    }).join('');
+    container.innerHTML = `
+      <table class="table table-striped table-sm mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>Task</th>
+            <th>Status</th>
+            <th>Duration (s)</th>
+            <th>Started</th>
+            <th>Ended</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
+  function refreshAll() {
+    return Promise.all([
+      fetchData('/api/status/data_freshness', 'data-freshness-container', renderFreshness),
+      fetchData('/api/status/qc', 'data-quality-container', renderQuality),
+      fetchData('/api/status/gcp', 'gcp-status-container', renderGcp),
+      fetchData('/api/status/upcoming', 'upcoming-races-container', renderUpcoming),
+      fetchData('/api/status/job_log', 'job-log-container', renderJobs),
+    ]);
+  }
+
+  const refreshBtn = document.getElementById('refresh-all-btn');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', function() {
+      refreshBtn.disabled = true;
+      refreshBtn.classList.add('disabled');
+      refreshAll().finally(() => {
+        refreshBtn.disabled = false;
+        refreshBtn.classList.remove('disabled');
+      });
     });
-  });
+  }
+
+  refreshAll();
+});
 </script>
 {% endblock %}

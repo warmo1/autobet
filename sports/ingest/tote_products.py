@@ -415,8 +415,8 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
                     "max_line": line_max,
                     "line_increment": inc,
                 })
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: could not parse bet rules for product {(bp.get('id') or src.get('id'))}: {e}")
 
         # Dividends (if present)
         res = (src.get("result") or {})
