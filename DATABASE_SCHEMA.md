@@ -21,6 +21,7 @@ Important views:
 - `vw_today_gb_events`, `vw_today_gb_superfecta`, `vw_today_gb_superfecta_be`
 - `vw_gb_open_superfecta_next60`, `vw_gb_open_superfecta_next60_be`
 - `vw_superfecta_dividends_latest`
+- `mv_sf_strengths_from_win_horse` (materialized fallback strengths), `vw_sf_strengths_from_win_horse`, `vw_superfecta_runner_strength_any`
 - `vw_tote_probable_odds`, `vw_probable_odds_by_event`
 - `vw_products_coverage`, `vw_products_coverage_issues`
 
@@ -109,4 +110,6 @@ A number of views are created in BigQuery to facilitate analysis. These views ar
 *   **`vw_superfecta_products`**: A convenient filter of the `tote_products` table for Superfecta bets.
 *   **`vw_superfecta_dividends_latest`**: Shows the latest dividend for each selection for each Superfecta product.
 *   **`vw_runner_features`**: Joins runner features with horse names.
+*   **`vw_superfecta_runner_training_features`**: Extends `vw_superfecta_training` with per-runner feature vectors for model fitting.
+*   **`vw_superfecta_runner_live_features`**: Provides the latest runner feature snapshot paired with Superfecta products for scoring upcoming races.
 *   **`vw_superfecta_training`**: Combines product and event context with runner results for model training.

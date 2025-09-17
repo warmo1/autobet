@@ -230,6 +230,51 @@ def main(argv=None):
         print(f"[Backfill] Done. products_scanned={total_prod}")
     sp_backfill.set_defaults(func=_cmd_backfill)
 
+    # --- Model training ---
+    sp_train_super = sub.add_parser(
+        "train-superfecta-model",
+        help="Train a Superfecta probability model from BigQuery history and publish predictions.",
+    )
+    sp_train_super.add_argument(
+        "--model-id", default="superfecta_ml", help="Identifier to store alongside predictions"
+    )
+    sp_train_super.add_argument(
+        "--since", help="Earliest event_date (YYYY-MM-DD) to include in training data"
+    )
+    sp_train_super.add_argument(
+        "--max-rows", type=int, help="Maximum number of training rows to fetch"
+    )
+    sp_train_super.add_argument(
+        "--predict-days", type=int, default=2, help="How many days ahead to score upcoming races"
+    )
+    sp_train_super.add_argument(
+        "--dry-run", action="store_true", help="Train but skip writing predictions to BigQuery"
+    )
+
+    def _cmd_train_super(args):
+        from .ml import train_superfecta_model
+
+        db = get_db()
+        result = train_superfecta_model(
+            db,
+            model_id=args.model_id,
+            since=args.since,
+            max_rows=args.max_rows,
+            predict_horizon_days=args.predict_days,
+            dry_run=args.dry_run,
+        )
+        payload = {
+            "model_id": args.model_id,
+            "metrics": result.metrics,
+            "params": result.params,
+            "ts_ms": result.ts_ms,
+            "predictions_written": result.predictions_written,
+            "predicted_events": result.predicted_events,
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+
+    sp_train_super.set_defaults(func=_cmd_train_super)
+
     # --- BigQuery maintenance: cleanup temp tables ---
     # Deletes leftover _tmp tables in the configured BigQuery dataset
     sp_bq_clean = sub.add_parser("bq-cleanup", help="Delete leftover _tmp tables in the configured BigQuery dataset")

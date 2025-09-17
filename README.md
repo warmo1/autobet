@@ -71,6 +71,22 @@ python -m sports.run tote-events-range --from 2024-01-01 --to 2024-12-31 --first
 
 This writes explicit Event rows (incl. status and competitors list when available). Note that finishing order is not always exposed on the Event object; dividends/subscriptions will still enrich results.
 
+### Train and refresh the Superfecta model
+
+Once historical events, odds, and runner features are ingested you can fit a logistic model from BigQuery and push fresh predictions into the `predictions` table. The command stores metadata in `models`, publishes probabilities for upcoming races, and updates `tote_params` so downstream PL tooling automatically picks up the latest strengths.
+
+```bash
+python -m sports.run train-superfecta-model \
+  --model-id superfecta_ml --since 2023-01-01 --predict-days 3
+```
+
+Key flags:
+
+- `--since` limits the training window (defaults to all history).
+- `--max-rows` caps the sample size if you want a quicker dry run.
+- `--predict-days` controls how far ahead to score future races (default 2 days).
+- `--dry-run` trains/evaluates but skips writing predictions.
+
 ### BigQuery temp-table cleanup
 
 Bulk upserts create temporary staging tables (prefix `_tmp_`). Clean them up periodically:

@@ -50,8 +50,11 @@ class Config:
     # --- BigQuery (writes + optional web reads) ---
     # These are referenced by sports/bq.py and sports/webapp.py
     bq_write_enabled: bool = os.getenv("BQ_WRITE_ENABLED", "false").lower() in ("1", "true", "yes", "on")
-    bq_project: str = os.getenv("BQ_PROJECT", "")
-    bq_dataset: str = os.getenv("BQ_DATASET", "")
+    # Default to the shared production dataset so local tooling can run
+    # read-only queries without additional configuration. Environment
+    # variables still override these defaults when present.
+    bq_project: str = os.getenv("BQ_PROJECT", "autobet-470818")
+    bq_dataset: str = os.getenv("BQ_DATASET", "autobet")
     bq_location: str = os.getenv("BQ_LOCATION", "EU")
 
     # --- BigQuery client options ---
