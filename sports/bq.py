@@ -69,6 +69,17 @@ class BigQuerySink:
             job_config.default_dataset = f"{self.project}.{self.dataset}"
         return client.query(sql, job_config=job_config, **kwargs).result()
 
+    def query_dataframe(self, sql: str, **kwargs):
+        """Run a query and return the result as a pandas DataFrame."""
+
+        result = self.query(sql, **kwargs)
+        try:
+            return result.to_dataframe()
+        except AttributeError as exc:  # pragma: no cover - depends on extras
+            raise RuntimeError(
+                "BigQuery result does not expose to_dataframe(); ensure pandas/pyarrow extras are installed."
+            ) from exc
+
     def _table_exists(self, table: str) -> bool:
         client = self._client_obj()
         try:
@@ -102,156 +113,6 @@ class BigQuerySink:
         job = client.query(sql)
         job.result()
 
-        # Table function: Expected Value grid over coverage using permutations
-        sql = f"""
-        CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_perm_ev_grid`(
-          in_product_id STRING,
-          in_top_n INT64,
-          O NUMERIC,
-          S NUMERIC,
-          t FLOAT64,
-          R NUMERIC,
-          inc BOOL,
-          mult FLOAT64,
-          f FLOAT64,
-          conc FLOAT64,
-          mi FLOAT64
-        )
-        RETURNS TABLE<
-          lines_covered INT64,
-          hit_rate FLOAT64,
-          expected_return FLOAT64,
-          expected_profit FLOAT64,
-          f_share_used FLOAT64
-        > AS (
-          WITH perms AS (
-            SELECT ROW_NUMBER() OVER (ORDER BY p DESC) AS rn, p, h1, h2, h3, h4
-            FROM `{ds}.tf_superfecta_perms_any`(in_product_id, in_top_n)
-          ), odds AS (
-            SELECT CAST(cloth_number AS STRING) AS id, CAST(decimal_odds AS FLOAT64) AS odds
-            FROM `{ds}.vw_tote_probable_odds`
-            WHERE product_id = in_product_id
-          ), parms AS (
-            SELECT GREATEST(0.1, 1.0 - 0.6*mi) AS beta, 1.0 + 2.0*conc AS gamma,
-                   CAST(O AS FLOAT64) AS O_f, CAST(S AS FLOAT64) AS S_f
-          ), scored AS (
-            SELECT p.rn, p.p,
-                   POW(p.p, (SELECT gamma FROM parms)) AS w_raw,
-                   POW(1.0 / NULLIF(o1.odds, 0.0), (SELECT beta FROM parms))
-                   * POW(1.0 / NULLIF(o2.odds, 0.0), (SELECT beta FROM parms))
-                   * POW(1.0 / NULLIF(o3.odds, 0.0), (SELECT beta FROM parms))
-                   * POW(1.0 / NULLIF(o4.odds, 0.0), (SELECT beta FROM parms)) AS q_raw
-            FROM perms p
-            LEFT JOIN odds o1 ON o1.id = CAST(p.h1 AS STRING)
-            LEFT JOIN odds o2 ON o2.id = CAST(p.h2 AS STRING)
-            LEFT JOIN odds o3 ON o3.id = CAST(p.h3 AS STRING)
-            LEFT JOIN odds o4 ON o4.id = CAST(p.h4 AS STRING)
-          ), steps AS (
-            SELECT rn AS m FROM scored
-          )
-          SELECT
-            m AS lines_covered,
-            (SELECT SUM(p) FROM scored WHERE rn <= m) AS hit_rate,
-            (
-              SELECT (SUM(p_i * f_i)) * (
-                       mult * (((1.0 - t) * ((SELECT O_f FROM parms) + IF(inc, (SELECT S_f FROM parms), 0.0))) + R)
-                     )
-              FROM (
-                SELECT s.p AS p_i,
-                       ((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0)) AS stake_i,
-                       ((SELECT O_f FROM parms) * (1.0 - mi) * s.q_raw / NULLIF((SELECT SUM(q_raw) FROM scored WHERE rn <= m), 0)) AS others_i,
-                       SAFE_DIVIDE(
-                         ((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0)),
-                         (((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0))
-                          + ((SELECT O_f FROM parms) * (1.0 - mi) * s.q_raw / NULLIF((SELECT SUM(q_raw) FROM scored WHERE rn <= m), 0)) )
-                       ) AS f_i
-                FROM scored s
-                WHERE s.rn <= m
-              )
-            ) AS expected_return,
-            NULL AS expected_profit,
-            (
-              SELECT SAFE_DIVIDE(SUM(p_i * f_i), SUM(p_i))
-              FROM (
-                SELECT s.p AS p_i,
-                       SAFE_DIVIDE(
-                         ((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0)),
-                         (((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0))
-                          + ((SELECT O_f FROM parms) * (1.0 - mi) * s.q_raw / NULLIF((SELECT SUM(q_raw) FROM scored WHERE rn <= m), 0)) )
-                       ) AS f_i
-                FROM scored s
-                WHERE s.rn <= m
-              )
-            ) AS f_share_used
-          FROM steps
-        ), final AS (
-          SELECT lines_covered,
-                 hit_rate,
-                 expected_return,
-                 expected_return - CAST(S AS FLOAT64) AS expected_profit,
-                 f_share_used
-          FROM (
-            SELECT * FROM (SELECT * FROM (SELECT * FROM (
-              SELECT * FROM (
-                SELECT * FROM (
-                  SELECT * FROM (
-                    SELECT * FROM (
-                      SELECT * FROM (
-                        SELECT * FROM (
-                          SELECT * FROM (
-                            SELECT * FROM (
-                              SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM (
-                                SELECT * FROM (
-                                  SELECT m AS lines_covered,
-                                         (SELECT SUM(p) FROM scored WHERE rn <= m) AS hit_rate,
-                                         (
-                                           SELECT (SUM(p_i * f_i)) * (
-                                                    mult * (((1.0 - t) * ((SELECT O_f FROM parms) + IF(inc, (SELECT S_f FROM parms), 0.0))) + R)
-                                                  )
-                                           FROM (
-                                             SELECT s.p AS p_i,
-                                                    ((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0)) AS stake_i,
-                                                    ((SELECT O_f FROM parms) * (1.0 - mi) * s.q_raw / NULLIF((SELECT SUM(q_raw) FROM scored WHERE rn <= m), 0)) AS others_i,
-                                                    SAFE_DIVIDE(
-                                                      ((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0)),
-                                                      (((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0))
-                                                       + ((SELECT O_f FROM parms) * (1.0 - mi) * s.q_raw / NULLIF((SELECT SUM(q_raw) FROM scored WHERE rn <= m), 0)) )
-                                                    ) AS f_i
-                                             FROM scored s
-                                             WHERE s.rn <= m
-                                           )
-                                         ) AS expected_return,
-                                         (
-                                           SELECT SAFE_DIVIDE(SUM(p_i * f_i), SUM(p_i))
-                                           FROM (
-                                             SELECT s.p AS p_i,
-                                                    SAFE_DIVIDE(
-                                                      ((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0)),
-                                                      (((SELECT S_f FROM parms) * s.w_raw / NULLIF((SELECT SUM(w_raw) FROM scored WHERE rn <= m), 0))
-                                                       + ((SELECT O_f FROM parms) * (1.0 - mi) * s.q_raw / NULLIF((SELECT SUM(q_raw) FROM scored WHERE rn <= m), 0)) )
-                                                    ) AS f_i
-                                             FROM scored s
-                                             WHERE s.rn <= m
-                                           )
-                                         ) AS f_share_used
-                                  FROM steps
-                                )
-                              ))
-                            )
-                          )
-                        )
-                      )
-                    )
-                  )
-                )
-              )
-            )))
-          )
-        )
-        SELECT * FROM final;
-        """
-        job = client.query(sql)
-        job.result()
 
         # vw_products_latest_totals: tote_products overlaid with latest snapshot totals (all bet types)
         sql = f"""
@@ -289,6 +150,24 @@ class BigQuerySink:
         LEFT JOIN pstat USING(product_id);
         """
         job = client.query(sql); job.result()
+
+    def set_active_model(self, model_id: str, ts_ms: int) -> None:
+        """Update tote_params to point to the specified model snapshot."""
+
+        client = self._client_obj(); self._ensure_dataset()
+        job_config = self._bq.QueryJobConfig(
+            query_parameters=[
+                self._bq.ScalarQueryParameter("model_id", "STRING", model_id),
+                self._bq.ScalarQueryParameter("ts_ms", "INT64", int(ts_ms)),
+            ]
+        )
+        sql = f"""
+        UPDATE `{self.project}.{self.dataset}.tote_params`
+        SET model_id = @model_id,
+            ts_ms = @ts_ms,
+            updated_ts = CURRENT_TIMESTAMP()
+        """
+        client.query(sql, job_config=job_config).result()
 
     # --- generic helpers ---
     def _ensure_dataset(self):
@@ -2207,6 +2086,404 @@ class BigQuerySink:
         job = client.query(sql)
         job.result()
 
+        # vw_sf_strengths_from_win_horse: derive fallback runner strengths from WIN probable odds
+        # Drop the legacy view so we can install a materialized view under the same name.
+        try:
+            client.query(f"DROP VIEW IF EXISTS `{ds}.vw_sf_strengths_from_win_horse`").result()
+        except Exception:
+            pass
+
+        sql = f"""
+        CREATE OR REPLACE MATERIALIZED VIEW `{ds}.mv_sf_strengths_from_win_horse` AS
+        WITH sf AS (
+          SELECT product_id, event_id
+          FROM `{ds}.tote_products`
+          WHERE UPPER(bet_type) = 'SUPERFECTA'
+        ),
+        win AS (
+          SELECT event_id, product_id AS win_product_id
+          FROM `{ds}.tote_products`
+          WHERE UPPER(bet_type) = 'WIN'
+        ),
+        paired AS (
+          SELECT sf.product_id, sf.event_id, win.win_product_id
+          FROM sf
+          JOIN win USING(event_id)
+        ),
+        parsed_odds AS (
+          SELECT
+            SAFE_CAST(JSON_EXTRACT_SCALAR(prod, '$.id') AS STRING) AS product_id,
+            COALESCE(
+              JSON_EXTRACT_SCALAR(line, '$.legs.lineSelections[0].selectionId'),
+              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId')
+            ) AS selection_id,
+            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds.decimal') AS FLOAT64) AS decimal_odds,
+            r.fetched_ts
+          FROM `{ds}.raw_tote_probable_odds` r,
+          UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
+          UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line
+          WHERE JSON_EXTRACT_SCALAR(line, '$.odds.decimal') IS NOT NULL
+        ),
+        latest_odds AS (
+          SELECT product_id, selection_id, decimal_odds
+          FROM (
+            SELECT
+              product_id,
+              selection_id,
+              decimal_odds,
+              ROW_NUMBER() OVER (PARTITION BY product_id, selection_id ORDER BY fetched_ts DESC) AS rn
+            FROM parsed_odds
+            WHERE selection_id IS NOT NULL AND decimal_odds IS NOT NULL AND decimal_odds > 0
+              AND product_id IS NOT NULL
+          )
+          WHERE rn = 1
+        ),
+        selection_map AS (
+          SELECT product_id, selection_id, number AS cloth_number
+          FROM `{ds}.tote_product_selections`
+        ),
+        competitors AS (
+          SELECT
+            e.event_id,
+            SAFE_CAST(JSON_VALUE(comp, '$.details.clothNumber') AS INT64) AS cloth_number,
+            JSON_VALUE(comp, '$.id') AS horse_id
+          FROM `{ds}.tote_events` e,
+          UNNEST(IFNULL(JSON_EXTRACT_ARRAY(e.competitors_json, '$'), [])) AS comp
+        ),
+        weights AS (
+          SELECT
+            p.product_id,
+            p.event_id,
+            c.horse_id AS runner_id,
+            SAFE_DIVIDE(1.0, lo.decimal_odds) AS weight
+          FROM paired p
+          JOIN selection_map sel
+            ON sel.product_id = p.win_product_id
+          JOIN latest_odds lo
+            ON lo.product_id = p.win_product_id AND lo.selection_id = sel.selection_id
+          JOIN competitors c
+            ON c.event_id = p.event_id
+           AND c.cloth_number IS NOT NULL
+           AND sel.cloth_number IS NOT NULL
+           AND c.cloth_number = sel.cloth_number
+          WHERE c.horse_id IS NOT NULL
+        ),
+        sums AS (
+          SELECT product_id, SUM(weight) AS total_weight
+          FROM weights
+          GROUP BY product_id
+        )
+        SELECT
+          w.product_id,
+          w.event_id,
+          w.runner_id,
+          SAFE_DIVIDE(w.weight, NULLIF(s.total_weight, 0)) AS strength
+        FROM weights w
+        JOIN sums s USING(product_id)
+        WHERE SAFE_DIVIDE(w.weight, NULLIF(s.total_weight, 0)) IS NOT NULL;
+        """
+        client.query(sql).result()
+
+        sql = f"""
+        CREATE OR REPLACE VIEW `{ds}.vw_sf_strengths_from_win_horse` AS
+        SELECT * FROM `{ds}.mv_sf_strengths_from_win_horse`;
+        """
+        client.query(sql).result()
+
+        # vw_superfecta_runner_strength_any: prefer model strengths, fall back to WIN odds-derived weights
+        sql = f"""
+        CREATE OR REPLACE VIEW `{ds}.vw_superfecta_runner_strength_any` AS
+        WITH pred AS (
+          SELECT product_id, event_id, runner_id, strength
+          FROM `{ds}.vw_superfecta_runner_strength`
+        ),
+        fallback AS (
+          SELECT product_id, event_id, runner_id, strength
+          FROM `{ds}.mv_sf_strengths_from_win_horse`
+        ),
+        pred_products AS (
+          SELECT DISTINCT product_id FROM pred
+        )
+        SELECT p.product_id, p.event_id, p.runner_id, p.strength
+        FROM pred p
+        UNION ALL
+        SELECT f.product_id, f.event_id, f.runner_id, f.strength
+        FROM fallback f
+        LEFT JOIN pred_products pp USING(product_id)
+        WHERE pp.product_id IS NULL;
+        """
+        client.query(sql).result()
+
+        # Table function: enumerate permutations using any available strengths (model or WIN odds fallback)
+        sql = f"""
+        CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_superfecta_perms_any`(
+          in_product_id STRING,
+          top_n INT64
+        )
+        RETURNS TABLE<
+          product_id STRING,
+          h1 STRING, h2 STRING, h3 STRING, h4 STRING,
+          p FLOAT64,
+          line_cost_cents INT64
+        > AS (
+          WITH runners AS (
+            SELECT product_id, runner_id, strength,
+                   ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY strength DESC) AS rnk
+            FROM `{ds}.vw_superfecta_runner_strength_any`
+            WHERE product_id = in_product_id
+          ), top_r AS (
+            SELECT * FROM runners WHERE rnk <= top_n
+          ), tot AS (
+            SELECT product_id, SUM(strength) AS sum_s
+            FROM top_r
+            GROUP BY product_id
+          )
+          SELECT
+            tr1.product_id,
+            tr1.runner_id AS h1,
+            tr2.runner_id AS h2,
+            tr3.runner_id AS h3,
+            tr4.runner_id AS h4,
+            SAFE_DIVIDE(tr1.strength, t.sum_s)
+            * SAFE_DIVIDE(tr2.strength, t.sum_s - tr1.strength)
+            * SAFE_DIVIDE(tr3.strength, t.sum_s - tr1.strength - tr2.strength)
+            * SAFE_DIVIDE(tr4.strength, t.sum_s - tr1.strength - tr2.strength - tr3.strength) AS p,
+            1 AS line_cost_cents
+          FROM top_r tr1
+          JOIN top_r tr2 ON tr2.runner_id != tr1.runner_id
+          JOIN top_r tr3 ON tr3.runner_id NOT IN (tr1.runner_id, tr2.runner_id)
+          JOIN top_r tr4 ON tr4.runner_id NOT IN (tr1.runner_id, tr2.runner_id, tr3.runner_id)
+          JOIN tot t ON t.product_id = tr1.product_id
+        );
+        """
+        job = client.query(sql)
+        job.result()
+
+        # Table function: legacy alias returning the same permutations as tf_superfecta_perms_any
+        sql = f"""
+        CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_superfecta_perms_horse_any`(
+          in_product_id STRING,
+          top_n INT64
+        )
+        RETURNS TABLE<
+          product_id STRING,
+          h1 STRING, h2 STRING, h3 STRING, h4 STRING,
+          p FLOAT64,
+          line_cost_cents INT64
+        > AS (
+          SELECT * FROM `{ds}.tf_superfecta_perms_any`(in_product_id, top_n)
+        );
+        """
+        job = client.query(sql)
+        job.result()
+
+        # Table function: Superfecta backtest using model or fallback strengths
+        sql = f"""
+        CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_sf_backtest_horse_any`(
+          start_date DATE,
+          end_date DATE,
+          top_n INT64,
+          coverage FLOAT64
+        )
+        RETURNS TABLE<
+          product_id STRING,
+          event_id STRING,
+          event_name STRING,
+          venue STRING,
+          country STRING,
+          start_iso STRING,
+          total_net FLOAT64,
+          total_lines INT64,
+          winner_rank INT64,
+          winner_p FLOAT64,
+          cover_lines INT64,
+          hit_at_coverage BOOL
+        > AS (
+          WITH params AS (
+            SELECT
+              IFNULL(top_n, 10) AS top_n,
+              GREATEST(0.0, LEAST(IFNULL(coverage, 0.0), 1.0)) AS coverage
+          ),
+          prods AS (
+            SELECT
+              p.product_id,
+              p.event_id,
+              p.event_name,
+              COALESCE(e.venue, p.venue) AS venue,
+              e.country,
+              p.start_iso,
+              p.total_net
+            FROM `{ds}.tote_products` p
+            LEFT JOIN `{ds}.tote_events` e USING(event_id)
+            WHERE UPPER(p.bet_type) = 'SUPERFECTA'
+              AND DATE(SUBSTR(p.start_iso,1,10)) BETWEEN start_date AND end_date
+              AND UPPER(COALESCE(p.status, '')) IN ('CLOSED','SETTLED','RESULTED')
+          ),
+          winners AS (
+            SELECT event_id,
+                   MAX(IF(finish_pos = 1, horse_id, NULL)) AS h1,
+                   MAX(IF(finish_pos = 2, horse_id, NULL)) AS h2,
+                   MAX(IF(finish_pos = 3, horse_id, NULL)) AS h3,
+                   MAX(IF(finish_pos = 4, horse_id, NULL)) AS h4
+            FROM `{ds}.hr_horse_runs`
+            WHERE finish_pos IS NOT NULL AND finish_pos BETWEEN 1 AND 4
+            GROUP BY event_id
+          ),
+          perms AS (
+            SELECT
+              pr.product_id,
+              t.h1, t.h2, t.h3, t.h4,
+              t.p
+            FROM prods pr,
+                 `{ds}.tf_superfecta_perms_any`(pr.product_id, (SELECT top_n FROM params)) AS t
+          ),
+          ranked AS (
+            SELECT
+              product_id,
+              h1, h2, h3, h4,
+              p,
+              ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY p DESC) AS rn,
+              COUNT(*) OVER (PARTITION BY product_id) AS total_lines
+            FROM perms
+          ),
+          answers AS (
+            SELECT pr.product_id, pr.event_id, w.h1, w.h2, w.h3, w.h4
+            FROM prods pr
+            JOIN winners w USING(event_id)
+            WHERE w.h1 IS NOT NULL AND w.h2 IS NOT NULL AND w.h3 IS NOT NULL AND w.h4 IS NOT NULL
+          ),
+          hits AS (
+            SELECT
+              a.product_id,
+              a.event_id,
+              r.total_lines,
+              r.rn AS winner_rank,
+              r.p AS winner_p
+            FROM answers a
+            JOIN ranked r
+              ON r.product_id = a.product_id
+             AND r.h1 = a.h1 AND r.h2 = a.h2 AND r.h3 = a.h3 AND r.h4 = a.h4
+          ),
+          coverage_calc AS (
+            SELECT
+              product_id,
+              MAX(total_lines) AS total_lines,
+              GREATEST(1, CAST(ROUND((SELECT coverage FROM params) * MAX(total_lines)) AS INT64)) AS cover_lines
+            FROM ranked
+            GROUP BY product_id
+          )
+          SELECT
+            pr.product_id,
+            pr.event_id,
+            pr.event_name,
+            pr.venue,
+            pr.country,
+            pr.start_iso,
+            pr.total_net,
+            c.total_lines,
+            h.winner_rank,
+            h.winner_p,
+            c.cover_lines,
+            (h.winner_rank IS NOT NULL AND h.winner_rank <= c.cover_lines) AS hit_at_coverage
+          FROM prods pr
+          LEFT JOIN coverage_calc c USING(product_id)
+          LEFT JOIN hits h USING(product_id, event_id)
+        );
+        """
+        job = client.query(sql)
+        job.result()
+
+        # Table function: Expected Value grid over coverage using permutations and guardrail params
+        sql = f"""
+        CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_perm_ev_grid`(
+          in_product_id STRING,
+          in_top_n INT64,
+          O NUMERIC,
+          S NUMERIC,
+          t FLOAT64,
+          R NUMERIC,
+          inc BOOL,
+          mult FLOAT64,
+          f FLOAT64,
+          conc FLOAT64,
+          mi FLOAT64
+        )
+        RETURNS TABLE<
+          lines_covered INT64,
+          hit_rate FLOAT64,
+          expected_return FLOAT64,
+          expected_profit FLOAT64,
+          f_share_used FLOAT64
+        > AS (
+          WITH perms AS (
+            SELECT ROW_NUMBER() OVER (ORDER BY p DESC) AS rn, p, h1, h2, h3, h4
+            FROM `{ds}.tf_superfecta_perms_any`(in_product_id, in_top_n)
+          ), odds AS (
+            SELECT CAST(cloth_number AS STRING) AS sel_id, CAST(decimal_odds AS FLOAT64) AS odds
+            FROM `{ds}.vw_tote_probable_odds`
+            WHERE product_id = in_product_id
+          ), parms AS (
+            SELECT
+              GREATEST(0.1, 1.0 - 0.6 * mi) AS beta,
+              1.0 + 2.0 * conc AS gamma,
+              CAST(O AS FLOAT64) AS O_f,
+              CAST(S AS FLOAT64) AS S_f
+          ), scored AS (
+            SELECT
+              p.rn,
+              p.p,
+              POW(p.p, parms.gamma) AS w_raw,
+              POW(1.0 / NULLIF(o1.odds, 0.0), parms.beta)
+              * POW(1.0 / NULLIF(o2.odds, 0.0), parms.beta)
+              * POW(1.0 / NULLIF(o3.odds, 0.0), parms.beta)
+              * POW(1.0 / NULLIF(o4.odds, 0.0), parms.beta) AS q_raw
+            FROM perms p
+            CROSS JOIN parms
+            LEFT JOIN odds o1 ON o1.sel_id = CAST(p.h1 AS STRING)
+            LEFT JOIN odds o2 ON o2.sel_id = CAST(p.h2 AS STRING)
+            LEFT JOIN odds o3 ON o3.sel_id = CAST(p.h3 AS STRING)
+            LEFT JOIN odds o4 ON o4.sel_id = CAST(p.h4 AS STRING)
+          ), metrics AS (
+            SELECT
+              s.rn,
+              s.p,
+              s.w_raw,
+              s.q_raw,
+              SUM(s.p) OVER (ORDER BY s.rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum_prob,
+              SUM(s.w_raw) OVER (ORDER BY s.rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum_w,
+              SUM(s.q_raw) OVER (ORDER BY s.rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum_q
+            FROM scored s
+          ), enriched AS (
+            SELECT
+              m.*,
+              SAFE_DIVIDE((SELECT S_f FROM parms) * m.w_raw, NULLIF(m.cum_w, 0)) AS stake_i,
+              SAFE_DIVIDE((SELECT O_f FROM parms) * (1.0 - mi) * m.q_raw, NULLIF(m.cum_q, 0)) AS others_i
+            FROM metrics m
+          ), with_f AS (
+            SELECT
+              e.*,
+              SAFE_DIVIDE(e.stake_i, e.stake_i + e.others_i) AS f_i
+            FROM enriched e
+          ), agg AS (
+            SELECT
+              rn AS lines_covered,
+              cum_prob AS hit_rate,
+              SUM(p * f_i) OVER (ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS sum_pf,
+              SUM(p) OVER (ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS sum_p
+            FROM with_f
+          )
+          SELECT
+            lines_covered,
+            hit_rate,
+            sum_pf * (mult * (((1.0 - t) * ((SELECT O_f FROM parms) + IF(inc, (SELECT S_f FROM parms), 0.0))) + R)) AS expected_return,
+            sum_pf * (mult * (((1.0 - t) * ((SELECT O_f FROM parms) + IF(inc, (SELECT S_f FROM parms), 0.0))) + R)) - CAST(S AS FLOAT64) AS expected_profit,
+            SAFE_DIVIDE(sum_pf, NULLIF(sum_p, 0)) AS f_share_used
+          FROM agg
+        );
+        """
+        job = client.query(sql)
+        job.result()
+
         # vw_runner_features: join runner features with horse name (useful for UI/ML)
         if self._table_exists("features_runner_event"):
             sql = f"""
@@ -2229,6 +2506,71 @@ class BigQuerySink:
               f.days_since_last_run
             FROM `{ds}.features_runner_event` f
             LEFT JOIN `{ds}.hr_horses` h ON h.horse_id = f.horse_id;
+            """
+            job = client.query(sql)
+            job.result()
+
+            sql = f"""
+            CREATE OR REPLACE VIEW `{ds}.vw_superfecta_runner_training_features` AS
+            SELECT
+              tr.event_id,
+              tr.product_id,
+              tr.event_date,
+              tr.venue,
+              tr.country,
+              tr.total_net,
+              tr.going,
+              tr.weather_temp_c,
+              tr.weather_wind_kph,
+              tr.weather_precip_mm,
+              tr.horse_id,
+              tr.cloth_number,
+              tr.finish_pos,
+              tr.status,
+              f.recent_runs,
+              f.avg_finish,
+              f.wins_last5,
+              f.places_last5,
+              f.days_since_last_run,
+              f.weight_kg,
+              f.weight_lbs
+            FROM `{ds}.vw_superfecta_training` tr
+            LEFT JOIN `{ds}.features_runner_event` f
+              ON tr.event_id = f.event_id AND tr.horse_id = f.horse_id;
+            """
+            job = client.query(sql)
+            job.result()
+
+            sql = f"""
+            CREATE OR REPLACE VIEW `{ds}.vw_superfecta_runner_live_features` AS
+            SELECT
+              p.product_id,
+              f.event_id,
+              DATE(SUBSTR(COALESCE(te.start_iso, p.start_iso),1,10)) AS event_date,
+              p.event_name,
+              COALESCE(te.venue, p.venue) AS venue,
+              te.country,
+              p.start_iso,
+              COALESCE(p.status, te.status) AS status,
+              p.total_net,
+              COALESCE(rc.going, f.going) AS going,
+              COALESCE(rc.weather_temp_c, f.weather_temp_c) AS weather_temp_c,
+              COALESCE(rc.weather_wind_kph, f.weather_wind_kph) AS weather_wind_kph,
+              COALESCE(rc.weather_precip_mm, f.weather_precip_mm) AS weather_precip_mm,
+              f.horse_id,
+              f.cloth_number,
+              f.recent_runs,
+              f.avg_finish,
+              f.wins_last5,
+              f.places_last5,
+              f.days_since_last_run,
+              f.weight_kg,
+              f.weight_lbs
+            FROM `{ds}.tote_products` p
+            JOIN `{ds}.features_runner_event` f ON f.event_id = p.event_id AND f.horse_id IS NOT NULL
+            LEFT JOIN `{ds}.race_conditions` rc ON rc.event_id = p.event_id
+            LEFT JOIN `{ds}.tote_events` te ON te.event_id = p.event_id
+            WHERE UPPER(p.bet_type) = 'SUPERFECTA';
             """
             job = client.query(sql)
             job.result()
