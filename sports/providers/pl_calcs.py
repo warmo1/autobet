@@ -315,8 +315,8 @@ def calculate_pl_strategy(
     # --- Plackett-Luce Calculation ---
     runner_weights = []
     for r in runners:
-        if r.get("odds", 0) <= 1.0:
-            errors.append(f"Runner {r.get('name', 'Unknown')} odds must be greater than 1.0.")
+        if r.get("odds", 0) < 1.0:
+            errors.append(f"Runner {r.get('name', 'Unknown')} odds must be at least 1.0.")
             continue
         base_weight = 1.0 / r["odds"]
         if r.get("is_key"): base_weight *= key_horse_mult

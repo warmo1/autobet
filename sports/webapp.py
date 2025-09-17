@@ -1021,6 +1021,7 @@ def tote_calculators_page():
     is designed to be the primary tool for analyzing a race, showing runners,
     probable odds, pool size, and the results of both weighting and viability models.
     """
+    dataset_fq = f"{cfg.bq_project}.{cfg.bq_dataset}"
     # --- Refresh Logic ---
     # Optional refresh of products (OPEN) to update units (BQ-only)
     if request.method == "POST" and (request.form.get("refresh") == "1"):
@@ -1028,12 +1029,12 @@ def tote_calculators_page():
             from .providers.tote_api import ToteClient
             from .ingest.tote_products import ingest_products
             from .db import get_db
-            ds = _today_iso()
+            date_iso = _today_iso()
             client = ToteClient()
             sink = get_db()
             # Refresh selected bet type (default SUPERFECTA)
             sel_bt = (request.values.get("bet_type") or "SUPERFECTA").strip().upper()
-            ingest_products(sink, client, date_iso=ds, status="OPEN", first=400, bet_types=[sel_bt])
+            ingest_products(sink, client, date_iso=date_iso, status="OPEN", first=400, bet_types=[sel_bt])
             flash("Refreshed products and selection units from Tote API.", "success")
         except Exception as e:
             flash(f"Refresh failed: {e}", "error")
@@ -1050,7 +1051,15 @@ def tote_calculators_page():
         req_top_n = int(request.values.get("top_n", "7") or 7)
     except Exception:
         req_top_n = 7
-    coverage = max(0.0, min(1.0, float(request.values.get("coverage", "0.6") or 0.6)))
+    coverage_in_raw = request.values.get("coverage", "0.6")
+    try:
+        coverage_val = float(coverage_in_raw if coverage_in_raw not in (None, "") else 0.6)
+    except Exception:
+        coverage_val = 0.6
+    if coverage_val > 1.0:
+        coverage = max(0.0, min(1.0, coverage_val / 100.0))
+    else:
+        coverage = max(0.0, min(1.0, coverage_val))
 
     # Viability model parameters
     stake_per_line = float(request.values.get("stake_per_line", "0.10") or 0.10)
@@ -1068,10 +1077,12 @@ def tote_calculators_page():
     top_n = max(k_perm, min(10, req_top_n))
 
     # --- Filter Options ---
-    countries_df = sql_df("SELECT DISTINCT country FROM `autobet-470818.autobet.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+    countries_df = sql_df(
+        f"SELECT DISTINCT country FROM `{dataset_fq}.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country"
+    )
     # UI Improvement: Dynamic venue/course options based on other active filters.
     venues_df_sql = (
-        "SELECT DISTINCT COALESCE(e.venue,p.venue) AS venue FROM `autobet-470818.autobet.tote_products` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) "
+        f"SELECT DISTINCT COALESCE(e.venue,p.venue) AS venue FROM `{dataset_fq}.tote_products` p LEFT JOIN `{dataset_fq}.tote_events` e USING(event_id) "
         "WHERE UPPER(p.bet_type)=? AND COALESCE(p.status,'') <> '' AND COALESCE(e.venue,p.venue) IS NOT NULL AND COALESCE(e.venue,p.venue)<>''"
     )
     venues_df_params: list[object] = [bet_type]
@@ -1086,13 +1097,13 @@ def tote_calculators_page():
     venues_df = sql_df(venues_df_sql, params=tuple(venues_df_params))
 
     # --- Product List ---
-    opts_sql = """
+    opts_sql = f"""
         SELECT
           p.product_id, p.event_id, p.event_name, COALESCE(e.venue, p.venue) AS venue,
           p.start_iso, p.currency, p.total_gross, p.total_net, COALESCE(p.status,'') AS status,
-          (SELECT COUNT(1) FROM `autobet-470818.autobet.tote_product_selections` s WHERE s.product_id = p.product_id) AS n_runners
-        FROM `autobet-470818.autobet.vw_products_latest_totals` p
-        LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id)
+          (SELECT COUNT(1) FROM `{dataset_fq}.tote_product_selections` s WHERE s.product_id = p.product_id) AS n_runners
+        FROM `{dataset_fq}.vw_products_latest_totals` p
+        LEFT JOIN `{dataset_fq}.tote_events` e USING(event_id)
         WHERE UPPER(p.bet_type)=@bt
     """
     opts_params = {"bt": bet_type}
@@ -1108,278 +1119,326 @@ def tote_calculators_page():
     # --- Main Calculation Logic ---
     prod = None
     runners = []
-    # Weighting model outputs
-    top_lines = []
+
+    permutation_summary: dict[str, Any] | None = None
+    ev_grid_rows: list[dict[str, Any]] = []
+    chart_data: dict[str, Any] = {}
+    recommendation: dict[str, Any] | None = None
+    recommended_lines: list[dict[str, Any]] = []
+    target_lines_preview: list[dict[str, Any]] = []
     total_lines = 0
     cum_p = 0.0
     efficiency = None
-    # Viability model outputs
-    viab = None
-    grid = []
+    o_min = None
+    bankroll_total: float | None = None
+    take_rate_value: float | None = None
+    net_rollover_value: float | None = None
+    pool_gross_value: float | None = None
+    min_stake_per_line: float | None = None
+    market_inefficiency: float | None = None
+    concentration: float | None = None
+    dividend_multiplier = div_mult
 
     if product_id:
-        # 1. Fetch product, runners, probable odds, and pool size
-        prod_df = sql_df("SELECT * FROM `autobet-470818.autobet.tote_products` WHERE product_id=?", params=(product_id,))
-        if not prod_df.empty:
-            prod = prod_df.iloc[0].to_dict()
+        product_df = sql_df(
+            f"SELECT * FROM `{dataset_fq}.vw_products_latest_totals` WHERE product_id=@pid",
+            params={"pid": product_id},
+            cache_ttl=0,
+        )
+        if product_df.empty:
+            product_df = sql_df(
+                f"SELECT * FROM `{dataset_fq}.tote_products` WHERE product_id=@pid",
+                params={"pid": product_id},
+                cache_ttl=0,
+            )
+        if not product_df.empty:
+            prod = product_df.iloc[0].to_dict()
 
-        # Define t_val for breakeven calculation, using product's deduction_rate as default
-        t_default = float(prod.get("deduction_rate") or 0.30) if prod else 0.30
-        t_val = float(take_rate_in) if take_rate_in not in (None, "") else t_default
-        # Define R_val for breakeven calculation
-        R_val = float(net_rollover_in) if net_rollover_in not in (None, "") else (float(prod.get("rollover") or 0.0) if prod else 0.0)
-
-        df_sel = sql_df((
-            "SELECT selection_id, competitor, number, total_units FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=? AND leg_index=1 ORDER BY number"
-        ), params=(product_id,))
-        have_units = (not df_sel.empty) and df_sel["total_units"].notnull().any()
-        if have_units:
-            # Compute probable odds shares from selection units
-            df_sel["total_units"] = df_sel["total_units"].fillna(0.0)
-            s = float(df_sel["total_units"].sum()) or 0.0
-            if s > 0:
-                df_sel["pct_units"] = df_sel["total_units"] / s
-                df_sel["prob_odds"] = 1 / df_sel["pct_units"]
-            else:
-                df_sel["pct_units"] = 0.0
-                df_sel["prob_odds"] = None
-            runners = df_sel.to_dict("records")
-        elif _use_bq():
-            # Fallback to BigQuery probable odds view if units are not present locally
+        def _parse_float(val, default):
             try:
-                # First try by the same product_id (works if WIN product ids are identical)
-                bq_probs = sql_df(
-                    "SELECT CAST(cloth_number AS INT64) AS number, CAST(decimal_odds AS FLOAT64) AS decimal_odds FROM `autobet-470818.autobet.vw_tote_probable_odds` WHERE product_id = ?",
-                    params=(product_id,)
+                if val is None or val == "":
+                    return default
+                return float(val)
+            except Exception:
+                return default
+
+        def _parse_fraction(val, default):
+            parsed = _parse_float(val, default)
+            if parsed > 1.5:
+                return parsed / 100.0
+            return parsed
+
+        def _safe_float(val):
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return None
+
+        def _clamp01(val: float) -> float:
+            return max(0.0, min(1.0, val))
+
+        takeout_default = float(prod.get("deduction_rate") or 0.30) if prod else 0.30
+        rollover_default = float(prod.get("rollover") or 0.0) if prod else 0.0
+        pool_gross_default = float(prod.get("total_gross") or 0.0) if prod else 0.0
+
+        take_rate_value = _clamp01(_parse_fraction(take_rate_in, takeout_default))
+        net_rollover_value = _parse_float(net_rollover_in, rollover_default)
+        pool_gross_value = max(0.0, _parse_float(request.values.get("pool_gross") or request.values.get("pool_gross_other"), pool_gross_default))
+        bankroll_total = max(0.0, _parse_float(request.values.get("bankroll"), 50.0))
+        min_stake_per_line = max(0.0, _parse_float(request.values.get("min_stake_per_line"), stake_per_line))
+        concentration_raw = _parse_float(request.values.get("concentration"), 25.0)
+        concentration = _clamp01(concentration_raw if concentration_raw <= 1.0 else concentration_raw / 100.0)
+        market_raw = _parse_float(request.values.get("market_inefficiency"), 10.0)
+        market_inefficiency = _clamp01(market_raw if market_raw <= 1.0 else market_raw / 100.0)
+        dividend_multiplier = _parse_float(request.values.get("div_mult"), div_mult)
+        f_share_override = f_fix
+
+        # Runner information (units + probable odds)
+        runners = []
+        selections_df = sql_df(
+            f"SELECT selection_id, competitor, number, total_units FROM `{dataset_fq}.tote_product_selections` "
+            "WHERE product_id=@pid AND leg_index=1 ORDER BY SAFE_CAST(number AS INT64)",
+            params={"pid": product_id},
+            cache_ttl=0,
+        )
+        total_units_val = 0.0
+        if not selections_df.empty:
+            selections_df["total_units"] = selections_df["total_units"].fillna(0.0)
+            total_units_val = float(selections_df["total_units"].sum()) or 0.0
+
+        odds_df = sql_df(
+            f"SELECT CAST(cloth_number AS INT64) AS number, CAST(decimal_odds AS FLOAT64) AS decimal_odds FROM `{dataset_fq}.vw_tote_probable_odds` "
+            "WHERE product_id=@pid ORDER BY number",
+            params={"pid": product_id},
+            cache_ttl=0,
+        )
+        odds_map: dict[int, float] = {}
+        if not odds_df.empty:
+            for _, row in odds_df.iterrows():
+                num_val = row.get("number")
+                odds_val = row.get("decimal_odds")
+                try:
+                    num_int = int(num_val) if num_val is not None and not pd.isna(num_val) else None
+                except Exception:
+                    num_int = None
+                odds_float = _safe_float(odds_val)
+                if num_int is not None and odds_float and odds_float > 0:
+                    odds_map[num_int] = odds_float
+
+        if not selections_df.empty:
+            for _, row in selections_df.iterrows():
+                num_val = row.get("number")
+                try:
+                    num_int = int(num_val) if num_val is not None and not pd.isna(num_val) else None
+                except Exception:
+                    num_int = None
+                competitor = row.get("competitor")
+                units = float(row.get("total_units") or 0.0)
+                share = (units / total_units_val) if total_units_val > 0 else None
+                odds_est = odds_map.get(num_int) if num_int is not None else None
+                if odds_est is None and share and share > 0:
+                    odds_est = 1.0 / share
+                runners.append(
+                    {
+                        "number": num_int,
+                        "competitor": competitor,
+                        "total_units": units,
+                        "pct_units": share,
+                        "prob_odds": odds_est,
+                    }
                 )
-                # If empty, map via event_id to the WIN product for the same event
-                if (bq_probs.empty) and prod and prod.get('event_id'):
-                    bq_probs = sql_df(
-                        "SELECT CAST(o.cloth_number AS INT64) AS number, CAST(o.decimal_odds AS FLOAT64) AS decimal_odds "
-                        "FROM `autobet-470818.autobet.vw_tote_probable_odds` o JOIN `autobet-470818.autobet.tote_products` p ON p.product_id = o.product_id "
-                        "WHERE p.event_id = ? AND UPPER(p.bet_type)='WIN'",
-                        params=(prod.get('event_id'),)
-                    )
-                if not bq_probs.empty:
-                    # Compute strengths and normalized shares
-                    bq_probs = bq_probs[bq_probs["decimal_odds"].notnull() & (bq_probs["decimal_odds"] > 0)]
-                    if not bq_probs.empty:
-                        bq_probs["strength"] = 1.0 / bq_probs["decimal_odds"].astype(float)
-                        tot = float(bq_probs["strength"].sum()) or 0.0
-                        bq_probs["pct_units"] = bq_probs["strength"] / tot if tot > 0 else 0.0
-                        bq_probs.rename(columns={"decimal_odds": "prob_odds"}, inplace=True)
-                        # Left-join competitor names from selections when available
-                        if not df_sel.empty:
-                            runners_df = df_sel[["number","competitor"]].copy()
-                            bq_probs = bq_probs.merge(runners_df, on="number", how="left")
-                        runners = bq_probs.fillna(0).to_dict("records")
-                    else:
-                        flash("No probable odds available in BigQuery for this product.", "warning")
-                else:
-                    flash("No probable odds found in BigQuery for this product.", "warning")
-            except Exception as e:
-                flash(f"Probable odds fetch (BQ) failed: {e}", "error")
-        # Skip legacy local fallback; rely solely on BigQuery probable odds or selection units
-        # If no runners found, the calculators will show a warning below.
-        # Prefer BigQuery permutation function for SUPERFECTA
-        used_bq_perms = False
+
+        if not runners and not odds_df.empty:
+            for _, row in odds_df.iterrows():
+                num_val = row.get("number")
+                try:
+                    num_int = int(num_val) if num_val is not None and not pd.isna(num_val) else None
+                except Exception:
+                    num_int = None
+                runners.append(
+                    {
+                        "number": num_int,
+                        "competitor": None,
+                        "total_units": 0.0,
+                        "pct_units": None,
+                        "prob_odds": _safe_float(row.get("decimal_odds")),
+                    }
+                )
+
+        perms_df = None
         if _use_bq() and bet_type == "SUPERFECTA":
             try:
-                # Prefer the *_any function which works with predictions or odds-derived strengths
                 perms_df = sql_df(
-                    f"SELECT * FROM `{cfg.bq_project}.{cfg.bq_dataset}.tf_superfecta_perms_any`(@pid, @top_n)",
+                    f"SELECT * FROM `{dataset_fq}.tf_superfecta_perms_any`(@pid, @top_n)",
                     params={"pid": product_id, "top_n": top_n},
                     cache_ttl=0,
                 )
-                if (perms_df is None) or perms_df.empty:
-                    # Fallback to the horse_any variant if available (uses event-level WIN odds mapping)
-                    try:
-                        perms_df = sql_df(
-                            f"SELECT * FROM `{cfg.bq_project}.{cfg.bq_dataset}.tf_superfecta_perms_horse_any`(@pid, @top_n)",
-                            params={"pid": product_id, "top_n": top_n},
-                            cache_ttl=0,
-                        )
-                    except Exception:
-                        perms_df = None
-                if perms_df is not None and not perms_df.empty:
-                    # Sort by probability descending
-                    perms_df = perms_df.sort_values("p", ascending=False).reset_index(drop=True)
-                    total_lines = int(len(perms_df))
-                    target_lines = max(1, int(round(total_lines * coverage)))
-                    # Compute cumulative coverage and take top 30 to show
-                    cum_vals = perms_df["p"].cumsum()
-                    cum_p = float(cum_vals.iloc[target_lines - 1]) if target_lines <= total_lines else float(cum_vals.iloc[-1])
-                    rows = []
-                    show_n = min(30, total_lines)
-                    for i in range(show_n):
-                        r = perms_df.iloc[i]
-                        rows.append({
-                            "rank": i + 1,
-                            "h1": r.get("h1"),
-                            "h2": r.get("h2"),
-                            "h3": r.get("h3"),
-                            "h4": r.get("h4"),
-                            "p": float(r.get("p") or 0.0),
-                            "cum_p": float(cum_vals.iloc[i]),
-                        })
-                    top_lines = rows
-                    random_cov = target_lines / float(total_lines or 1)
-                    efficiency = (cum_p / random_cov) if random_cov > 0 else None
-                    # Breakeven using S lines
-                    S = stake_per_line * float(target_lines)
-                    try:
-                        if f_share is not None and f_share > 0 and (1.0 - t_val) > 0:
-                            o_min_val = (S / (f_share * (1.0 - t_val))) - S
-                        else:
-                            o_min_val = None
-                    except Exception:
-                        o_min_val = None
-                    o_min = o_min_val
-                    used_bq_perms = True
-            except Exception as e:
-                # Fall through to local calculation if BQ fails
-                try:
-                    flash(f"BigQuery permutation function error: {e}", "warning")
-                except Exception:
-                    pass
+            except Exception as exc:
+                flash(f"BigQuery permutation function error: {exc}", "error")
 
-        # Fallback: local PL enumeration (only if BQ not used)
-        if not used_bq_perms:
-            runners = []
-
-            # Build PL permutations for superfecta
-            # Sort top N by share
-            src_df = None
-            if have_units:
-                src_df = df_sel
-            else:
-                try:
-                    import pandas as _pd
-                    src_df = _pd.DataFrame(runners)
-                except Exception:
-                    src_df = None
-            if src_df is None or src_df.empty or ("pct_units" not in src_df.columns):
-                flash("Not enough data to compute permutations.", "warning")
-                return render_template(
-                    "tote_calculators.html",
-                    options=(opts.to_dict("records") if not opts.empty else []),
-                    bet_type=bet_type,
-                    product_id=product_id,
-                    params={
-                        "top_n": top_n,
-                        "coverage": coverage,
-                        "stake_per_line": stake_per_line,
-                        "f_share": f_share,
-                        "date": date_filter,
-                    },
-                    runners=runners,
-                    total_lines=0,
-                    top_lines=[],
-                    cum_p=0.0,
-                    efficiency=None,
-                    o_min=None,
-                    countries=(countries_df['country'].tolist() if not countries_df.empty else []),
-                    country=country,
-                    venues=(venues_df['venue'].tolist() if not venues_df.empty else []),
-                    venue=venue,
-                )
-            top_df = src_df.sort_values("pct_units", ascending=False).head(top_n)
-            items = [(str(r["number"] if "number" in r else r.get("selection_id")), float(r["pct_units"])) for _, r in top_df.iterrows()]
-            # Keep only positive strengths
-            items = [(rid, p) for rid, p in items if p and p > 0]
-            # K positions needed for bet type
-            k = 4 if bet_type == "SUPERFECTA" else (3 if bet_type == "TRIFECTA" else 2)
-            if len(items) < k:
-                flash("Not enough runners with non-zero shares to build permutations for this bet type.", "warning")
-                runners = df_sel.to_dict("records")
-                return render_template(
-                    "tote_calculators.html",
-                    options=(opts.to_dict("records") if not opts.empty else []),
-                    bet_type=bet_type,
-                    product_id=product_id,
-                    params={
-                        "top_n": top_n,
-                        "coverage": coverage,
-                        "stake_per_line": stake_per_line,
-                        "f_share": f_share,
-                        "date": date_filter,
-                    },
-                    runners=runners,
-                    total_lines=0,
-                    top_lines=[],
-                    cum_p=0.0,
-                    efficiency=None,
-                    o_min=None,
-                    countries=(countries_df['country'].tolist() if not countries_df.empty else []),
-                    country=country,
-                    venues=(venues_df['venue'].tolist() if not venues_df.empty else []),
-                    venue=venue,
-                )
-            # Normalize strengths
-            tot = sum(p for _, p in items) or 1.0
-            strengths = [(rid, p / tot) for rid, p in items]
-
-            # Enumerate permutations with PL probability (k by bet type)
-            import itertools
-            perms = []
-            ids = [rid for rid, _ in strengths]
-            s_map = {rid: p for rid, p in strengths}
-            for tup in itertools.permutations(ids, k):
-                s_total = sum(s_map.values())
-                num = 1.0
-                remaining = s_total
-                for idx, rid in enumerate(tup):
-                    if remaining <= 0:
-                        num = 0.0
-                        break
-                    num *= (s_map[rid] / remaining)
-                    remaining = remaining - s_map[rid]
-                line = {f"h{i+1}": tup[i] for i in range(k)}
-                line.update({"p": num})
-                perms.append(line)
-            perms.sort(key=lambda x: x["p"], reverse=True)
-            total_lines = len(perms)
-            target_lines = max(1, int(round(total_lines * coverage)))
-            cum = 0.0
-            top_lines = []
-            for i, line in enumerate(perms, start=1):
-                if i <= target_lines:
-                    cum += line["p"]
-                    if len(top_lines) < 30:
-                        top_lines.append({"rank": i, **line, "cum_p": cum})
-            cum_p = cum
-            random_cov = target_lines / float(total_lines or 1)
-            efficiency = (cum_p / random_cov) if random_cov > 0 else None
-
-            # Breakeven using S lines
-            S = stake_per_line * float(target_lines)
-            try:
-                # Safe calculation for O_min
-                if f_share is not None and f_share > 0 and (1.0 - t_val) > 0:
-                    o_min_val = (S / (f_share * (1.0 - t_val))) - S
-                else:
-                    o_min_val = None
-            except Exception:
-                o_min_val = None
-            o_min = o_min_val
+        if perms_df is None or perms_df.empty:
+            flash("BigQuery did not return permutations for this product.", "warning")
         else:
-            flash("No selection units found for this product yet. Click Refresh to pull latest from Tote.", "warning")
+            perms_df = perms_df.sort_values("p", ascending=False).reset_index(drop=True)
+            total_lines = int(len(perms_df))
+            horse_cols = [col for col in ("h1", "h2", "h3", "h4", "h5", "h6") if col in perms_df.columns]
+            if not horse_cols:
+                flash("Permutation output missing runner columns.", "error")
+            else:
+                cum_vals = perms_df["p"].cumsum()
+                target_lines = max(1, min(total_lines, int(round(total_lines * coverage)))) if total_lines else 0
+                coverage_prob = float(cum_vals.iloc[target_lines - 1]) if total_lines and target_lines > 0 else 0.0
+                cum_p = coverage_prob
+                random_cov = (target_lines / float(total_lines)) if total_lines else 0.0
+                efficiency = (coverage_prob / random_cov) if random_cov else None
+
+                def _build_lines(limit: int) -> list[dict[str, Any]]:
+                    limit = min(limit, total_lines)
+                    out: list[dict[str, Any]] = []
+                    for idx in range(limit):
+                        row = perms_df.iloc[idx]
+                        line_vals = [str(row.get(col)) for col in horse_cols]
+                        out.append(
+                            {
+                                "rank": idx + 1,
+                                "line": " - ".join(line_vals),
+                                "probability": float(row.get("p") or 0.0),
+                                "cum_probability": float(cum_vals.iloc[idx]),
+                            }
+                        )
+                    return out
+
+                preview_lines = _build_lines(min(30, total_lines))
+                target_lines_preview = _build_lines(min(target_lines, 30)) if target_lines else []
+
+                permutation_summary = {
+                    "total_lines": total_lines,
+                    "target_lines": target_lines,
+                    "target_hit_rate": coverage_prob,
+                    "random_coverage": random_cov,
+                    "efficiency": efficiency,
+                    "preview_lines": preview_lines,
+                }
+
+                # Breakeven using S lines (for compatibility with legacy UI)
+                S_target = stake_per_line * float(target_lines)
+                try:
+                    if f_share_override is not None and f_share_override > 0 and (1.0 - take_rate_value) > 0:
+                        o_min = (S_target / (f_share_override * (1.0 - take_rate_value))) - S_target
+                    else:
+                        o_min = None
+                except Exception:
+                    o_min = None
+
+                # Expected value grid across coverage levels
+                grid_df = None
+                try:
+                    grid_df = sql_df(
+                        f"SELECT * FROM `{dataset_fq}.tf_perm_ev_grid`(@pid,@top_n,@O,@S,@t,@R,@inc,@mult,@f,@conc,@mi)",
+                        params={
+                            "pid": product_id,
+                            "top_n": top_n,
+                            "O": pool_gross_value,
+                            "S": bankroll_total,
+                            "t": take_rate_value,
+                            "R": net_rollover_value,
+                            "inc": True if inc_self else False,
+                            "mult": dividend_multiplier,
+                            "f": f_share_override,
+                            "conc": concentration,
+                            "mi": market_inefficiency,
+                        },
+                        cache_ttl=0,
+                    )
+                except Exception as exc:
+                    flash(f"EV grid query failed: {exc}", "error")
+
+                if grid_df is not None and not grid_df.empty:
+                    best_row = None
+                    ev_grid_rows = []
+                    for row in grid_df.to_dict("records"):
+                        lines_cov = int(row.get("lines_covered") or 0)
+                        hit_rate = _safe_float(row.get("hit_rate"))
+                        expected_return = _safe_float(row.get("expected_return"))
+                        expected_profit = _safe_float(row.get("expected_profit"))
+                        f_used = _safe_float(row.get("f_share_used"))
+                        stake_per_line_rec = (bankroll_total / lines_cov) if lines_cov else None
+                        feasible = True
+                        if min_stake_per_line and stake_per_line_rec is not None and stake_per_line_rec + 1e-9 < min_stake_per_line:
+                            feasible = False
+                        ev_row = {
+                            "lines_covered": lines_cov,
+                            "hit_rate": hit_rate,
+                            "expected_return": expected_return,
+                            "expected_profit": expected_profit,
+                            "f_share_used": f_used,
+                            "stake_per_line": stake_per_line_rec,
+                            "feasible": feasible,
+                        }
+                        ev_grid_rows.append(ev_row)
+
+                    search_rows = [r for r in ev_grid_rows if r["feasible"]] or ev_grid_rows
+                    if search_rows:
+                        best_row = max(
+                            search_rows,
+                            key=lambda r: (r["expected_profit"] if r["expected_profit"] is not None else float("-inf")),
+                        )
+
+                    if best_row and best_row.get("lines_covered"):
+                        rec_lines = int(best_row["lines_covered"])
+                        recommended_lines = _build_lines(min(rec_lines, 30))
+                        recommendation = {
+                            "lines": rec_lines,
+                            "coverage_pct": (rec_lines / total_lines * 100.0) if total_lines else None,
+                            "hit_rate": best_row.get("hit_rate"),
+                            "expected_profit": best_row.get("expected_profit"),
+                            "expected_return": best_row.get("expected_return"),
+                            "stake_per_line": best_row.get("stake_per_line"),
+                            "stake_total": bankroll_total,
+                            "f_share_used": best_row.get("f_share_used"),
+                            "feasible": best_row.get("feasible"),
+                        }
+
+                    chart_data = {
+                        "labels": [row["lines_covered"] for row in ev_grid_rows],
+                        "expected_profit": [row["expected_profit"] for row in ev_grid_rows],
+                        "expected_return": [row["expected_return"] for row in ev_grid_rows],
+                        "hit_rate": [row["hit_rate"] for row in ev_grid_rows],
+                        "feasible": [row["feasible"] for row in ev_grid_rows],
+                        "stake_per_line": [row["stake_per_line"] for row in ev_grid_rows],
+                    }
+
+    form_values = {
+        "top_n": top_n,
+        "coverage": coverage,
+        "stake_per_line": stake_per_line,
+        "f_share": f_share,
+        "date": date_filter,
+        "bankroll": bankroll_total if bankroll_total is not None else 50.0,
+        "min_stake_per_line": min_stake_per_line if min_stake_per_line is not None else stake_per_line,
+        "take_rate": take_rate_value if take_rate_value is not None else 0.30,
+        "net_rollover": net_rollover_value if net_rollover_value is not None else 0.0,
+        "div_mult": dividend_multiplier if dividend_multiplier is not None else div_mult,
+        "market_inefficiency": market_inefficiency if market_inefficiency is not None else 0.10,
+        "concentration": concentration if concentration is not None else 0.25,
+        "pool_gross": pool_gross_value if pool_gross_value is not None else 0.0,
+        "include_self": bool(inc_self),
+    }
 
     return render_template(
         "tote_calculators.html",
         options=(opts.to_dict("records") if not opts.empty else []),
         bet_type=bet_type,
         product_id=product_id,
-        params={
-            "top_n": top_n,
-            "coverage": coverage,
-            "stake_per_line": stake_per_line,
-            "f_share": f_share,
-            "date": date_filter,
-        },
+        product_details=prod,
+        form_values=form_values,
         runners=runners,
-        total_lines=total_lines,
-        top_lines=top_lines,
+        permutation_summary=permutation_summary,
+        target_lines_preview=target_lines_preview,
+        recommended_lines=recommended_lines,
+        recommendation=recommendation,
+        ev_grid=ev_grid_rows,
+        chart_data=chart_data,
         cum_p=cum_p,
         efficiency=efficiency,
         o_min=o_min,
@@ -2866,6 +2925,7 @@ def tote_superfecta_detail(product_id: str):
 
 @app.route("/tote/manual-calculator", methods=["GET", "POST"])
 def manual_calculator_page():
+    dataset_fq = f"{cfg.bq_project}.{cfg.bq_dataset}"
     # Default values for form
     calc_params = {
         "num_runners": 8,
@@ -2891,6 +2951,22 @@ def manual_calculator_page():
     results = {}
     errors = []
     manual_override_active = False
+
+    try:
+        defaults_df = sql_df(
+            f"SELECT t, stake_per_line, R FROM `{dataset_fq}.tote_params` ORDER BY updated_ts DESC, ts_ms DESC LIMIT 1",
+            cache_ttl=120,
+        )
+        if not defaults_df.empty:
+            defaults = defaults_df.iloc[0].to_dict()
+            if defaults.get("t") is not None:
+                calc_params["take_rate"] = float(defaults["t"])
+            if defaults.get("stake_per_line") is not None:
+                calc_params["bankroll"] = float(defaults["stake_per_line"]) * 100.0
+            if defaults.get("R") is not None:
+                calc_params["net_rollover"] = float(defaults["R"])
+    except Exception:
+        pass
 
     if request.method == "POST":
         # This flag is used to prevent auto-adjustment on subsequent POSTs if the user
@@ -2935,7 +3011,8 @@ def manual_calculator_page():
             try:
                 for i in range(calc_params["num_runners"]):
                     odds = float(request.form.get(f"runner_odds_{i}", "10.0"))
-                    if odds <= 1.0: errors.append(f"Runner {i+1} odds must be greater than 1.0.")
+                    if odds < 1.0:
+                        errors.append(f"Runner {i+1} odds must be at least 1.0.")
                     runners_from_form.append({
                         "name": request.form.get(f"runner_name_{i}", f"Runner {i+1}"),
                         "odds": odds,
@@ -3004,18 +3081,26 @@ def tote_product_calculator_page(product_id: str):
       (take rate, rollover, pool size). Runs an initial calculation.
     - POST: Re-runs the calculation with adjusted parameters from the form.
     """
+    dataset_fq = f"{cfg.bq_project}.{cfg.bq_dataset}"
     # Load product context (prefer view, fallback to base table)
     psql = (
-        "SELECT p.product_id, p.event_id, p.event_name, COALESCE(e.venue, p.venue) AS venue, "
-        "COALESCE(e.country, p.currency) AS country, p.start_iso, COALESCE(p.status,'') AS status, p.currency, "
-        "p.total_gross, p.total_net, p.rollover, p.deduction_rate, UPPER(p.bet_type) AS bet_type "
-        "FROM vw_products_latest_totals p LEFT JOIN tote_events e USING(event_id) WHERE p.product_id=?"
+        f"SELECT p.product_id, p.event_id, p.event_name, COALESCE(e.venue, p.venue) AS venue, "
+        f"COALESCE(e.country, p.currency) AS country, p.start_iso, COALESCE(p.status,'') AS status, p.currency, "
+        f"p.total_gross, p.total_net, p.rollover, p.deduction_rate, UPPER(p.bet_type) AS bet_type "
+        f"FROM `{dataset_fq}.vw_products_latest_totals` p LEFT JOIN `{dataset_fq}.tote_events` e USING(event_id) "
+        "WHERE p.product_id = @pid"
+    )
+    psql_fallback = (
+        f"SELECT p.product_id, p.event_id, p.event_name, COALESCE(e.venue, p.venue) AS venue, "
+        f"COALESCE(e.country, p.currency) AS country, p.start_iso, COALESCE(p.status,'') AS status, p.currency, "
+        f"p.total_gross, p.total_net, p.rollover, p.deduction_rate, UPPER(p.bet_type) AS bet_type "
+        f"FROM `{dataset_fq}.tote_products` p LEFT JOIN `{dataset_fq}.tote_events` e USING(event_id) "
+        "WHERE p.product_id = @pid"
     )
     try:
-        pdf = sql_df(psql, params=(product_id,), cache_ttl=0)
+        pdf = sql_df(psql, params={"pid": product_id}, cache_ttl=0)
     except Exception:
-        psql2 = psql.replace("vw_products_latest_totals p", "tote_products p")
-        pdf = sql_df(psql2, params=(product_id,), cache_ttl=0)
+        pdf = sql_df(psql_fallback, params={"pid": product_id}, cache_ttl=0)
     if pdf.empty:
         flash("Unknown product id", "error")
         return redirect(url_for("tote_live_model_page"))
@@ -3023,7 +3108,10 @@ def tote_product_calculator_page(product_id: str):
 
     # Defaults (tote_params) for t, f, stake_per_line, R
     try:
-        params_df = sql_df("SELECT * FROM tote_params ORDER BY updated_ts DESC, ts_ms DESC LIMIT 1", cache_ttl=300)
+        params_df = sql_df(
+            f"SELECT * FROM `{dataset_fq}.tote_params` ORDER BY updated_ts DESC, ts_ms DESC LIMIT 1",
+            cache_ttl=120,
+        )
         model_params = params_df.iloc[0].to_dict() if not params_df.empty else {}
     except Exception:
         model_params = {}
@@ -3048,6 +3136,18 @@ def tote_product_calculator_page(product_id: str):
         "pool_gross_other": float(prod.get("total_gross") or 0.0),
         "min_stake_per_line": float(prod.get("min_line") or prod.get("line_increment") or 0.0),
     }
+
+    # Refresh pool size from latest snapshot for more timely estimates
+    try:
+        snap_df = sql_df(
+            f"SELECT total_gross FROM `{dataset_fq}.tote_pool_snapshots` WHERE product_id = @pid ORDER BY ts_ms DESC LIMIT 1",
+            params={"pid": product_id},
+            cache_ttl=0,
+        )
+        if not snap_df.empty and snap_df.iloc[0]["total_gross"] is not None:
+            calc_params["pool_gross_other"] = float(snap_df.iloc[0]["total_gross"])
+    except Exception:
+        pass
 
     errors: list[str] = []
     results: dict = {}
@@ -3078,8 +3178,8 @@ def tote_product_calculator_page(product_id: str):
             runners_from_form = []
             for i in range(calc_params["num_runners"]):
                 odds = float(request.form.get(f"runner_odds_{i}", "10.0"))
-                if odds <= 1.0:
-                    errors.append(f"Runner {i+1} odds must be greater than 1.0.")
+                if odds < 1.0:
+                    errors.append(f"Runner {i+1} odds must be at least 1.0.")
                 runners_from_form.append({
                     "name": request.form.get(f"runner_name_{i}", f"Runner {i+1}"),
                     "odds": odds,
@@ -3122,15 +3222,23 @@ def tote_product_calculator_page(product_id: str):
         try:
             # Find an open WIN product for the same event
             wdf = sql_df(
-                """
+                f"""
                 SELECT product_id
                 FROM (
-                  SELECT w.product_id, ROW_NUMBER() OVER(PARTITION BY w.event_id ORDER BY CASE WHEN UPPER(COALESCE(w.status,'')) IN ('OPEN','SELLING') THEN 1 ELSE 2 END, w.start_iso DESC) as rn
-                  FROM vw_products_latest_totals w
-                  WHERE w.event_id=@eid AND UPPER(w.bet_type)='WIN' AND UPPER(COALESCE(w.status,'')) IN ('OPEN','SELLING')
-                ) WHERE rn=1
+                  SELECT w.product_id,
+                         ROW_NUMBER() OVER(
+                           PARTITION BY w.event_id
+                           ORDER BY CASE WHEN UPPER(COALESCE(w.status,'')) IN ('OPEN','SELLING') THEN 1 ELSE 2 END,
+                                    w.start_iso DESC
+                         ) AS rn
+                  FROM `{dataset_fq}.vw_products_latest_totals` w
+                  WHERE w.event_id = @eid
+                    AND UPPER(w.bet_type) = 'WIN'
+                    AND UPPER(COALESCE(w.status,'')) IN ('OPEN','SELLING')
+                ) WHERE rn = 1
                 """,
                 params={"eid": prod.get("event_id")},
+                cache_ttl=0,
             )
         except Exception:
             wdf = pd.DataFrame()
@@ -3154,44 +3262,46 @@ def tote_product_calculator_page(product_id: str):
                 if is_past_event:
                     # For past events, get the last known odds before the race start from history
                     odds_df = sql_df(
-                        """
+                        f"""
                         WITH odds_at_time AS (
                             SELECT
                                 cloth_number,
-                                ARRAY_AGG(decimal_odds ORDER BY ts_ms DESC LIMIT 1)[OFFSET(0)] as odds
-                            FROM vw_tote_probable_history
+                                ARRAY_AGG(decimal_odds ORDER BY ts_ms DESC LIMIT 1)[OFFSET(0)] AS odds
+                            FROM `{dataset_fq}.vw_tote_probable_history`
                             WHERE product_id = @win_pid
                               AND TIMESTAMP_MILLIS(ts_ms) < TIMESTAMP(@start_iso)
                             GROUP BY cloth_number
                         )
                         SELECT
-                            s.number as cloth,
-                            COALESCE(s.competitor, CONCAT('#', CAST(s.number AS STRING))) as name,
+                            s.number AS cloth,
+                            COALESCE(s.competitor, CONCAT('#', CAST(s.number AS STRING))) AS name,
                             o.odds
-                        FROM tote_product_selections s
+                        FROM `{dataset_fq}.tote_product_selections` s
                         LEFT JOIN odds_at_time o ON s.number = o.cloth_number
-                        WHERE s.product_id = @product_id AND s.leg_index=1
+                        WHERE s.product_id = @product_id AND s.leg_index = 1
                         ORDER BY s.number
                         """,
-                        params={"win_pid": win_pid, "start_iso": prod.get("start_iso"), "product_id": product_id}
+                        params={"win_pid": win_pid, "start_iso": prod.get("start_iso"), "product_id": product_id},
+                        cache_ttl=0,
                     )
                     if odds_df.empty or odds_df['odds'].isnull().all():
                         flash("Could not find historical probable odds for this past event.", "warning")
                 else:
                     # For live/upcoming events, use the latest probable odds
                     odds_df = sql_df(
-                        """
+                        f"""
                         SELECT
                           COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64)) AS cloth,
                           COALESCE(s.competitor, CONCAT('#', CAST(COALESCE(s.number, o.cloth_number) AS STRING))) AS name,
                           CAST(o.decimal_odds AS FLOAT64) AS odds
-                        FROM vw_tote_probable_odds o
-                        LEFT JOIN tote_product_selections s
+                        FROM `{dataset_fq}.vw_tote_probable_odds` o
+                        LEFT JOIN `{dataset_fq}.tote_product_selections` s
                           ON s.selection_id = o.selection_id AND s.product_id = o.product_id
-                        WHERE o.product_id = ?
+                        WHERE o.product_id = @pid
                         ORDER BY COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64))
                         """,
-                        params=(win_pid,),
+                        params={"pid": win_pid},
+                        cache_ttl=0,
                     )
                     # If no odds found, try an inline refresh from the partner endpoint
                     if odds_df.empty or odds_df['odds'].isnull().all():
@@ -3277,18 +3387,19 @@ def tote_product_calculator_page(product_id: str):
                                     ])
                                     # Re-query odds
                                     odds_df = sql_df(
-                                        """
+                                        f"""
                                         SELECT
                                           COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64)) AS cloth,
                                           COALESCE(s.competitor, CONCAT('#', CAST(COALESCE(s.number, o.cloth_number) AS STRING))) AS name,
                                           CAST(o.decimal_odds AS FLOAT64) AS odds
-                                        FROM vw_tote_probable_odds o
-                                        LEFT JOIN tote_product_selections s
+                                        FROM `{dataset_fq}.vw_tote_probable_odds` o
+                                        LEFT JOIN `{dataset_fq}.tote_product_selections` s
                                           ON s.selection_id = o.selection_id AND s.product_id = o.product_id
-                                        WHERE o.product_id = ?
+                                        WHERE o.product_id = @pid
                                         ORDER BY COALESCE(CAST(s.number AS INT64), CAST(o.cloth_number AS INT64))
                                         """,
-                                        params=(win_pid,),
+                                        params={"pid": win_pid},
+                                        cache_ttl=0,
                                     )
                         except Exception:
                             pass
@@ -3301,7 +3412,7 @@ def tote_product_calculator_page(product_id: str):
                 try:
                     name = str(r.get("name") or f"#{r.get('cloth')}")
                     odds = float(r.get("odds") or 0.0)
-                    if odds and odds > 1.0:
+                    if odds and odds >= 1.0:
                         runners.append({"name": name, "odds": odds, "is_key": False, "is_poor": False})
                 except Exception:
                     continue
@@ -3313,8 +3424,9 @@ def tote_product_calculator_page(product_id: str):
             # Fallback: load runner list without odds
             try:
                 sdf = sql_df(
-                    "SELECT number AS cloth, COALESCE(competitor, CAST(number AS STRING)) AS name FROM tote_product_selections WHERE product_id=? ORDER BY CAST(number AS INT64)",
-                    params=(product_id,),
+                    f"SELECT number AS cloth, COALESCE(competitor, CAST(number AS STRING)) AS name FROM `{dataset_fq}.tote_product_selections` WHERE product_id=@pid ORDER BY CAST(number AS INT64)",
+                    params={"pid": product_id},
+                    cache_ttl=0,
                 )
                 for _, r in sdf.iterrows():
                     runners.append({"name": str(r.get("name") or f"#{r.get('cloth')}") , "odds": 10.0, "is_key": False, "is_poor": False})
@@ -3378,6 +3490,7 @@ def tote_live_model_page():
     """
     Shows upcoming events, runs the PL model on them, and allows placing bets.
     """
+    dataset_fq = f"{cfg.bq_project}.{cfg.bq_dataset}"
     if request.method == "POST":
         # Handle bet placement
         product_id = request.form.get("product_id")
@@ -3450,22 +3563,27 @@ def tote_live_model_page():
 
     # Fetch default model parameters from BigQuery
     try:
-        params_df = sql_df("SELECT * FROM `autobet-470818.autobet.tote_params` ORDER BY ts_ms DESC LIMIT 1", cache_ttl=300)
+        params_df = sql_df(
+            f"SELECT * FROM `{dataset_fq}.tote_params` ORDER BY ts_ms DESC LIMIT 1",
+            cache_ttl=300,
+        )
         model_params = params_df.iloc[0].to_dict() if not params_df.empty else {}
     except Exception:
         model_params = {}
     
     # --- Filter Options ---
     try:
-        countries_df = sql_df("SELECT DISTINCT country FROM `autobet-470818.autobet.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+        countries_df = sql_df(
+            f"SELECT DISTINCT country FROM `{dataset_fq}.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country"
+        )
         country_options = countries_df['country'].tolist() if not countries_df.empty else []
     except Exception:
         country_options = []
     # Venue options based on filters (country/date) for convenience
     try:
         v_sql = (
-            "SELECT DISTINCT COALESCE(e.venue, p.venue) AS venue " +
-            "FROM `autobet-470818.autobet.vw_products_latest_totals` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) "
+            f"SELECT DISTINCT COALESCE(e.venue, p.venue) AS venue FROM `{dataset_fq}.vw_products_latest_totals` p "
+            f"LEFT JOIN `{dataset_fq}.tote_events` e USING(event_id) "
             "WHERE UPPER(p.bet_type)='SUPERFECTA'"
         )
         v_params: list[object] = []
@@ -3484,8 +3602,31 @@ def tote_live_model_page():
     except Exception:
         venue_options = []
 
+    # Determine whether tote_product_rules exists; if not, skip the join.
+    rules_table_exists = False
+    try:
+        rules_exists_df = sql_df(
+            f"SELECT 1 FROM `{dataset_fq}.INFORMATION_SCHEMA.TABLES` WHERE table_name = 'tote_product_rules'",
+            cache_ttl=600,
+        )
+        rules_table_exists = not rules_exists_df.empty
+    except Exception:
+        rules_table_exists = False
+
+    rules_select = "br.min_line, br.line_increment"
+    rules_join = f"""
+        LEFT JOIN (
+          SELECT product_id, MAX(min_line) AS min_line, MAX(line_increment) AS line_increment
+          FROM `{dataset_fq}.tote_product_rules`
+          GROUP BY product_id
+        ) br ON br.product_id = p.product_id
+    """
+    if not rules_table_exists:
+        rules_select = "CAST(NULL AS FLOAT64) AS min_line, CAST(NULL AS FLOAT64) AS line_increment"
+        rules_join = ""
+
     # --- Fetch upcoming events based on filters ---
-    sql = """
+    sql = f"""
         SELECT
           p.product_id,
           p.event_id,
@@ -3499,17 +3640,11 @@ def tote_live_model_page():
           p.total_net,
           p.rollover,
           p.deduction_rate,
-          br.min_line,
-          br.line_increment,
+          {rules_select},
           w.product_id AS win_product_id
-        FROM
-          `autobet-470818.autobet.vw_products_latest_totals` p
-        LEFT JOIN `autobet-470818.autobet.tote_events` e ON p.event_id = e.event_id
-        LEFT JOIN (
-          SELECT product_id, MAX(min_line) AS min_line, MAX(line_increment) AS line_increment
-          FROM `autobet-470818.autobet.tote_product_rules`
-          GROUP BY product_id
-        ) br ON br.product_id = p.product_id
+        FROM `{dataset_fq}.vw_products_latest_totals` p
+        LEFT JOIN `{dataset_fq}.tote_events` e ON p.event_id = e.event_id
+        {rules_join}
         LEFT JOIN (
           SELECT product_id, event_id
           FROM (
@@ -3517,7 +3652,7 @@ def tote_live_model_page():
               w.product_id,
               w.event_id,
               ROW_NUMBER() OVER(PARTITION BY w.event_id ORDER BY w.product_id) AS rn
-            FROM `autobet-470818.autobet.vw_products_latest_totals` w
+            FROM `{dataset_fq}.vw_products_latest_totals` w
             WHERE UPPER(w.bet_type) = 'WIN' AND UPPER(COALESCE(w.status,'')) IN ('OPEN','SELLING')
           )
           WHERE rn = 1
@@ -3562,7 +3697,10 @@ def tote_live_model_page():
     except Exception as e:
         # Fallback to base table if the view is missing
         try:
-            sql_fb = sql.replace("`autobet-470818.autobet.vw_products_latest_totals`", "`autobet-470818.autobet.tote_products`")
+            sql_fb = sql.replace(
+                f"`{dataset_fq}.vw_products_latest_totals`",
+                f"`{dataset_fq}.tote_products`",
+            )
             upcoming_df = sql_df(sql_fb, params=params, cache_ttl=30)
         except Exception as e2:
             flash(f"Query for upcoming events failed: {e2}", "error")
@@ -3573,7 +3711,7 @@ def tote_live_model_page():
         if (upcoming_df is None or upcoming_df.empty) and country == "GB" and date_filter == _today_iso():
             gb_df = sql_df(
                 "SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, total_gross, total_net, rollover \n"
-                "FROM `autobet-470818.autobet.vw_gb_open_superfecta_next60` ORDER BY start_iso",
+                f"FROM `{dataset_fq}.vw_gb_open_superfecta_next60` ORDER BY start_iso",
                 cache_ttl=30,
             )
             if gb_df is not None and not gb_df.empty:

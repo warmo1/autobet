@@ -338,7 +338,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const poorMultInput = document.getElementById('poor_horse_mult');
 
     function computeAdjustedStrength(odds, isKey, isPoor){
-        if (!odds || odds <= 1) return 0.0;
+        if (!odds || odds < 1) return 0.0;
         const base = 1.0 / odds;
         const keyM = parseFloat(keyMultInput?.value || '1') || 1.0;
         const poorM = parseFloat(poorMultInput?.value || '1') || 1.0;
@@ -369,7 +369,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 <tr>
                     <td>${i + 1}</td>
                     <td><input type="text" name="runner_name_${i}" class="form-control form-control-sm" value="${runner.name}" required></td>
-                    <td><input type="number" step="0.01" name="runner_odds_${i}" class="form-control form-control-sm runner-odds" value="${runner.odds}" min="1.01" required></td>
+                    <td><input type="number" step="0.01" name="runner_odds_${i}" class="form-control form-control-sm runner-odds" value="${runner.odds}" min="1.0" required></td>
                     <td class="text-center"><div class="form-check d-flex justify-content-center"><input class="form-check-input" type="checkbox" name="runner_key_${i}" ${runner.is_key ? 'checked' : ''}></div></td>
                     <td class="text-center"><div class="form-check d-flex justify-content-center"><input class="form-check-input" type="checkbox" name="runner_poor_${i}" ${runner.is_poor ? 'checked' : ''}></div></td>
                     <td class="strength-display text-muted small">${strength}</td>
@@ -429,11 +429,12 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // Chart.js logic
-    const gridData = {{ results.pl_model.ev_grid | tojson if results and results.pl_model else '[]' }};
-    if (gridData && gridData.length > 0) {
-        const ctx = document.getElementById('evChart').getContext('2d');
-        const labels = gridData.map(d => d.lines_covered);
-        const profits = gridData.map(d => d.expected_profit);
+    const gridData = {{ (results.pl_model.ev_grid if results and results.pl_model else []) | tojson }};
+    const canvas = document.getElementById('evChart');
+    if (canvas && Array.isArray(gridData) && gridData.length > 0) {
+        const ctx = canvas.getContext('2d');
+        const labels = gridData.map(d => Number(d.lines_covered || 0));
+        const profits = gridData.map(d => Number(d.expected_profit || 0));
         
         let maxProfit = -Infinity;
         let peakLines = 0;
@@ -448,14 +449,16 @@ document.addEventListener('DOMContentLoaded', function() {
             type: 'line',
             data: {
                 labels: labels,
-                datasets: [{
-                    label: 'Expected Profit (£)',
-                    data: profits,
+               datasets: [{
+                   label: 'Expected Profit (£)',
+                   data: profits,
                     borderColor: 'rgb(75, 192, 192)',
-                    backgroundColor: 'rgba(75, 192, 192, 0.2)',
-                    tension: 0.1,
+                    backgroundColor: 'rgba(75, 192, 192, 0.25)',
+                    tension: 0.2,
                     fill: true,
-                    pointRadius: 0,
+                    borderWidth: 2,
+                    pointRadius: 2,
+                    pointHitRadius: 6,
                 }]
             },
             options: {
