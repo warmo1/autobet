@@ -16,8 +16,8 @@
     <div class="col-md-3">
       <div class="card"><div class="card-body">
         <div class="text-muted small">Superfecta Today</div>
-        <div>Products: {{ sf_stats.n_products or 0 }}</div>
-        <div>Selections: {{ sf_stats.total_selections or 0 }}</div>
+        <div>Products: {{ sf_stats.n_products | f0 }}</div>
+        <div>Selections: {{ sf_stats.total_selections | f0 }}</div>
       </div></div>
     </div>
     <div class="col-md-3">

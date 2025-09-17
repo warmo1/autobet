@@ -9,7 +9,7 @@ import os
 import threading
 
 from ..config import cfg
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, urlunparse
 
 
 class ToteError(RuntimeError):
@@ -29,9 +29,9 @@ class ToteClient:
             raise ToteError("TOTE_GRAPHQL_URL is not configured")
         if not (api_key or cfg.tote_api_key):
             raise ToteError("TOTE_API_KEY is not configured")
-        # Use the configured URL exactly as provided (main branch behavior)
-        # Do not mutate or add trailing slashes; some frontends are strict.
-        self.base_url = (base_url or cfg.tote_graphql_url or "").strip()
+        raw_base = (base_url or cfg.tote_graphql_url or "").strip()
+        # Normalize misconfigured HTTP endpoints (some setups still point to /connections/)
+        self.base_url = raw_base
         self.timeout = timeout
         self.max_retries = max(0, int(max_retries))
         self.session = requests.Session()
@@ -49,6 +49,28 @@ class ToteClient:
     # No alternate URL swapping for HTTP GraphQL; stick to gateway
 
     # (No custom header builder; use the fixed, known-good header set above.)
+
+    @staticmethod
+    def _normalize_http_endpoint(url: str) -> str:
+        """Redirect HTTP(S) endpoints accidentally pointing at /connections/ to /gateway/."""
+        if not url:
+            return url
+        parsed = urlparse(url)
+        if parsed.scheme in ("http", "https"):
+            path = parsed.path or ""
+            if "/connections/" in path:
+                path = path.replace("/connections/", "/gateway/")
+                parsed = parsed._replace(path=path)
+                url = urlunparse(parsed)
+        return url
+
+    @property
+    def base_url(self) -> str:
+        return getattr(self, "_base_url", "")
+
+    @base_url.setter
+    def base_url(self, value: str) -> None:
+        self._base_url = self._normalize_http_endpoint(value or "")
 
     def _post_json(self, url: str, payload: Dict[str, Any], *, headers_override: Optional[Dict[str, Any]] = None, keep_auth: Optional[bool] = None) -> Dict[str, Any]:
         last_err: Optional[Exception] = None
@@ -116,7 +138,7 @@ class ToteClient:
         - If cfg.tote_audit_api_key is set, use it (and scheme) for Authorization.
         Fallback to the regular endpoint/key when audit-specific are absent.
         """
-        url = (cfg.tote_audit_graphql_url or self.base_url).strip()
+        url = self._normalize_http_endpoint((cfg.tote_audit_graphql_url or self.base_url).strip())
         audit_key = (cfg.tote_audit_api_key or self.api_key)
         audit_scheme = (cfg.tote_audit_auth_scheme or self.auth_scheme)
         headers = dict(self.headers)
