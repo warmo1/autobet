@@ -95,6 +95,7 @@ The following tables are synced to BigQuery:
 *   `predictions`
 *   `features_runner_event`
 *   `odds_live`
+*   `autobet_model.superfecta_runner_predictions`
 
 ### BigQuery Views
 
@@ -110,6 +111,7 @@ A number of views are created in BigQuery to facilitate analysis. These views ar
 *   **`vw_superfecta_products`**: A convenient filter of the `tote_products` table for Superfecta bets.
 *   **`vw_superfecta_dividends_latest`**: Shows the latest dividend for each selection for each Superfecta product.
 *   **`vw_runner_features`**: Joins runner features with horse names.
-*   **`vw_superfecta_runner_training_features`**: Extends `vw_superfecta_training` with per-runner feature vectors for model fitting.
-*   **`vw_superfecta_runner_live_features`**: Provides the latest runner feature snapshot paired with Superfecta products for scoring upcoming races.
-*   **`vw_superfecta_training`**: Combines product and event context with runner results for model training.
+*   **`vw_superfecta_training_base`**: Historic Superfecta runners with clean `horse_id` linkage for modeling.
+*   **`vw_superfecta_runner_training_features`**: Labeled training runners enriched with per-runner features.
+*   **`vw_superfecta_runner_live_features`**: Live runner feature snapshots joined to upcoming Superfecta products for scoring.
+*   **`vw_superfecta_training`**: Compatibility alias exposing the same rows as `vw_superfecta_training_base`.

@@ -2575,13 +2575,28 @@ class BigQuerySink:
             job = client.query(sql)
             job.result()
 
-        # vw_superfecta_training: combine product/event context with runner results for modeling
+        # Ensure features table carries optional columns referenced by ML views
+        if self._table_exists("features_runner_event"):
+            self._ensure_columns(
+                "features_runner_event",
+                {
+                    "recent_runs": "INT64",
+                    "avg_finish": "FLOAT64",
+                    "wins_last5": "INT64",
+                    "places_last5": "INT64",
+                    "days_since_last_run": "INT64",
+                    "weight_kg": "FLOAT64",
+                    "weight_lbs": "FLOAT64",
+                },
+            )
+
+        # vw_superfecta_training_base: historical runners with clean horse_ids for modeling
         sql = f"""
-        CREATE VIEW IF NOT EXISTS `{ds}.vw_superfecta_training` AS
+        CREATE OR REPLACE VIEW `{ds}.vw_superfecta_training_base` AS
         SELECT
           p.event_id,
           p.product_id,
-          DATE(SUBSTR(COALESCE(te.start_iso, p.start_iso),1,10)) AS event_date,
+          DATE(SUBSTR(COALESCE(te.start_iso, p.start_iso), 1, 10)) AS event_date,
           COALESCE(te.venue, p.venue) AS venue,
           te.country,
           p.total_net,
@@ -2597,7 +2612,85 @@ class BigQuerySink:
         JOIN `{ds}.hr_horse_runs` r ON r.event_id = p.event_id
         LEFT JOIN `{ds}.race_conditions` rc ON rc.event_id = p.event_id
         LEFT JOIN `{ds}.tote_events` te ON te.event_id = p.event_id
-        WHERE UPPER(p.bet_type) = 'SUPERFECTA' AND r.finish_pos IS NOT NULL;
+        WHERE UPPER(p.bet_type) = 'SUPERFECTA'
+          AND r.finish_pos IS NOT NULL
+          AND r.horse_id IS NOT NULL;
+        """
+        job = client.query(sql)
+        job.result()
+
+        # Maintain backward-compatible name for downstream consumers
+        sql = f"""
+        CREATE OR REPLACE VIEW `{ds}.vw_superfecta_training` AS
+        SELECT * FROM `{ds}.vw_superfecta_training_base`;
+        """
+        job = client.query(sql)
+        job.result()
+
+        # vw_superfecta_runner_training_features: labeled runners joined with feature table
+        sql = f"""
+        CREATE OR REPLACE VIEW `{ds}.vw_superfecta_runner_training_features` AS
+        SELECT
+          base.event_id,
+          base.product_id,
+          base.event_date,
+          base.venue,
+          base.country,
+          base.total_net,
+          base.going,
+          base.weather_temp_c,
+          base.weather_wind_kph,
+          base.weather_precip_mm,
+          base.horse_id,
+          base.cloth_number,
+          base.finish_pos,
+          base.status,
+          feat.recent_runs,
+          feat.avg_finish,
+          feat.wins_last5,
+          feat.places_last5,
+          feat.days_since_last_run,
+          feat.weight_kg,
+          feat.weight_lbs
+        FROM `{ds}.vw_superfecta_training_base` base
+        LEFT JOIN `{ds}.features_runner_event` feat
+          ON base.event_id = feat.event_id AND base.horse_id = feat.horse_id;
+        """
+        job = client.query(sql)
+        job.result()
+
+        # vw_superfecta_runner_live_features: live products enriched with runner features
+        sql = f"""
+        CREATE OR REPLACE VIEW `{ds}.vw_superfecta_runner_live_features` AS
+        SELECT
+          p.product_id,
+          feat.event_id,
+          DATE(SUBSTR(COALESCE(te.start_iso, p.start_iso), 1, 10)) AS event_date,
+          p.event_name,
+          COALESCE(te.venue, p.venue) AS venue,
+          te.country,
+          p.start_iso,
+          COALESCE(p.status, te.status) AS status,
+          p.total_net,
+          COALESCE(rc.going, feat.going) AS going,
+          COALESCE(rc.weather_temp_c, feat.weather_temp_c) AS weather_temp_c,
+          COALESCE(rc.weather_wind_kph, feat.weather_wind_kph) AS weather_wind_kph,
+          COALESCE(rc.weather_precip_mm, feat.weather_precip_mm) AS weather_precip_mm,
+          feat.horse_id,
+          feat.cloth_number,
+          feat.recent_runs,
+          feat.avg_finish,
+          feat.wins_last5,
+          feat.places_last5,
+          feat.days_since_last_run,
+          feat.weight_kg,
+          feat.weight_lbs
+        FROM `{ds}.tote_products` p
+        JOIN `{ds}.features_runner_event` feat
+          ON feat.event_id = p.event_id AND feat.horse_id IS NOT NULL
+        LEFT JOIN `{ds}.race_conditions` rc ON rc.event_id = p.event_id
+        LEFT JOIN `{ds}.tote_events` te ON te.event_id = p.event_id
+        WHERE UPPER(p.bet_type) = 'SUPERFECTA';
         """
         job = client.query(sql)
         job.result()
