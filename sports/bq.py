@@ -617,12 +617,9 @@ class BigQuerySink:
             temp,
             key_expr="T.horse_id=S.horse_id AND T.event_id=S.event_id",
             update_set=",".join([
-                "race_id=S.race_id",
                 "finish_pos=S.finish_pos",
                 "status=S.status",
                 "cloth_number=S.cloth_number",
-                "jockey=S.jockey",
-                "trainer=S.trainer",
                 "recorded_ts=S.recorded_ts",
             ]),
         )
