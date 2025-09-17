@@ -2138,6 +2138,10 @@ class BigQuerySink:
           SELECT product_id, selection_id, number AS cloth_number
           FROM `{ds}.tote_product_selections`
         ),
+        selection_status AS (
+          SELECT product_id, selection_id, status
+          FROM `{ds}.vw_selection_status_current`
+        ),
         competitors AS (
           SELECT
             e.event_id,
@@ -2157,12 +2161,15 @@ class BigQuerySink:
             ON sel.product_id = p.win_product_id
           JOIN latest_odds lo
             ON lo.product_id = p.win_product_id AND lo.selection_id = sel.selection_id
+          LEFT JOIN selection_status st
+            ON st.product_id = sel.product_id AND st.selection_id = sel.selection_id
           JOIN competitors c
             ON c.event_id = p.event_id
            AND c.cloth_number IS NOT NULL
            AND sel.cloth_number IS NOT NULL
            AND c.cloth_number = sel.cloth_number
           WHERE c.horse_id IS NOT NULL
+            AND (st.status IS NULL OR st.status NOT IN ('NON_RUNNER','NR','WITHDRAWN','SCRATCHED','RESERVE','NONRUNNER'))
         ),
         sums AS (
           SELECT product_id, SUM(weight) AS total_weight
@@ -2538,7 +2545,28 @@ class BigQuerySink:
             job.result()
 
         sql = f"""
+        CREATE OR REPLACE VIEW `{ds}.vw_selection_status_current` AS
+        SELECT
+          product_id,
+          selection_id,
+          UPPER(status) AS status
+        FROM `{ds}.tote_selection_status_log`
+        QUALIFY ROW_NUMBER() OVER (
+          PARTITION BY product_id, selection_id
+          ORDER BY ts_ms DESC
+        ) = 1;
+        """
+        job = client.query(sql); job.result()
+
+        sql = f"""
         CREATE OR REPLACE VIEW `{ds}.vw_superfecta_runner_live_features` AS
+        WITH selection_map AS (
+          SELECT product_id, selection_id, SAFE_CAST(number AS INT64) AS cloth_number
+          FROM `{ds}.tote_product_selections`
+        ), selection_status AS (
+          SELECT product_id, selection_id, status
+          FROM `{ds}.vw_selection_status_current`
+        )
         SELECT
           p.product_id,
           f.event_id,
@@ -2564,12 +2592,16 @@ class BigQuerySink:
           f.weight_lbs
         FROM `{ds}.tote_products` p
         JOIN `{ds}.features_runner_event` f ON f.event_id = p.event_id AND f.horse_id IS NOT NULL
+        LEFT JOIN selection_map sm
+          ON sm.product_id = p.product_id AND sm.cloth_number = f.cloth_number
+        LEFT JOIN selection_status ss
+          ON ss.product_id = sm.product_id AND ss.selection_id = sm.selection_id
         LEFT JOIN `{ds}.race_conditions` rc ON rc.event_id = p.event_id
         LEFT JOIN `{ds}.tote_events` te ON te.event_id = p.event_id
-        WHERE UPPER(p.bet_type) = 'SUPERFECTA';
+        WHERE UPPER(p.bet_type) = 'SUPERFECTA'
+          AND (ss.status IS NULL OR ss.status NOT IN ('NON_RUNNER','NR','WITHDRAWN','SCRATCHED','RESERVE','NONRUNNER'));
         """
-        job = client.query(sql)
-        job.result()
+        job = client.query(sql); job.result()
 
         # Ensure features table carries optional columns referenced by ML views
         if self._table_exists("features_runner_event"):
@@ -2634,6 +2666,12 @@ class BigQuerySink:
               ORDER BY scored_at DESC
             ) AS rn
           FROM `{self.project}.{model_dataset}.superfecta_runner_predictions`
+        ), selection_map AS (
+          SELECT product_id, selection_id, SAFE_CAST(number AS INT64) AS cloth_number
+          FROM `{ds}.tote_product_selections`
+        ), selection_status AS (
+          SELECT product_id, selection_id, status
+          FROM `{ds}.vw_selection_status_current`
         )
         SELECT
           r.product_id,
@@ -2671,7 +2709,12 @@ class BigQuerySink:
         LEFT JOIN `{ds}.hr_horses` h ON h.horse_id = r.horse_id
         LEFT JOIN `{ds}.features_runner_event` fe
           ON fe.event_id = r.event_id AND fe.horse_id = r.horse_id
-        WHERE r.rn = 1;
+        LEFT JOIN selection_map sm
+          ON sm.product_id = r.product_id AND sm.cloth_number = fe.cloth_number
+        LEFT JOIN selection_status ss
+          ON ss.product_id = sm.product_id AND ss.selection_id = sm.selection_id
+        WHERE r.rn = 1
+          AND (ss.status IS NULL OR ss.status NOT IN ('NON_RUNNER','NR','WITHDRAWN','SCRATCHED','RESERVE','NONRUNNER'));
         """
         job = client.query(sql); job.result()
 

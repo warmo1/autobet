@@ -107,7 +107,26 @@ VIEW_STATEMENTS = [
       ON base.event_id = feat.event_id AND base.horse_id = feat.horse_id;
     """,
     """
+    CREATE OR REPLACE VIEW `autobet-470818.autobet.vw_selection_status_current` AS
+    SELECT
+      product_id,
+      selection_id,
+      UPPER(status) AS status
+    FROM `autobet-470818.autobet.tote_selection_status_log`
+    QUALIFY ROW_NUMBER() OVER (
+      PARTITION BY product_id, selection_id
+      ORDER BY ts_ms DESC
+    ) = 1;
+    """,
+    """
     CREATE OR REPLACE VIEW `autobet-470818.autobet.vw_superfecta_runner_live_features` AS
+    WITH selection_map AS (
+      SELECT product_id, selection_id, SAFE_CAST(number AS INT64) AS cloth_number
+      FROM `autobet-470818.autobet.tote_product_selections`
+    ), selection_status AS (
+      SELECT product_id, selection_id, status
+      FROM `autobet-470818.autobet.vw_selection_status_current`
+    )
     SELECT
       p.product_id,
       feat.event_id,
@@ -134,9 +153,14 @@ VIEW_STATEMENTS = [
     FROM `autobet-470818.autobet.tote_products` p
     JOIN `autobet-470818.autobet.features_runner_event` feat
       ON feat.event_id = p.event_id AND feat.horse_id IS NOT NULL
+    LEFT JOIN selection_map sm
+      ON sm.product_id = p.product_id AND sm.cloth_number = feat.cloth_number
+    LEFT JOIN selection_status ss
+      ON ss.product_id = sm.product_id AND ss.selection_id = sm.selection_id
     LEFT JOIN `autobet-470818.autobet.race_conditions` rc ON rc.event_id = p.event_id
     LEFT JOIN `autobet-470818.autobet.tote_events` te ON te.event_id = p.event_id
-    WHERE UPPER(p.bet_type) = 'SUPERFECTA';
+    WHERE UPPER(p.bet_type) = 'SUPERFECTA'
+      AND (ss.status IS NULL OR ss.status NOT IN ('NON_RUNNER','NR','WITHDRAWN','SCRATCHED','RESERVE','NONRUNNER'));
     """,
     """
     CREATE OR REPLACE VIEW `autobet-470818.autobet.vw_superfecta_predictions_latest` AS
@@ -155,6 +179,12 @@ VIEW_STATEMENTS = [
           ORDER BY scored_at DESC
         ) AS rn
       FROM `autobet-470818.autobet_model.superfecta_runner_predictions`
+    ), selection_map AS (
+      SELECT product_id, selection_id, SAFE_CAST(number AS INT64) AS cloth_number
+      FROM `autobet-470818.autobet.tote_product_selections`
+    ), selection_status AS (
+      SELECT product_id, selection_id, status
+      FROM `autobet-470818.autobet.vw_selection_status_current`
     )
     SELECT
       r.product_id,
@@ -194,7 +224,12 @@ VIEW_STATEMENTS = [
       ON h.horse_id = r.horse_id
     LEFT JOIN `autobet-470818.autobet.features_runner_event` fe
       ON fe.event_id = r.event_id AND fe.horse_id = r.horse_id
-    WHERE r.rn = 1;
+    LEFT JOIN selection_map sm
+      ON sm.product_id = r.product_id AND sm.cloth_number = fe.cloth_number
+    LEFT JOIN selection_status ss
+      ON ss.product_id = sm.product_id AND ss.selection_id = sm.selection_id
+    WHERE r.rn = 1
+      AND (ss.status IS NULL OR ss.status NOT IN ('NON_RUNNER','NR','WITHDRAWN','SCRATCHED','RESERVE','NONRUNNER'));
     """,
 ]
 
