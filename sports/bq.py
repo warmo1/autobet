@@ -667,7 +667,9 @@ class BigQuerySink:
         )
 
     def upsert_models(self, rows: Iterable[Mapping[str, Any]]):
-        temp = self._load_to_temp("models", rows)
+        temp = self._load_to_temp("models", rows, schema_hint={
+            "created_ts": "INT64",
+        })
         if not temp:
             return
         self._merge(
@@ -702,6 +704,26 @@ class BigQuerySink:
                 "rank=S.rank",
             ]),
         )
+
+    def load_superfecta_predictions(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        model_dataset: str | None = None,
+    ) -> None:
+        payload = list(rows)
+        if not payload:
+            return
+        client = self._client_obj()
+        dataset_id = model_dataset or os.getenv("BQ_MODEL_DATASET") or os.getenv(
+            "ML_BQ_MODEL_DATASET", f"{self.dataset}_model"
+        )
+        table_id = f"{self.project}.{dataset_id}.superfecta_runner_predictions"
+        job_config = self._bq.LoadJobConfig(
+            write_disposition=self._bq.WriteDisposition.WRITE_APPEND
+        )
+        job = client.load_table_from_json(payload, table_id, job_config=job_config)
+        job.result()
 
     def upsert_features_runner_event(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("features_runner_event", rows, schema_hint={

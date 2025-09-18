@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -180,11 +181,11 @@ def _fit_model(df: pd.DataFrame) -> tuple[Pipeline, Dict[str, Any]]:
     return pipeline, metrics
 
 
-def _build_prediction_rows(
+def _build_prediction_payloads(
     df: pd.DataFrame, pipeline: Pipeline, model_id: str, ts_ms: int
-) -> list[Dict[str, Any]]:
+) -> tuple[pd.DataFrame, list[Dict[str, Any]]]:
     if df.empty:
-        return []
+        return pd.DataFrame(), []
     df = _prepare_features(df)
     features = NUMERIC_FEATURES + CATEGORICAL_FEATURES
     proba = pipeline.predict_proba(df[features])[:, 1]
@@ -200,21 +201,50 @@ def _build_prediction_rows(
     )
     df["rank"] = (
         df.groupby("event_id")["proba"].rank(method="first", ascending=False).astype(int)
-    )
-    rows = []
-    for rec in df.itertuples(index=False):
-        rows.append(
-            {
-                "model_id": model_id,
-                "ts_ms": int(ts_ms),
-                "event_id": rec.event_id,
-                "horse_id": rec.horse_id,
-                "market": "SUPERFECTA",
-                "proba": float(rec.proba),
-                "rank": int(rec.rank),
-            }
-        )
-    return rows
+    df["model_id"] = model_id
+    df["ts_ms"] = int(ts_ms)
+    df["market"] = "SUPERFECTA"
+    df["runner_key"] = df["horse_id"].fillna("")
+    scored_at = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+    df["model_version"] = scored_at.strftime("%Y-%m-%d.%H%M")
+    df["scored_at"] = scored_at.isoformat()
+    df["p_place1"] = df["proba"].astype(float)
+    df["p_place2"] = None
+    df["p_place3"] = None
+    df["p_place4"] = None
+    df["features_json"] = "{}"
+
+    predictions_rows = [
+        {
+            "model_id": rec.model_id,
+            "ts_ms": int(rec.ts_ms),
+            "event_id": rec.event_id,
+            "horse_id": rec.horse_id,
+            "market": "SUPERFECTA",
+            "proba": float(rec.proba),
+            "rank": int(rec.rank),
+        }
+        for rec in df.itertuples(index=False)
+    ]
+
+    runner_df = df[
+        [
+            "model_id",
+            "model_version",
+            "scored_at",
+            "product_id",
+            "event_id",
+            "horse_id",
+            "runner_key",
+            "p_place1",
+            "p_place2",
+            "p_place3",
+            "p_place4",
+            "features_json",
+        ]
+    ].copy()
+    runner_df = runner_df.where(pd.notnull(runner_df), None)
+    return runner_df, predictions_rows
 
 
 def train_superfecta_model(
@@ -233,7 +263,9 @@ def train_superfecta_model(
     horizon = max(predict_horizon_days, 0)
     predictions_df = _query_prediction_frame(sink, horizon)
     ts_ms = int(time.time() * 1000)
-    prediction_rows = _build_prediction_rows(predictions_df, pipeline, model_id, ts_ms)
+    runner_predictions_df, prediction_rows = _build_prediction_payloads(
+        predictions_df, pipeline, model_id, ts_ms
+    )
     predicted_events = (
         int(predictions_df["event_id"].nunique()) if not predictions_df.empty else 0
     )
@@ -250,7 +282,7 @@ def train_superfecta_model(
 
     model_row = {
         "model_id": model_id,
-        "created_ts": datetime.now(timezone.utc).isoformat(),
+        "created_ts": ts_ms,
         "market": "SUPERFECTA",
         "algo": "logistic_regression",
         "params_json": json.dumps(params, sort_keys=True),
@@ -260,7 +292,13 @@ def train_superfecta_model(
     sink.upsert_models([model_row])
 
     written = 0
-    if not dry_run and prediction_rows:
+    if not dry_run and not runner_predictions_df.empty:
+        model_dataset = os.getenv("BQ_MODEL_DATASET") or os.getenv(
+            "ML_BQ_MODEL_DATASET", f"{sink.dataset}_model"
+        )
+        sink.load_superfecta_predictions(
+            runner_predictions_df.to_dict("records"), model_dataset=model_dataset
+        )
         sink.upsert_predictions(prediction_rows)
         sink.set_active_model(model_id, ts_ms)
         written = len(prediction_rows)
