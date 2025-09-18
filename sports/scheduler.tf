@@ -130,6 +130,27 @@ resource "google_cloud_scheduler_job" "probable_odds_sweep" {
   }
 }
 
+# Daily Tote events ingest trigger (runs once each morning after full ingest)
+resource "google_cloud_scheduler_job" "daily_event_ingest" {
+  name             = "daily-event-ingest"
+  description      = "Publishes a job that ingests today's Tote events."
+  schedule         = "30 5 * * *" # Every day at 05:30 Europe/London
+  time_zone        = "Europe/London"
+  attempt_deadline = "120s"
+
+  http_target {
+    uri = google_cloud_run_v2_service.orchestrator_service.uri
+    http_method = "POST"
+    headers = {
+      "Content-Type" = "application/json"
+    }
+    body = base64encode("{\"job_name\": \"daily-event-ingest\"}")
+    oidc_token {
+      service_account_email = google_service_account.scheduler_sa.email
+    }
+  }
+}
+
 # Weekly cleanup of temporary BigQuery tables (_tmp_*) via Pub/Sub
 resource "google_cloud_scheduler_job" "bq_tmp_cleanup" {
   name             = "bq-tmp-cleanup"

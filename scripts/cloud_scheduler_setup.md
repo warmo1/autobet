@@ -41,7 +41,7 @@ This command will automatically:
     -   The `ingest-jobs` Pub/Sub topic.
     -   The two Cloud Run services (`ingestion-fetcher` and `ingestion-orchestrator`).
     -   The Pub/Sub push subscription connecting the topic to the fetcher service.
-    -   The three Cloud Scheduler jobs with the correct targets and schedules.
+    -   The Cloud Scheduler jobs (daily ingest, scanners, cleanup) with the correct targets and schedules.
 
 ## Other Useful Commands
 

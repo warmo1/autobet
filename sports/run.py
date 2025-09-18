@@ -2,6 +2,7 @@ import os
 import argparse
 import subprocess
 import json
+import time
 from dotenv import load_dotenv # Keep this
 from pathlib import Path
 from .db import get_db, init_db
@@ -191,8 +192,18 @@ def main(argv=None):
     sp_backfill = sub.add_parser("tote-backfill", help="Backfill a date range directly to BigQuery: CLOSED products, results, and weather.")
     sp_backfill.add_argument("--from", dest="date_from", required=True, help="Start date YYYY-MM-DD (inclusive)")
     sp_backfill.add_argument("--to", dest="date_to", required=True, help="End date YYYY-MM-DD (inclusive)")
+    try:
+        default_sleep = float(os.getenv("TOTE_BACKFILL_SLEEP_SECONDS", "0.5"))
+    except (TypeError, ValueError):
+        default_sleep = 0.5
     sp_backfill.add_argument("--first", type=int, default=500, help="GraphQL page size per call") # Default to include Jackpot and Pacepot
     sp_backfill.add_argument("--types", default="WIN,PLACE,EXACTA,TRIFECTA,SUPERFECTA,JACKPOT", help="Comma-separated bet types")
+    sp_backfill.add_argument(
+        "--sleep-seconds",
+        type=float,
+        default=default_sleep,
+        help="Delay between day-level API fetches; use 0 to disable (defaults to env TOTE_BACKFILL_SLEEP_SECONDS or 0.5).",
+    )
     def _cmd_backfill(args):
         from .config import cfg
         from datetime import datetime, timedelta
@@ -226,6 +237,8 @@ def main(argv=None):
                 print(f"\n[Backfill] {ds}: products/results ERROR: {e}")
                 n1 = 0
             total_prod += n1
+            if args.sleep_seconds > 0:
+                time.sleep(max(0.0, args.sleep_seconds))
             cur += timedelta(days=1)
         print(f"[Backfill] Done. products_scanned={total_prod}")
     sp_backfill.set_defaults(func=_cmd_backfill)
