@@ -220,7 +220,7 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
             print(f"Successfully fetched {len(products_nodes)} products from Tote API for date: {date_iso}")
         except Exception as e:
             print(f"Failed to fetch product data from Tote API: {e}")
-            return 0
+            raise
     if not products_nodes:
         print("No products found.")
         return 0

@@ -2648,20 +2648,27 @@ def api_status_gcp():
 
     out = {"project": project, "region": region, "cloud_run": {}, "scheduler": {}, "pubsub": {}, "app": {}}
 
-    # Cloud Run services (list all in region)
+    # Cloud Run services (try region first, then fall back to all locations)
     try:
         services: list[dict] = []
-        url = f"https://run.googleapis.com/v2/projects/{project}/locations/{region}/services"
-        r = sess.get(url, timeout=10)
-        if r.status_code == 200:
+        run_status_code: int | None = None
+        run_urls = [
+            f"https://run.googleapis.com/v2/projects/{project}/locations/{region}/services",
+            f"https://run.googleapis.com/v2/projects/{project}/locations/-/services",
+        ]
+        seen = set()
+        for url in run_urls:
+            if url in seen:
+                continue
+            seen.add(url)
+            r = sess.get(url, timeout=10)
+            if r.status_code != 200:
+                run_status_code = r.status_code
+                continue
+            run_status_code = 200
             for j in (r.json().get("services") or []):
-                # Normalize conditions map across API variants
                 conds = {c.get("type"): c.get("state") or c.get("status") for c in j.get("conditions", [])}
                 ok_vals = {"CONDITION_SUCCEEDED", "True", True}
-                # Some list responses omit the top-level Ready condition. Consider the
-                # service ready if either Ready succeeded OR both RoutesReady and
-                # ConfigurationsReady succeeded. As a final hint, the presence of
-                # latestReadyRevision typically implies readiness of the latest deploy.
                 ready_from_subconds = (conds.get("RoutesReady") in ok_vals) and (conds.get("ConfigurationsReady") in ok_vals)
                 ready_from_ready = (conds.get("Ready") in ok_vals)
                 ready_flag = bool(ready_from_ready or ready_from_subconds or bool(j.get("latestReadyRevision")))
@@ -2673,18 +2680,32 @@ def api_status_gcp():
                     "updateTime": j.get("updateTime"),
                     "conditions": j.get("conditions", []),
                 })
-        else:
-            out["cloud_run"]["status_code"] = r.status_code
+            if services:
+                break
+        if run_status_code and run_status_code != 200:
+            out["cloud_run"]["status_code"] = run_status_code
         out["cloud_run"]["services"] = services
     except Exception as e:
         out["cloud_run"]["error"] = str(e)
 
-    # Cloud Scheduler jobs
+    # Cloud Scheduler jobs (same fallback behaviour)
     try:
-        url = f"https://cloudscheduler.googleapis.com/v1/projects/{project}/locations/{region}/jobs"
-        r = sess.get(url, timeout=10)
         jobs = []
-        if r.status_code == 200:
+        sched_status_code: int | None = None
+        sched_urls = [
+            f"https://cloudscheduler.googleapis.com/v1/projects/{project}/locations/{region}/jobs",
+            f"https://cloudscheduler.googleapis.com/v1/projects/{project}/locations/-/jobs",
+        ]
+        seen_urls = set()
+        for url in sched_urls:
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            r = sess.get(url, timeout=10)
+            if r.status_code != 200:
+                sched_status_code = r.status_code
+                continue
+            sched_status_code = 200
             for j in r.json().get("jobs", []):
                 jobs.append({
                     "name": j.get("name"),
@@ -2692,8 +2713,10 @@ def api_status_gcp():
                     "state": j.get("state"),
                     "lastAttemptTime": j.get("lastAttemptTime") or (j.get("lastAttempt") or {}).get("dispatchTime"),
                 })
-        else:
-            out["scheduler"]["status_code"] = r.status_code
+            if jobs:
+                break
+        if sched_status_code and sched_status_code != 200:
+            out["scheduler"]["status_code"] = sched_status_code
         out["scheduler"]["jobs"] = jobs
     except Exception as e:
         out["scheduler"]["error"] = str(e)
