@@ -201,6 +201,7 @@ def _build_prediction_payloads(
     )
     df["rank"] = (
         df.groupby("event_id")["proba"].rank(method="first", ascending=False).astype(int)
+    )
     df["model_id"] = model_id
     df["ts_ms"] = int(ts_ms)
     df["market"] = "SUPERFECTA"
@@ -212,7 +213,21 @@ def _build_prediction_payloads(
     df["p_place2"] = None
     df["p_place3"] = None
     df["p_place4"] = None
-    df["features_json"] = "{}"
+    feature_cols = NUMERIC_FEATURES + CATEGORICAL_FEATURES
+
+    def _encode_features(row: pd.Series) -> str:
+        payload: Dict[str, Any] = {}
+        for col in feature_cols:
+            val = row.get(col)
+            if pd.isna(val):
+                payload[col] = None
+            elif col in NUMERIC_FEATURES:
+                payload[col] = float(val)
+            else:
+                payload[col] = str(val)
+        return json.dumps(payload, sort_keys=True)
+
+    df["features_json"] = df.apply(_encode_features, axis=1)
 
     predictions_rows = [
         {
@@ -302,6 +317,32 @@ def train_superfecta_model(
         sink.upsert_predictions(prediction_rows)
         sink.set_active_model(model_id, ts_ms)
         written = len(prediction_rows)
+    elif not dry_run:
+        # Ensure a placeholder row keeps the view aligned even when no races are scheduled.
+        model_dataset = os.getenv("BQ_MODEL_DATASET") or os.getenv(
+            "ML_BQ_MODEL_DATASET", f"{sink.dataset}_model"
+        )
+        sink.load_superfecta_predictions(
+            [
+                {
+                    "model_id": model_id,
+                    "model_version": datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime(
+                        "%Y-%m-%d.%H%M"
+                    ),
+                    "scored_at": datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).isoformat(),
+                    "product_id": None,
+                    "event_id": None,
+                    "horse_id": None,
+                    "runner_key": "",
+                    "p_place1": None,
+                    "p_place2": None,
+                    "p_place3": None,
+                    "p_place4": None,
+                    "features_json": "{}",
+                }
+            ],
+            model_dataset=model_dataset,
+        )
 
     return TrainingResult(
         metrics=metrics,
