@@ -82,11 +82,10 @@ def check_performance_status() -> Dict[str, Any]:
         SELECT 
           table_name,
           table_type,
-          creation_time,
-          last_modified_time
+          creation_time
         FROM `autobet-470818.autobet.INFORMATION_SCHEMA.TABLES`
         WHERE table_name LIKE 'mv_%'
-        ORDER BY last_modified_time DESC
+        ORDER BY creation_time DESC
         """
         mv_df = sink.query(mv_status_sql).to_dataframe()
         results['materialized_views'] = mv_df.to_dict('records') if not mv_df.empty else []
@@ -173,7 +172,7 @@ def print_status_report(results: Dict[str, Any]) -> None:
         for mv in results['materialized_views']:
             print(f"• {mv['table_name']}")
             print(f"  Type: {mv['table_type']}")
-            print(f"  Last Modified: {format_timestamp(mv.get('last_modified_time', ''))}")
+            print(f"  Created: {format_timestamp(mv.get('creation_time', ''))}")
             print()
     
     print("=" * 80)

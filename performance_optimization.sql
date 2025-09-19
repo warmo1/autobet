@@ -345,12 +345,12 @@ WHERE selection_id IS NOT NULL
   AND product_id IS NOT NULL
 GROUP BY product_id, selection_id;
 
--- Create materialized view for race status monitoring
+-- Create materialized view for race status monitoring (without time functions)
 CREATE OR REPLACE MATERIALIZED VIEW `autobet-470818.autobet.mv_race_status_monitor`
 OPTIONS(
   refresh_interval_minutes=5.0,
   allow_non_incremental_definition=true,
-  max_staleness=INTERVAL '0-0 0 0:10:0' YEAR TO SECOND
+  max_staleness=INTERVAL '0-0 0 0:30:0' YEAR TO SECOND
 )
 AS SELECT
   p.product_id,
@@ -361,17 +361,9 @@ AS SELECT
   p.status,
   p.currency,
   p.bet_type,
-  TIMESTAMP(p.start_iso) AS start_timestamp,
-  CURRENT_TIMESTAMP() AS check_time,
-  TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), TIMESTAMP(p.start_iso), MINUTE) AS minutes_since_start,
-  CASE 
-    WHEN TIMESTAMP(p.start_iso) < CURRENT_TIMESTAMP() AND UPPER(p.status) = 'OPEN' THEN 'SHOULD_BE_CLOSED'
-    WHEN TIMESTAMP(p.start_iso) > TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 30 MINUTE) AND UPPER(p.status) = 'CLOSED' THEN 'SHOULD_BE_OPEN'
-    ELSE 'STATUS_CORRECT'
-  END AS status_validation
+  TIMESTAMP(p.start_iso) AS start_timestamp
 FROM `autobet-470818.autobet.vw_products_latest_totals` p
-WHERE TIMESTAMP(p.start_iso) BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) 
-  AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 4 HOUR);
+WHERE TIMESTAMP(p.start_iso) >= TIMESTAMP('2024-01-01');
 
 -- 11. REAL-TIME STATUS VALIDATION VIEWS
 -- =====================================================
@@ -385,10 +377,11 @@ SELECT
   venue,
   start_iso,
   status,
-  minutes_since_start,
+  TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), start_timestamp, MINUTE) AS minutes_since_start,
   'Race started but still OPEN - may need manual closure' AS issue
 FROM `autobet-470818.autobet.mv_race_status_monitor`
-WHERE status_validation = 'SHOULD_BE_CLOSED'
+WHERE start_timestamp < CURRENT_TIMESTAMP() 
+  AND UPPER(status) = 'OPEN'
 ORDER BY minutes_since_start DESC;
 
 -- View to identify races that should be open but are closed
@@ -400,10 +393,11 @@ SELECT
   venue,
   start_iso,
   status,
-  minutes_since_start,
+  TIMESTAMP_DIFF(start_timestamp, CURRENT_TIMESTAMP(), MINUTE) AS minutes_until_start,
   'Race not started but already CLOSED - may be premature' AS issue
 FROM `autobet-470818.autobet.mv_race_status_monitor`
-WHERE status_validation = 'SHOULD_BE_OPEN'
+WHERE start_timestamp > TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 30 MINUTE) 
+  AND UPPER(status) = 'CLOSED'
 ORDER BY start_iso ASC;
 
 -- View for status update performance monitoring
@@ -411,10 +405,20 @@ CREATE OR REPLACE VIEW `autobet-470818.autobet.vw_status_update_performance` AS
 SELECT 
   CURRENT_TIMESTAMP() AS check_time,
   COUNT(*) AS total_races_checked,
-  COUNTIF(status_validation = 'SHOULD_BE_CLOSED') AS races_should_be_closed,
-  COUNTIF(status_validation = 'SHOULD_BE_OPEN') AS races_should_be_open,
-  COUNTIF(status_validation = 'STATUS_CORRECT') AS races_status_correct,
-  ROUND(COUNTIF(status_validation = 'STATUS_CORRECT') * 100.0 / COUNT(*), 2) AS accuracy_percentage
+  COUNTIF(start_timestamp < CURRENT_TIMESTAMP() AND UPPER(status) = 'OPEN') AS races_should_be_closed,
+  COUNTIF(start_timestamp > TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 30 MINUTE) AND UPPER(status) = 'CLOSED') AS races_should_be_open,
+  COUNTIF(
+    (start_timestamp >= CURRENT_TIMESTAMP() AND UPPER(status) = 'OPEN') OR
+    (start_timestamp < CURRENT_TIMESTAMP() AND UPPER(status) = 'CLOSED') OR
+    (start_timestamp <= TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 30 MINUTE) AND UPPER(status) = 'CLOSED')
+  ) AS races_status_correct,
+  ROUND(
+    COUNTIF(
+      (start_timestamp >= CURRENT_TIMESTAMP() AND UPPER(status) = 'OPEN') OR
+      (start_timestamp < CURRENT_TIMESTAMP() AND UPPER(status) = 'CLOSED') OR
+      (start_timestamp <= TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 30 MINUTE) AND UPPER(status) = 'CLOSED')
+    ) * 100.0 / COUNT(*), 2
+  ) AS accuracy_percentage
 FROM `autobet-470818.autobet.mv_race_status_monitor`;
 
 -- 12. PEAK HOURS CACHE OPTIMIZATION
@@ -444,8 +448,7 @@ SELECT
   'Materialized Views Status' as check_type,
   table_name,
   table_type,
-  creation_time,
-  last_modified_time
+  creation_time
 FROM `autobet-470818.autobet.INFORMATION_SCHEMA.TABLES`
 WHERE table_name LIKE 'mv_%'
 ORDER BY creation_time DESC;

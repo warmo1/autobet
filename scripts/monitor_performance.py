@@ -115,12 +115,11 @@ class PerformanceMonitor:
                 table_name,
                 table_type,
                 creation_time,
-                last_modified_time,
                 row_count,
                 size_bytes
             FROM `{self.sink.project}.{self.sink.dataset}.INFORMATION_SCHEMA.TABLES`
             WHERE table_name LIKE 'mv_%' OR table_name LIKE 'vw_%'
-            ORDER BY last_modified_time DESC
+            ORDER BY creation_time DESC
             """
             
             result = self.sink.query(check_sql)
@@ -131,7 +130,6 @@ class PerformanceMonitor:
                     'name': row.table_name,
                     'type': row.table_type,
                     'created': str(row.creation_time),
-                    'last_modified': str(row.last_modified_time),
                     'row_count': getattr(row, 'row_count', 0),
                     'size_bytes': getattr(row, 'size_bytes', 0)
                 })

@@ -147,17 +147,16 @@ def monitor_performance():
         check_sql = f"""
         SELECT 
             table_name,
-            creation_time,
-            last_modified_time
+            creation_time
         FROM `{sink.project}.{sink.dataset}.INFORMATION_SCHEMA.TABLES`
         WHERE table_name LIKE 'mv_%'
-        ORDER BY last_modified_time DESC
+        ORDER BY creation_time DESC
         """
         
         try:
             result = sink.query(check_sql)
             for row in result:
-                logger.info(f"Materialized view {row.table_name}: last modified {row.last_modified_time}")
+                logger.info(f"Materialized view {row.table_name}: created {row.creation_time}")
         except Exception as e:
             logger.warning(f"Could not check materialized view status: {e}")
             
