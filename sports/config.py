@@ -56,6 +56,7 @@ class Config:
     bq_project: str = os.getenv("BQ_PROJECT", "autobet-470818")
     bq_dataset: str = os.getenv("BQ_DATASET", "autobet")
     bq_location: str = os.getenv("BQ_LOCATION", "EU")
+    bq_ensure_on_boot: bool = os.getenv("BQ_ENSURE_ON_BOOT", "true").lower() in ("1", "true", "yes", "on")
 
     # --- BigQuery client options ---
     # Use the BigQuery Storage API for faster dataframe reads.

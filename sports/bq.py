@@ -3118,10 +3118,13 @@ def get_bq_sink() -> BigQuerySink | None:
         if _BQ_SINK_SINGLETON is None:
             try:
                 _BQ_SINK_SINGLETON = BigQuerySink(cfg.bq_project, cfg.bq_dataset, cfg.bq_location)
-                try:
-                    _BQ_SINK_SINGLETON.ensure_views()
-                except Exception as exc:
-                    print(f"Failed to ensure BigQuery views: {exc}")
+                if cfg.bq_ensure_on_boot:
+                    try:
+                        _BQ_SINK_SINGLETON.ensure_views()
+                    except Exception as exc:
+                        print(f"Failed to ensure BigQuery views: {exc}")
+                else:
+                    print("Skipping BigQuery ensure_views on boot (BQ_ENSURE_ON_BOOT=false).")
             except Exception:
                 _BQ_SINK_SINGLETON = None
         return _BQ_SINK_SINGLETON
