@@ -130,6 +130,27 @@ resource "google_cloud_scheduler_job" "probable_odds_sweep" {
   }
 }
 
+# Hourly bulk probable odds pre-calculation job (longer horizon window)
+resource "google_cloud_scheduler_job" "probable_odds_bulk" {
+  name             = "probable-odds-bulk"
+  description      = "Publishes a bulk probable-odds job for events in the next 12 hours."
+  schedule         = "5 * * * *"  # Top of every hour with slight offset
+  time_zone        = "UTC"
+  attempt_deadline = "120s"
+
+  http_target {
+    uri = google_cloud_run_v2_service.orchestrator_service.uri
+    http_method = "POST"
+    headers = {
+      "Content-Type" = "application/json"
+    }
+    body = base64encode("{\"job_name\": \"probable-odds-bulk\", \"window_hours\": 12}")
+    oidc_token {
+      service_account_email = google_service_account.scheduler_sa.email
+    }
+  }
+}
+
 # Daily Tote events ingest trigger (runs once each morning after full ingest)
 resource "google_cloud_scheduler_job" "daily_event_ingest" {
   name             = "daily-event-ingest"

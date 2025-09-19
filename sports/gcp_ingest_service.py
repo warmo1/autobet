@@ -16,7 +16,7 @@ from flask import Flask, request
 from google.cloud import bigquery
 
 import pandas as pd
-from .gcp import parse_pubsub_envelope, upload_text_to_bucket
+from .gcp import parse_pubsub_envelope, publish_pubsub_message
 from .config import cfg
 from .providers.tote_api import ToteClient, ToteError, rate_limited_get
 from .bq import get_bq_sink

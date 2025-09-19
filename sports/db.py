@@ -23,6 +23,11 @@ def get_db() -> BigQuerySink:
                 "BigQuery is not configured. Please set BQ_PROJECT and BQ_DATASET."
             )
         _db = BigQuerySink(cfg.bq_project, cfg.bq_dataset, cfg.bq_location)
+        try:
+            _db.ensure_views()
+        except Exception as exc:
+            # Log but allow the service to continue; future queries may retry.
+            print(f"Failed to ensure BigQuery views: {exc}")
     return _db
 
 def init_db():

@@ -4,8 +4,9 @@ import json
 import time
 from flask import Flask, request
 from google.cloud import bigquery
+from typing import Any
 
-from .gcp import parse_pubsub_envelope, publish_pubsub_message
+from .gcp import publish_pubsub_message
 from .config import cfg
 from .bq import get_bq_sink
 import uuid
@@ -16,6 +17,32 @@ app = Flask(__name__)
 @app.get("/")
 def health() -> tuple[str, int]:
     return ("ok", 200)
+
+
+def _log_job_run(task: str, status: str, *, payload: dict[str, Any] | None = None,
+                 metrics: dict[str, Any] | None = None, error: str | None = None) -> None:
+    """Persist orchestrator job execution metadata for the status dashboard."""
+    sink = get_bq_sink()
+    if not sink:
+        return
+    now_ms = int(time.time() * 1000)
+    try:
+        sink.upsert_ingest_job_runs([
+            {
+                "job_id": f"orchestrator-{uuid.uuid4().hex}",
+                "component": "orchestrator",
+                "task": task,
+                "status": status,
+                "started_ts": now_ms,
+                "ended_ts": now_ms,
+                "duration_ms": 0,
+                "payload_json": json.dumps(payload) if payload else None,
+                "error": error,
+                "metrics_json": json.dumps(metrics) if metrics else None,
+            }
+        ])
+    except Exception as exc:
+        print(f"Failed to log job run for {task}: {exc}")
 
 def scan_and_publish_pre_race_jobs():
     """
@@ -35,30 +62,14 @@ def scan_and_publish_pre_race_jobs():
         """).to_dataframe()
 
     except Exception as e:
-        print(f"Error querying for upcoming races: {e}")
+        err = str(e)
+        print(f"Error querying for upcoming races: {err}")
+        _log_job_run("pre-race-scanner", "ERROR", error=err)
         return "Query for upcoming races failed", 500
 
     if upcoming_df.empty:
         # Log a no-op run
-        try:
-            sink = get_bq_sink()
-            now_ms = int(time.time() * 1000)
-            sink.upsert_ingest_job_runs([
-                {
-                    "job_id": f"orchestrator-{uuid.uuid4().hex}",
-                    "component": "orchestrator",
-                    "task": "pre-race-scanner",
-                    "status": "OK",
-                    "started_ts": now_ms,
-                    "ended_ts": now_ms,
-                    "duration_ms": 0,
-                    "payload_json": None,
-                    "error": None,
-                    "metrics_json": "{}",
-                }
-            ])
-        except Exception:
-            pass
+        _log_job_run("pre-race-scanner", "OK", metrics={})
         return "No upcoming races to process", 200
 
     print(f"Found {len(upcoming_df)} upcoming products to refresh.")
@@ -85,25 +96,11 @@ def scan_and_publish_pre_race_jobs():
         published_count += 1
 
     # Log run with metrics
-    try:
-        sink = get_bq_sink()
-        now_ms = int(time.time() * 1000)
-        sink.upsert_ingest_job_runs([
-            {
-                "job_id": f"orchestrator-{uuid.uuid4().hex}",
-                "component": "orchestrator",
-                "task": "pre-race-scanner",
-                "status": "OK",
-                "started_ts": now_ms,
-                "ended_ts": now_ms,
-                "duration_ms": 0,
-                "payload_json": None,
-                "error": None,
-                "metrics_json": json.dumps({"published_count": int(published_count), "products": int(len(upcoming_df))}),
-            }
-        ])
-    except Exception:
-        pass
+    _log_job_run(
+        "pre-race-scanner",
+        "OK",
+        metrics={"published_count": int(published_count), "products": int(len(upcoming_df))},
+    )
     return f"Published {published_count} pre-race jobs for {len(upcoming_df)} products.", 200
 
 
@@ -127,29 +124,13 @@ def scan_and_publish_results_jobs():
             LIMIT 100
         """).to_dataframe()
     except Exception as e:
-        print(f"Error querying for events needing results: {e}")
+        err = str(e)
+        print(f"Error querying for events needing results: {err}")
+        _log_job_run("post-race-results-scanner", "ERROR", error=err)
         return "Query for events needing results failed", 500
     
     if results_needed_df.empty:
-        try:
-            sink = get_bq_sink()
-            now_ms = int(time.time() * 1000)
-            sink.upsert_ingest_job_runs([
-                {
-                    "job_id": f"orchestrator-{uuid.uuid4().hex}",
-                    "component": "orchestrator",
-                    "task": "post-race-results-scanner",
-                    "status": "OK",
-                    "started_ts": now_ms,
-                    "ended_ts": now_ms,
-                    "duration_ms": 0,
-                    "payload_json": None,
-                    "error": None,
-                    "metrics_json": "{}",
-                }
-            ])
-        except Exception:
-            pass
+        _log_job_run("post-race-results-scanner", "OK", metrics={})
         return "No events found needing results.", 200
 
     print(f"Found {len(results_needed_df)} events needing results to be ingested.")
@@ -158,28 +139,21 @@ def scan_and_publish_results_jobs():
     if not project_id: return "GCP_PROJECT not set", 500
 
     unique_event_ids = results_needed_df['event_id'].unique()
-    for event_id in unique_event_ids:
-        job = {"task": "ingest_event_results", "event_id": event_id}
-        publish_pubsub_message(project_id, topic_id, job)
     try:
-        sink = get_bq_sink()
-        now_ms = int(time.time() * 1000)
-        sink.upsert_ingest_job_runs([
-            {
-                "job_id": f"orchestrator-{uuid.uuid4().hex}",
-                "component": "orchestrator",
-                "task": "post-race-results-scanner",
-                "status": "OK",
-                "started_ts": now_ms,
-                "ended_ts": now_ms,
-                "duration_ms": 0,
-                "payload_json": None,
-                "error": None,
-                "metrics_json": json.dumps({"published_count": int(len(unique_event_ids))}),
-            }
-        ])
-    except Exception:
-        pass
+        for event_id in unique_event_ids:
+            job = {"task": "ingest_event_results", "event_id": event_id}
+            publish_pubsub_message(project_id, topic_id, job)
+    except Exception as e:
+        err = str(e)
+        print(f"Failed to publish result ingest jobs: {err}")
+        _log_job_run("post-race-results-scanner", "ERROR", metrics={"published_count": 0}, error=err)
+        return "Failed to publish result ingest jobs", 500
+
+    _log_job_run(
+        "post-race-results-scanner",
+        "OK",
+        metrics={"published_count": int(len(unique_event_ids))},
+    )
     return f"Published {len(unique_event_ids)} result ingestion jobs.", 200
 
 
@@ -204,29 +178,13 @@ def scan_and_publish_probable_sweep():
             """
         ).to_dataframe()
     except Exception as e:
-        print(f"Error querying probable sweep: {e}")
+        err = str(e)
+        print(f"Error querying probable sweep: {err}")
+        _log_job_run("probable-odds-sweep", "ERROR", error=err)
         return "Query for probable sweep failed", 500
 
     if df.empty:
-        try:
-            sink = get_bq_sink()
-            now_ms = int(time.time() * 1000)
-            sink.upsert_ingest_job_runs([
-                {
-                    "job_id": f"orchestrator-{uuid.uuid4().hex}",
-                    "component": "orchestrator",
-                    "task": "probable-odds-sweep",
-                    "status": "OK",
-                    "started_ts": now_ms,
-                    "ended_ts": now_ms,
-                    "duration_ms": 0,
-                    "payload_json": None,
-                    "error": None,
-                    "metrics_json": "{}",
-                }
-            ])
-        except Exception:
-            pass
+        _log_job_run("probable-odds-sweep", "OK", metrics={})
         return "No events for probable sweep.", 200
 
     project_id = os.getenv("GCP_PROJECT") or cfg.bq_project
@@ -235,31 +193,80 @@ def scan_and_publish_probable_sweep():
         return "GCP_PROJECT not set", 500
 
     n = 0
-    for _, row in df.iterrows():
-        eid = row["event_id"]
-        publish_pubsub_message(project_id, topic_id, {"task": "ingest_probable_odds", "event_id": eid})
-        n += 1
+    try:
+        for _, row in df.iterrows():
+            eid = row["event_id"]
+            publish_pubsub_message(project_id, topic_id, {"task": "ingest_probable_odds", "event_id": eid})
+            n += 1
+    except Exception as e:
+        err = str(e)
+        print(f"Failed to publish probable odds jobs: {err}")
+        _log_job_run("probable-odds-sweep", "ERROR", metrics={"published_count": int(n)}, error=err)
+        return "Failed to publish probable odds jobs", 500
+
+    _log_job_run("probable-odds-sweep", "OK", metrics={"published_count": int(n)})
+    return f"Published {n} probable odds jobs.", 200
+
+
+def publish_probable_bulk_jobs(window_hours: int = 12):
+    """Publish a bulk probable-odds refresh covering a longer horizon."""
 
     try:
-        sink = get_bq_sink()
-        now_ms = int(time.time() * 1000)
-        sink.upsert_ingest_job_runs([
-            {
-                "job_id": f"orchestrator-{uuid.uuid4().hex}",
-                "component": "orchestrator",
-                "task": "probable-odds-sweep",
-                "status": "OK",
-                "started_ts": now_ms,
-                "ended_ts": now_ms,
-                "duration_ms": 0,
-                "payload_json": None,
-                "error": None,
-                "metrics_json": json.dumps({"published_count": int(n)}),
-            }
-        ])
-    except Exception:
-        pass
-    return f"Published {n} probable odds jobs.", 200
+        window_hours = max(1, int(window_hours))
+    except (TypeError, ValueError):
+        window_hours = 12
+
+    db = get_db()
+    try:
+        df = db.query(
+            f"""
+            SELECT DISTINCT event_id
+            FROM `{cfg.bq_project}.{cfg.bq_dataset}.vw_products_latest_totals`
+            WHERE status = 'OPEN'
+              AND UPPER(bet_type) = 'WIN'
+              AND TIMESTAMP(start_iso) BETWEEN CURRENT_TIMESTAMP()
+                                       AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL {int(window_hours)} HOUR)
+            LIMIT 500
+            """
+        ).to_dataframe()
+    except Exception as e:
+        err = str(e)
+        print(f"Error querying bulk probable window: {err}")
+        _log_job_run("probable-odds-bulk", "ERROR", metrics={"published_count": 0}, error=err)
+        return "Query for probable bulk window failed", 500
+
+    if df.empty:
+        _log_job_run("probable-odds-bulk", "OK", metrics={"published_count": 0})
+        return "No events found for probable bulk refresh.", 200
+
+    event_ids = df["event_id"].dropna().unique().tolist()
+    if not event_ids:
+        _log_job_run("probable-odds-bulk", "OK", metrics={"published_count": 0})
+        return "No valid event IDs for probable bulk refresh.", 200
+
+    project_id = os.getenv("GCP_PROJECT") or cfg.bq_project
+    topic_id = os.getenv("PUBSUB_TOPIC_ID", "ingest-jobs")
+    if not project_id:
+        _log_job_run("probable-odds-bulk", "ERROR", metrics={"published_count": 0}, error="GCP_PROJECT not set")
+        return "GCP_PROJECT not set", 500
+
+    job_payload = {"task": "ingest_multiple_probable_odds", "event_ids": event_ids}
+    try:
+        publish_pubsub_message(project_id, topic_id, job_payload)
+    except Exception as e:
+        err = str(e)
+        print(f"Failed to publish probable bulk job: {err}")
+        _log_job_run("probable-odds-bulk", "ERROR", metrics={"published_count": 0}, error=err)
+        return "Failed to publish probable bulk job", 500
+
+    _log_job_run(
+        "probable-odds-bulk",
+        "OK",
+        payload={"window_hours": window_hours, "event_count": len(event_ids)},
+        metrics={"published_count": int(len(event_ids))},
+    )
+    return f"Published bulk probable odds job for {len(event_ids)} events.", 200
+
 
 def publish_daily_event_ingest():
     """Publishes a job to ingest all of today's events."""
@@ -269,28 +276,21 @@ def publish_daily_event_ingest():
         return "GCP_PROJECT not set", 500
 
     job = {"task": "ingest_events_for_day", "date": "today"}
-    publish_pubsub_message(project_id, topic_id, job)
+    try:
+        publish_pubsub_message(project_id, topic_id, job)
+    except Exception as e:
+        err = str(e)
+        print(f"Failed to publish daily event ingest job: {err}")
+        _log_job_run("daily-event-ingest-trigger", "ERROR", payload=job, error=err)
+        return "Failed to publish daily event ingest job", 500
 
     # Log run
-    try:
-        sink = get_bq_sink()
-        now_ms = int(time.time() * 1000)
-        sink.upsert_ingest_job_runs([
-            {
-                "job_id": f"orchestrator-{uuid.uuid4().hex}",
-                "component": "orchestrator",
-                "task": "daily-event-ingest-trigger",
-                "status": "OK",
-                "started_ts": now_ms,
-                "ended_ts": now_ms,
-                "duration_ms": 0,
-                "payload_json": json.dumps(job),
-                "error": None,
-                "metrics_json": json.dumps({"published_count": 1}),
-            }
-        ])
-    except Exception:
-        pass
+    _log_job_run(
+        "daily-event-ingest-trigger",
+        "OK",
+        payload=job,
+        metrics={"published_count": 1},
+    )
 
     return "Published daily event ingest job.", 200
 
@@ -314,6 +314,15 @@ def handle_scheduler() -> tuple[str, int]:
             return scan_and_publish_results_jobs()
         elif job_name == "probable-odds-sweep":
             return scan_and_publish_probable_sweep()
+        elif job_name == "probable-odds-bulk":
+            window = payload.get("window_hours", 12)
+            try:
+                window_int = int(window)
+            except (TypeError, ValueError):
+                window_int = 12
+            if window_int <= 0:
+                window_int = 12
+            return publish_probable_bulk_jobs(window_int)
         elif job_name == "daily-event-ingest":
             return publish_daily_event_ingest()
         else:
