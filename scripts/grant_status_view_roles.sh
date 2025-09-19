@@ -32,4 +32,8 @@ gcloud projects add-iam-policy-binding "${PROJECT}" \
   --member="${MEMBER}" \
   --role="roles/cloudscheduler.viewer"
 
+gcloud projects add-iam-policy-binding "${PROJECT}" \
+  --member="${MEMBER}" \
+  --role="roles/pubsub.viewer"
+
 echo "Done. It can take a minute for permissions to propagate."
