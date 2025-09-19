@@ -975,9 +975,12 @@ def index():
     end_iso = (now + timedelta(hours=24)).isoformat(timespec='seconds').replace('+00:00', 'Z')
 
     ev_sql = (
-        "SELECT event_id, name, venue, country, start_iso, sport, status "
-        "FROM `autobet-470818.autobet.tote_events` WHERE start_iso BETWEEN @start AND @end "
-        "ORDER BY start_iso ASC LIMIT 100"
+        "SELECT e.event_id, e.name, e.venue, e.country, e.start_iso, e.sport, e.status, "
+        "COALESCE(erc.n_runners, 0) AS n_runners "
+        "FROM `autobet-470818.autobet.tote_events` e "
+        "LEFT JOIN `autobet-470818.autobet.vw_event_runner_counts` erc ON e.event_id = erc.event_id "
+        "WHERE e.start_iso BETWEEN @start AND @end "
+        "ORDER BY e.start_iso ASC LIMIT 100"
     )
     evs = sql_df(ev_sql, params={"start": start_iso, "end": end_iso})
 
@@ -1166,10 +1169,12 @@ def tote_events_page():
     if date_to:
         where.append("SUBSTR(start_iso,1,10) <= ?"); params.append(date_to)
     base_sql = ( # noqa
-        "SELECT event_id, name, venue, country, start_iso, sport, status, competitors_json, home, away "
-        "FROM `tote_events`"
+        "SELECT e.event_id, e.name, e.venue, e.country, e.start_iso, e.sport, e.status, e.competitors_json, e.home, e.away, "
+        "COALESCE(erc.n_runners, 0) AS n_runners "
+        "FROM `tote_events` e "
+        "LEFT JOIN `vw_event_runner_counts` erc ON e.event_id = erc.event_id"
     )
-    count_sql = base_sql.replace("SELECT event_id, name, venue, country, start_iso, sport, status, competitors_json, home, away", "SELECT COUNT(1) AS c")
+    count_sql = base_sql.replace("SELECT e.event_id, e.name, e.venue, e.country, e.start_iso, e.sport, e.status, e.competitors_json, e.home, e.away, COALESCE(erc.n_runners, 0) AS n_runners", "SELECT COUNT(1) AS c")
     if where:
         base_sql += " WHERE " + " AND ".join(where)
         count_sql += " WHERE " + " AND ".join(where)

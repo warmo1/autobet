@@ -44,7 +44,7 @@
 
   <div class="table-responsive">
     <table class="table table-sm table-striped">
-      <thead><tr><th>Event</th><th>Venue</th><th>Country</th><th>Start</th><th>Status</th><th></th></tr></thead>
+      <thead><tr><th>Event</th><th>Venue</th><th>Country</th><th>Start</th><th>Runners</th><th>Status</th><th></th></tr></thead>
       <tbody>
         {% for e in events %}
         <tr data-event-id="{{ e.event_id }}">
@@ -52,11 +52,12 @@
           <td>{{ e.venue }}</td>
           <td>{{ e.country }}</td>
           <td class="time-iso" data-iso="{{ e.start_iso }}">{{ e.start_iso }}</td>
+          <td class="text-center">{{ e.n_runners or 0 }}</td>
           <td><span class="status-badge" data-field="status">{{ e.status }}</span></td>
           <td><a class="btn btn-sm btn-outline-primary" href="{{ url_for('event_detail', event_id=e.event_id) }}">View</a></td>
         </tr>
         {% else %}
-        <tr><td colspan="6" class="text-center">No events found.</td></tr>
+        <tr><td colspan="7" class="text-center">No events found.</td></tr>
         {% endfor %}
       </tbody>
     </table>

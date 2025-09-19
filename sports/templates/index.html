@@ -20,7 +20,7 @@
           {% if now_next %}
             <div class="table-responsive mb-2">
               <table class="table table-sm align-middle">
-                <thead><tr><th>Start</th><th>Event</th><th>Venue</th><th>Country</th><th>Status</th><th></th></tr></thead>
+                <thead><tr><th>Start</th><th>Event</th><th>Venue</th><th>Country</th><th>Runners</th><th>Status</th><th></th></tr></thead>
                 <tbody>
                   {% for e in now_next %}
                     <tr>
@@ -28,6 +28,7 @@
                       <td class="text-truncate" style="max-width:320px;">{{ e.name }}</td>
                       <td>{{ e.venue }}</td>
                       <td>{{ e.country }}</td>
+                      <td class="text-center">{{ e.n_runners or 0 }}</td>
                       <td>{{ e.status }}</td>
                       <td><a class="btn btn-sm btn-outline-primary" href="{{ url_for('event_detail', event_id=e.event_id) }}">View</a></td>
                     </tr>
