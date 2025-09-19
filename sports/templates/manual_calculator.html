@@ -333,6 +333,7 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
+    try {
     const numRunnersInput = document.getElementById('num_runners');
     const runnersGrid = document.getElementById('runners-grid');
     const existingRunners = {{ calc_params.runners | tojson }};
@@ -460,6 +461,32 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    // Add form submission debugging
+    const form = document.querySelector('form');
+    if (form) {
+        form.addEventListener('submit', function(e) {
+            console.log('Form submitted!');
+            console.log('Form data:', new FormData(form));
+            
+            // Check if form is valid
+            if (!form.checkValidity()) {
+                console.log('Form validation failed!');
+                e.preventDefault();
+                return false;
+            }
+            
+            console.log('Form validation passed, submitting...');
+        });
+        
+        // Add click handler to submit button for debugging
+        const submitBtn = form.querySelector('button[type="submit"]');
+        if (submitBtn) {
+            submitBtn.addEventListener('click', function(e) {
+                console.log('Submit button clicked!');
+            });
+        }
+    }
+
     // Chart.js logic
     const gridData = {{ (results.pl_model.ev_grid if results and results.pl_model else []) | tojson }};
     const canvas = document.getElementById('evChart');
@@ -505,6 +532,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             }
         });
+    }
+    } catch (error) {
+        console.error('JavaScript error in manual calculator:', error);
+        // Show error to user
+        const errorDiv = document.createElement('div');
+        errorDiv.className = 'alert alert-danger';
+        errorDiv.innerHTML = '<strong>JavaScript Error:</strong> ' + error.message + '<br>Check console for details.';
+        document.querySelector('.card-body').insertBefore(errorDiv, document.querySelector('form'));
     }
 });
 </script>
