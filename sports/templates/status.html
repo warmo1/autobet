@@ -178,34 +178,118 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   function renderGcp(container, data) {
-    const services = Array.isArray(data.cloud_run?.services) ? data.cloud_run.services : [];
-    if (!services.length) {
-      container.innerHTML = '<div class="text-muted">No services found.</div>';
-      return;
+    const parts = [];
+    const project = safeText(data.project);
+    const region = safeText(data.region);
+    if (project !== 'N/A' || region !== 'N/A') {
+      parts.push(`<div class="small text-muted mb-2">Project: ${project} | Region: ${region}</div>`);
     }
-    const rows = services.map(service => `
-      <tr>
-        <td>${safeText(service.name)}</td>
-        <td>${service.ready ? '<span class="badge bg-success">Ready</span>' : '<span class="badge bg-danger">Not Ready</span>'}</td>
-        <td>${service.uri ? `<a href="${service.uri}" target="_blank" rel="noopener">${service.uri}</a>` : '—'}</td>
-        <td>${formatLocalTime(service.updateTime)}</td>
-      </tr>
-    `).join('');
-    container.innerHTML = `
-      <div class="table-responsive">
-        <table class="table table-sm table-striped mb-0">
-          <thead class="table-light">
-            <tr>
-              <th>Service Name</th>
-              <th>Status</th>
-              <th>URL</th>
-              <th>Last Updated</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-    `;
+
+    const cloudRun = data.cloud_run || {};
+    const services = Array.isArray(cloudRun.services) ? cloudRun.services : [];
+    if (cloudRun.error) {
+      parts.push(`<div class="alert alert-danger p-2">Cloud Run error: ${safeText(cloudRun.error)}</div>`);
+    } else if (services.length) {
+      const rows = services.map(service => `
+        <tr>
+          <td>${safeText(service.name)}</td>
+          <td>${service.ready ? '<span class="badge bg-success">Ready</span>' : '<span class="badge bg-danger">Not Ready</span>'}</td>
+          <td>${service.uri ? `<a href="${service.uri}" target="_blank" rel="noopener">${service.uri}</a>` : '—'}</td>
+          <td>${formatLocalTime(service.updateTime)}</td>
+        </tr>
+      `).join('');
+      parts.push(`
+        <div class="mb-3">
+          <h6 class="fw-semibold">Cloud Run Services</h6>
+          <div class="table-responsive">
+            <table class="table table-sm table-striped mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th>Service</th>
+                  <th>Status</th>
+                  <th>URL</th>
+                  <th>Updated</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </div>
+      `);
+    } else {
+      const statusNote = cloudRun.status_code ? ` (API status ${safeText(cloudRun.status_code)})` : '';
+      parts.push(`<div class="text-muted mb-3">No Cloud Run services found${statusNote}.</div>`);
+    }
+
+    const scheduler = data.scheduler || {};
+    if (scheduler.error) {
+      parts.push(`<div class="alert alert-danger p-2">Scheduler error: ${safeText(scheduler.error)}</div>`);
+    } else {
+      const jobs = Array.isArray(scheduler.jobs) ? scheduler.jobs : [];
+      if (jobs.length) {
+        const jobRows = jobs.map(job => `
+          <tr>
+            <td>${safeText(job.name)}</td>
+            <td>${safeText(job.schedule)}</td>
+            <td>${safeText(job.state)}</td>
+            <td>${formatLocalTime(job.lastAttemptTime)}</td>
+          </tr>
+        `).join('');
+        parts.push(`
+          <div class="mb-3">
+            <h6 class="fw-semibold">Cloud Scheduler</h6>
+            <div class="table-responsive">
+              <table class="table table-sm table-striped mb-0">
+                <thead class="table-light">
+                  <tr>
+                    <th>Job</th>
+                    <th>Schedule</th>
+                    <th>State</th>
+                    <th>Last Attempt</th>
+                  </tr>
+                </thead>
+                <tbody>${jobRows}</tbody>
+              </table>
+            </div>
+          </div>
+        `);
+      } else {
+        const schedNote = scheduler.status_code ? ` (API status ${safeText(scheduler.status_code)})` : '';
+        parts.push(`<div class="text-muted mb-3">No Cloud Scheduler jobs found${schedNote}.</div>`);
+      }
+    }
+
+    const pubsub = data.pubsub || {};
+    if (pubsub.error) {
+      parts.push(`<div class="alert alert-danger p-2">Pub/Sub error: ${safeText(pubsub.error)}</div>`);
+    } else if (pubsub.topic || pubsub.subscription) {
+      const topic = pubsub.topic || {};
+      const sub = pubsub.subscription || {};
+      const topicStatus = topic.exists ? '<span class="badge bg-success">Exists</span>' : '<span class="badge bg-danger">Missing</span>';
+      const subStatus = sub.exists ? '<span class="badge bg-success">Exists</span>' : '<span class="badge bg-danger">Missing</span>';
+      parts.push(`
+        <div class="mb-2">
+          <h6 class="fw-semibold">Pub/Sub</h6>
+          <div class="small">Topic: ${topicStatus} ${safeText(topic.name || '')}</div>
+          <div class="small">Subscription: ${subStatus} ${safeText(sub.name || '')}</div>
+          ${sub.topic ? `<div class="small text-muted">Topic binding: ${safeText(sub.topic)}</div>` : ''}
+          ${sub.pushEndpoint ? `<div class="small text-muted">Push endpoint: ${safeText(sub.pushEndpoint)}</div>` : ''}
+        </div>
+      `);
+    }
+
+    const appFlags = data.app || {};
+    const appKeys = Object.keys(appFlags);
+    if (appKeys.length) {
+      const flagRows = appKeys.map(key => `<div class="small">${safeText(key)}: ${safeText(appFlags[key])}</div>`).join('');
+      parts.push(`<div><h6 class="fw-semibold">App Flags</h6>${flagRows}</div>`);
+    }
+
+    if (!parts.length) {
+      parts.push('<div class="text-muted">No infrastructure data available.</div>');
+    }
+
+    container.innerHTML = parts.join('');
   }
 
   function renderUpcoming(container, data) {
@@ -248,13 +332,20 @@ document.addEventListener('DOMContentLoaded', function() {
     const rows = jobs.map(job => {
       const durationMs = Number(job.duration_ms);
       const duration = Number.isFinite(durationMs) ? (durationMs / 1000).toFixed(1) : 'N/A';
+      const statusRaw = (job.status || '').toString().toUpperCase();
+      const badgeClass = statusRaw === 'OK' ? 'bg-success' : statusRaw === 'PENDING' ? 'bg-warning text-dark' : 'bg-danger';
+      const statusBadge = statusRaw ? `<span class="badge ${badgeClass}">${statusRaw}</span>` : '<span class="badge bg-secondary">N/A</span>';
+      const errText = job.error ? job.error.toString() : '';
+      const errDisplay = errText.length > 160 ? `${errText.slice(0, 157)}...` : errText;
       return `
         <tr>
+          <td>${safeText(job.component)}</td>
           <td>${safeText(job.task)}</td>
-          <td>${safeText(job.status)}</td>
+          <td>${statusBadge}</td>
           <td>${duration}</td>
           <td>${formatLocalTime(job.started_ts)}</td>
           <td>${formatLocalTime(job.ended_ts)}</td>
+          <td>${safeText(errDisplay)}</td>
         </tr>
       `;
     }).join('');
@@ -262,11 +353,13 @@ document.addEventListener('DOMContentLoaded', function() {
       <table class="table table-striped table-sm mb-0">
         <thead class="table-light">
           <tr>
+            <th>Component</th>
             <th>Task</th>
             <th>Status</th>
             <th>Duration (s)</th>
             <th>Started</th>
             <th>Ended</th>
+            <th>Error</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>

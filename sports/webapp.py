@@ -2805,13 +2805,26 @@ def api_status_qc():
 @app.get("/api/status/upcoming")
 def api_status_upcoming():
     """Return upcoming races/products in the next 4 hours if view exists."""
-    upcoming = []
+    upcoming: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    def _df_records(frame: pd.DataFrame | None) -> list[dict[str, Any]]:
+        if frame is None or frame.empty:
+            return []
+        return frame.to_dict("records")
+
+    # Primary view focuses on GB superfecta races with richer metrics.
     try:
-        # Use the 60-minute view which is known to exist.
-        df = sql_df("SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, combos, S, roi_current, viable_now FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso")
-        upcoming = df.to_dict("records") if not df.empty else []
-    except Exception:
-        # Fallback: generic query for open products in the next 4 hours
+        df = sql_df(
+            "SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, combos, S, roi_current, viable_now "
+            "FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso"
+        )
+        upcoming = _df_records(df)
+    except Exception as exc:
+        errors.append(f"primary:{exc}")
+
+    # Broader fallback for any open products in the next four hours.
+    if not upcoming:
         try:
             now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
             df = sql_df(
@@ -2823,10 +2836,13 @@ def api_status_upcoming():
                 "ORDER BY p.start_iso",
                 params={"now": now_iso},
             )
-            upcoming = df.to_dict("records") if not df.empty else []
-        except Exception:
-            # If all fallbacks fail, return an empty list.
-            upcoming = []
+            upcoming = _df_records(df)
+        except Exception as exc:
+            errors.append(f"fallback:{exc}")
+
+    if errors:
+        print(f"[status_upcoming] suppressed errors: {errors}")
+
     return app.response_class(json.dumps({"items": upcoming}), mimetype="application/json")
 
 
