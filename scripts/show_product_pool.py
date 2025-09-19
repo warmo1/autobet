@@ -23,12 +23,28 @@ query($id:String!){
     id
     ... on BettingProduct {
       pool {
-        total { grossAmount { decimalAmount } netAmount { decimalAmount } }
-        carryIn { grossAmount { decimalAmount } netAmount { decimalAmount } }
+        total { 
+          grossAmounts { decimalAmount currency { code } }
+          netAmounts { decimalAmount currency { code } }
+        }
+        carryIn { 
+          grossAmounts { decimalAmount currency { code } }
+          netAmounts { decimalAmount currency { code } }
+        }
+        guarantee { 
+          grossAmounts { decimalAmount currency { code } }
+          netAmounts { decimalAmount currency { code } }
+        }
         takeout { percentage }
         funds {
-          total { grossAmount { decimalAmount } netAmount { decimalAmount } }
-          carryIn { grossAmount { decimalAmount } netAmount { decimalAmount } }
+          total { 
+            grossAmounts { decimalAmount currency { code } }
+            netAmounts { decimalAmount currency { code } }
+          }
+          carryIn { 
+            grossAmounts { decimalAmount currency { code } }
+            netAmounts { decimalAmount currency { code } }
+          }
         }
       }
       betType { code }
@@ -37,12 +53,28 @@ query($id:String!){
     type {
       ... on BettingProduct {
         pool {
-          total { grossAmount { decimalAmount } netAmount { decimalAmount } }
-          carryIn { grossAmount { decimalAmount } netAmount { decimalAmount } }
+          total { 
+            grossAmounts { decimalAmount currency { code } }
+            netAmounts { decimalAmount currency { code } }
+          }
+          carryIn { 
+            grossAmounts { decimalAmount currency { code } }
+            netAmounts { decimalAmount currency { code } }
+          }
+          guarantee { 
+            grossAmounts { decimalAmount currency { code } }
+            netAmounts { decimalAmount currency { code } }
+          }
           takeout { percentage }
           funds {
-            total { grossAmount { decimalAmount } netAmount { decimalAmount } }
-            carryIn { grossAmount { decimalAmount } netAmount { decimalAmount } }
+            total { 
+              grossAmounts { decimalAmount currency { code } }
+              netAmounts { decimalAmount currency { code } }
+            }
+            carryIn { 
+              grossAmounts { decimalAmount currency { code } }
+              netAmounts { decimalAmount currency { code } }
+            }
           }
         }
         betType { code }

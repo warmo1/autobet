@@ -303,13 +303,30 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
                 "away": None,
                 "source": "tote_api",
             })
-        # Pool totals
+        # Pool totals - handle new array format from official API
         pool = (src.get("pool") or {})
         total = (pool.get("total") or {})
-        gross = ((total.get("grossAmount") or {}).get("decimalAmount"))
-        net = ((total.get("netAmount") or {}).get("decimalAmount"))
+        
+        # Handle new array format
+        gross_amounts = total.get("grossAmounts", [])
+        net_amounts = total.get("netAmounts", [])
+        gross = gross_amounts[0].get("decimalAmount") if gross_amounts else None
+        net = net_amounts[0].get("decimalAmount") if net_amounts else None
+        
+        # Fallback to old format if new format is empty
+        if gross is None:
+            gross = ((total.get("grossAmount") or {}).get("decimalAmount"))
+        if net is None:
+            net = ((total.get("netAmount") or {}).get("decimalAmount"))
+        
         carry_in = (pool.get("carryIn") or {})
-        rollover = ((carry_in.get("grossAmount") or {}).get("decimalAmount"))
+        carry_in_gross = carry_in.get("grossAmounts", [])
+        rollover = carry_in_gross[0].get("decimalAmount") if carry_in_gross else None
+        
+        # Fallback to old format
+        if rollover is None:
+            rollover = ((carry_in.get("grossAmount") or {}).get("decimalAmount"))
+        
         takeout = (pool.get("takeout") or {})
         deduction_rate = takeout.get("percentage")
         # Fallback: sum pool.funds totals when aggregate totals are missing/zero
