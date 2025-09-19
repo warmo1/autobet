@@ -3328,7 +3328,10 @@ def event_detail(event_id: str):
             FROM `autobet-470818.autobet.vw_tote_probable_odds` o
             JOIN `autobet-470818.autobet.tote_products` p ON o.product_id = p.product_id
             LEFT JOIN `autobet-470818.autobet.tote_product_selections` s ON o.selection_id = s.selection_id AND o.product_id = p.product_id
-            WHERE p.event_id = @event_id AND UPPER(p.bet_type) = 'WIN' -- Use WIN market for probable odds
+            WHERE p.event_id = @event_id 
+              AND UPPER(p.bet_type) = 'WIN' -- Use WIN market for probable odds
+              AND o.decimal_odds IS NOT NULL 
+              AND o.decimal_odds = o.decimal_odds -- This filters out NaN values
             ORDER BY o.cloth_number ASC
             """,
             params={'event_id': event_id},

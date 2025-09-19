@@ -21,12 +21,28 @@ query GetProducts($date: Date, $status: BettingProductSellingStatus, $first: Int
         betType { code rules { bet { min { decimalAmount currency { code } } max { decimalAmount currency { code } } } line { min { decimalAmount currency { code } } max { decimalAmount currency { code } } increment { decimalAmount currency { code } } } } }
         selling { status }
         pool {
-          total { grossAmount { decimalAmount } netAmount { decimalAmount } }
-          carryIn { grossAmount { decimalAmount } netAmount { decimalAmount } }
+          total { 
+            grossAmounts { decimalAmount currency { code } }
+            netAmounts { decimalAmount currency { code } }
+          }
+          carryIn { 
+            grossAmounts { decimalAmount currency { code } }
+            netAmounts { decimalAmount currency { code } }
+          }
+          guarantee { 
+            grossAmounts { decimalAmount currency { code } }
+            netAmounts { decimalAmount currency { code } }
+          }
           takeout { percentage }
           funds {
-            total { grossAmount { decimalAmount } netAmount { decimalAmount } }
-            carryIn { grossAmount { decimalAmount } netAmount { decimalAmount } }
+            total { 
+              grossAmounts { decimalAmount currency { code } }
+              netAmounts { decimalAmount currency { code } }
+            }
+            carryIn { 
+              grossAmounts { decimalAmount currency { code } }
+              netAmounts { decimalAmount currency { code } }
+            }
           }
         }
         legs {
