@@ -5,7 +5,7 @@ import io
 import pickle
 import hashlib
 import pandas as pd
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, timezone
 from flask import Flask, render_template, request, redirect, flash, url_for, send_file, Response
 from .config import cfg
 from .db import get_db, init_db
@@ -20,42 +20,14 @@ from .providers.tote_bets import place_audit_superfecta
 from .providers.tote_bets import refresh_bet_status, audit_list_bets, sync_bets_from_api
 from .gcp import publish_pubsub_message
 from .providers.pl_calcs import calculate_pl_strategy, calculate_pl_from_perms
+from .superfecta_planner import (
+    SUPERFECTA_RISK_PRESETS,
+    compute_superfecta_plan,
+    group_superfecta_predictions,
+)
 import itertools
 import math
 import requests
-
-SUPERFECTA_RISK_PRESETS = {
-    "conservative": {
-        "label": "Conservative",
-        "bankroll_pct": 0.02,
-        "desired_profit_pct": 12.0,
-        "concentration": 0.15,
-        "market_inefficiency": 0.05,
-        "key_horses": 1,
-        "poor_horses": 1,
-        "min_stake_per_line": 0.1,
-    },
-    "balanced": {
-        "label": "Balanced",
-        "bankroll_pct": 0.03,
-        "desired_profit_pct": 25.0,
-        "concentration": 0.25,
-        "market_inefficiency": 0.08,
-        "key_horses": 2,
-        "poor_horses": 1,
-        "min_stake_per_line": 0.1,
-    },
-    "aggressive": {
-        "label": "Aggressive",
-        "bankroll_pct": 0.05,
-        "desired_profit_pct": 40.0,
-        "concentration": 0.4,
-        "market_inefficiency": 0.12,
-        "key_horses": 3,
-        "poor_horses": 0,
-        "min_stake_per_line": 0.0,
-    },
-}
 
 # Simple in-process TTL cache for sql_df results with optional Redis backing
 _SQLDF_CACHE_LOCK = threading.Lock()
@@ -278,159 +250,75 @@ def _clean_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _group_superfecta_predictions(df: pd.DataFrame) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    events: list[dict[str, Any]] = []
-    events_map: dict[str, dict[str, Any]] = {}
-    if df.empty:
-        return events, events_map
-
-    for product_id, group in df.groupby("product_id"):
-        group_sorted = group.sort_values("p_place1", ascending=False)
-        anchor = group_sorted.iloc[0]
-        start_iso = anchor.get("start_iso") or ""
-        event = {
-            "product_id": product_id,
-            "event_id": anchor.get("event_id"),
-            "event_name": anchor.get("event_name"),
-            "venue": anchor.get("venue"),
-            "country": anchor.get("country"),
-            "start_iso": start_iso,
-            "status": anchor.get("status"),
-            "currency": anchor.get("currency"),
-            "total_gross": _clean_float(anchor.get("total_gross")),
-            "total_net": _clean_float(anchor.get("total_net")),
-            "rollover": _clean_float(anchor.get("rollover")),
-            "deduction_rate": _clean_float(anchor.get("deduction_rate"), 0.3),
-            "model_id": anchor.get("model_id"),
-            "model_version": anchor.get("model_version"),
-            "scored_at": anchor.get("scored_at"),
-            "event_date": anchor.get("event_date"),
-            "runners": [],
-        }
-        for _, runner in group_sorted.iterrows():
-            event["runners"].append(
-                {
-                    "horse_id": runner.get("horse_id"),
-                    "horse_name": runner.get("horse_name"),
-                    "cloth_number": runner.get("cloth_number"),
-                    "p_place1": float(runner.get("p_place1") or 0.0),
-                    "recent_runs": runner.get("recent_runs"),
-                    "avg_finish": runner.get("avg_finish"),
-                    "wins_last5": runner.get("wins_last5"),
-                    "places_last5": runner.get("places_last5"),
-                    "days_since_last_run": runner.get("days_since_last_run"),
-                    "going": runner.get("going"),
-                }
-            )
-        event["top_runners"] = event["runners"][:4]
-        events.append(event)
-        events_map[product_id] = event
-
-    events.sort(key=lambda ev: ev.get("start_iso") or "")
-    return events, events_map
+def _normalize_line(line: str) -> Optional[str]:
+    """Normalise a superfecta line string to canonical 'a-b-c-d' form."""
+    if not line:
+        return None
+    try:
+        parts = [part.strip() for part in line.split("-") if part.strip()]
+        if len(parts) < 4:
+            return None
+        cleaned = []
+        for part in parts[:4]:
+            cleaned.append(str(int(part)))
+        return "-".join(cleaned)
+    except Exception:
+        return None
 
 
-def _compute_superfecta_plan(
-    event: dict[str, Any],
-    preset_key: str,
-    tote_bank: float,
-) -> dict[str, Any]:
-    preset = SUPERFECTA_RISK_PRESETS.get(preset_key, SUPERFECTA_RISK_PRESETS["balanced"])
-    errors: list[str] = []
+def _extract_line_stakes(response_json: str | None, lines: Sequence[str]) -> dict[str, float]:
+    """Parse stored audit request JSON to recover per-line stakes."""
 
-    bankroll = tote_bank * float(preset.get("bankroll_pct", 0.0))
-    if bankroll <= 0:
-        errors.append("Bankroll allocation must be positive.")
+    if not response_json:
+        return {}
+    try:
+        payload = json.loads(response_json)
+    except Exception:
+        return {}
 
-    runners = event.get("runners") or []
-    if len(runners) < 4:
-        errors.append("Not enough runners with predictions to build a Superfecta plan.")
+    request_blob = payload.get("request") if isinstance(payload, Mapping) else None
+    variables = request_blob.get("variables") if isinstance(request_blob, Mapping) else None
+    bets_seq: Sequence[Any] = []
+    if isinstance(variables, Mapping):
+        candidate = variables.get("input") if isinstance(variables.get("input"), Mapping) else None
+        if isinstance(candidate, Mapping) and isinstance(candidate.get("bets"), Sequence):
+            bets_seq = candidate.get("bets") or []
+        elif isinstance(variables.get("bets"), Sequence):
+            bets_seq = variables.get("bets") or []
 
-    if errors:
-        return {"errors": errors}
+    stakes: dict[str, float] = {}
+    if not isinstance(bets_seq, Sequence):
+        return stakes
 
-    runners_sorted = sorted(runners, key=lambda r: r.get("p_place1", 0.0), reverse=True)
-    key_count = min(int(preset.get("key_horses", 0)), len(runners_sorted))
-    poor_count = min(int(preset.get("poor_horses", 0)), len(runners_sorted))
+    for idx, entry in enumerate(bets_seq):
+        if not isinstance(entry, Mapping):
+            continue
+        stake_obj = entry.get("stake")
+        if stake_obj is None and isinstance(entry.get("bet"), Mapping):
+            stake_obj = entry.get("bet", {}).get("stake")
+        line = lines[idx] if idx < len(lines) else None
+        if not line or not isinstance(stake_obj, Mapping):
+            continue
 
-    prepared_runners: list[dict[str, Any]] = []
-    for idx, runner in enumerate(runners_sorted):
-        prob = max(float(runner.get("p_place1") or 0.0), 1e-6)
-        fair_odds = max(1.05, 1.0 / prob)
-        cloth = runner.get("cloth_number") or (idx + 1)
-        prepared_runners.append(
-            {
-                "name": runner.get("horse_name") or runner.get("horse_id") or f"Runner {idx+1}",
-                "odds": fair_odds,
-                "number": cloth,
-                "is_key": idx < key_count,
-                "is_poor": idx >= len(runners_sorted) - poor_count if poor_count else False,
-            }
-        )
+        amount: Any = None
+        if "lineAmount" in stake_obj and stake_obj.get("lineAmount") is not None:
+            amount = stake_obj.get("lineAmount")
+        elif "totalAmount" in stake_obj and stake_obj.get("totalAmount") is not None:
+            amount = stake_obj.get("totalAmount")
+        elif isinstance(stake_obj.get("amount"), Mapping):
+            amt_obj = stake_obj.get("amount")
+            if isinstance(amt_obj, Mapping):
+                amount = amt_obj.get("decimalAmount") or amt_obj.get("amount")
 
-    take_rate = event.get("deduction_rate")
-    take_rate = float(take_rate) if take_rate is not None else 0.30
-    pool_other = max(_clean_float(event.get("total_net")) - bankroll, 0.0)
-    rollover = _clean_float(event.get("rollover"))
+        try:
+            if amount is not None:
+                stakes[line] = float(amount)
+        except (TypeError, ValueError):
+            continue
 
-    result = calculate_pl_strategy(
-        runners=prepared_runners,
-        bet_type="SUPERFECTA",
-        bankroll=bankroll,
-        key_horse_mult=1.2,
-        poor_horse_mult=0.85,
-        concentration=float(preset.get("concentration", 0.2)),
-        market_inefficiency=float(preset.get("market_inefficiency", 0.05)),
-        desired_profit_pct=float(preset.get("desired_profit_pct", 20.0)),
-        take_rate=take_rate,
-        net_rollover=rollover,
-        inc_self=True,
-        div_mult=1.0,
-        f_fix=None,
-        pool_gross_other=pool_other,
-        min_stake_per_line=float(preset.get("min_stake_per_line", 0.0)),
-    )
+    return stakes
 
-    errors.extend(result.get("errors", []))
-    if errors:
-        return {"errors": errors}
 
-    pl_model = result.get("pl_model") or {}
-    best = pl_model.get("best_scenario") or {}
-    staking_plan = pl_model.get("staking_plan") or []
-
-    total_stake = sum(float(line.get("stake", 0.0)) for line in staking_plan)
-    lines: list[dict[str, Any]] = []
-    selections: list[str] = []
-    for line in staking_plan:
-        ids = [str(x) for x in (line.get("ids") or [])]
-        combo = "-".join(ids)
-        selections.append(combo)
-        lines.append(
-            {
-                "line": combo or line.get("line"),
-                "probability": float(line.get("probability", 0.0)),
-                "stake": float(line.get("stake", 0.0)),
-                "stake_rounded": round(float(line.get("stake", 0.0)), 2),
-            }
-        )
-
-    adjustment = result.get("auto_adjusted_params")
-
-    summary = {
-        "lines": lines,
-        "total_stake": total_stake,
-        "total_stake_rounded": round(total_stake, 2),
-        "expected_profit": best.get("expected_profit"),
-        "expected_return": best.get("expected_return"),
-        "hit_rate": best.get("hit_rate"),
-        "f_share_used": best.get("f_share_used"),
-        "bankroll_allocated": bankroll,
-        "selections_text": "\n".join(selections),
-        "preset_key": preset_key,
-        "adjustment": adjustment,
-    }
-    return {"plan": summary, "errors": []}
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET", "dev-secret")
 
@@ -516,6 +404,203 @@ def dashboard():
 
 def _use_bq() -> bool:
     return bool(cfg.bq_project and cfg.bq_dataset)
+
+
+@app.route("/superfecta/automation")
+def superfecta_automation_page():
+    if not _use_bq():
+        flash("BigQuery must be configured to view automation dashboards.", "error")
+        return redirect(url_for("index"))
+
+    date_str = (request.args.get("date") or _today_iso()).strip()
+    selected_product_id = (request.args.get("product_id") or "").strip() or None
+    dataset = f"{cfg.bq_project}.{cfg.bq_dataset}"
+
+    morning_df = sql_df(
+        f"SELECT * FROM `{dataset}.tote_superfecta_morning` WHERE run_date = @run_date ORDER BY start_iso",
+        params={"run_date": date_str},
+        cache_ttl=30,
+    )
+    recommendations_df = sql_df(
+        f"SELECT r.*, p.event_name, p.start_iso, p.venue FROM `{dataset}.tote_superfecta_recommendations` r "
+        f"LEFT JOIN `{dataset}.tote_products` p USING (product_id) "
+        "WHERE r.run_date = @run_date ORDER BY p.start_iso",
+        params={"run_date": date_str},
+        cache_ttl=30,
+    )
+
+    morning_rows = [] if morning_df.empty else morning_df.to_dict("records")
+    for row in morning_rows:
+        row["total_stake"] = _clean_float(row.get("total_stake"), None)
+        row["expected_profit"] = _clean_float(row.get("expected_profit"), None)
+        row["roi_current"] = _clean_float(row.get("roi_current"), None)
+
+    recommendations = []
+    recommendation_options = []
+    product_ids: list[str] = []
+    if not recommendations_df.empty:
+        for rec in recommendations_df.to_dict("records"):
+            pid = rec.get("product_id")
+            if pid:
+                product_ids.append(pid)
+            last_check_ts = rec.get("last_check_ts")
+            if last_check_ts:
+                try:
+                    dt = datetime.fromtimestamp(int(last_check_ts) / 1000, tz=timezone.utc)
+                    rec["last_check"] = dt.strftime("%H:%M")
+                except Exception:
+                    rec["last_check"] = "—"
+            else:
+                rec["last_check"] = "—"
+            rec["total_stake"] = _clean_float(rec.get("total_stake"), None)
+            rec["expected_profit"] = _clean_float(rec.get("expected_profit"), None)
+            rec_status = (rec.get("status") or "").lower()
+            if not rec.get("event_name"):
+                rec["event_name"] = rec.get("product_id") or "Unknown"
+            start_iso = rec.get("start_iso")
+            if start_iso:
+                rec["start_iso"] = start_iso
+            recommendations.append(rec)
+            recommendation_options.append(
+                {
+                    "product_id": pid,
+                    "event_name": rec.get("event_name") or pid,
+                    "start_time": rec.get("start_iso") or "",
+                }
+            )
+
+    live_params: dict[str, Any] = {"run_date": date_str}
+    live_where = "DATE(TIMESTAMP_MILLIS(check_ts)) = @run_date"
+    if selected_product_id:
+        live_where += " AND product_id = @product_id"
+        live_params["product_id"] = selected_product_id
+    live_df = sql_df(
+        f"SELECT * FROM `{dataset}.tote_superfecta_live_checks` WHERE {live_where} ORDER BY check_ts DESC LIMIT 200",
+        params=live_params,
+        cache_ttl=30,
+    )
+    live_checks = [] if live_df.empty else live_df.to_dict("records")
+    for entry in live_checks:
+        ts = entry.get("check_ts")
+        if ts:
+            try:
+                dt = datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc)
+                entry["checked"] = dt.strftime("%H:%M:%S")
+            except Exception:
+                entry["checked"] = "—"
+        else:
+            entry["checked"] = "—"
+        entry["plan_total_stake"] = _clean_float(entry.get("plan_total_stake"), None)
+        entry["expected_profit"] = _clean_float(entry.get("expected_profit"), None)
+
+    bet_rows: list[dict[str, Any]] = []
+    if product_ids:
+        params = {"run_date": date_str, "product_ids": product_ids}
+        bet_df = sql_df(
+            f"SELECT b.bet_id, b.ts_ms, b.status AS placement_status, b.stake, b.currency, b.selection, b.response_json, "
+            "       p.event_id, p.event_name, p.start_iso AS product_start_iso, divs.dividend, finish.finish_line "
+            f"FROM `{dataset}.tote_audit_bets` b "
+            f"LEFT JOIN `{dataset}.tote_products` p USING(product_id) "
+            f"LEFT JOIN (SELECT product_id, MAX(dividend) AS dividend FROM `{dataset}.tote_product_dividends` GROUP BY product_id) divs "
+            "       ON divs.product_id = b.product_id "
+            f"LEFT JOIN ("
+            f"    SELECT event_id, STRING_AGG(CAST(cloth_number AS STRING), '-' ORDER BY rn) AS finish_line "
+            f"    FROM ("
+            f"        SELECT event_id, cloth_number, ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY finish_pos, cloth_number) AS rn "
+            f"        FROM `{dataset}.hr_horse_runs` "
+            f"        WHERE finish_pos IS NOT NULL AND finish_pos > 0 AND cloth_number IS NOT NULL"
+            f"    ) sub "
+            f"    WHERE rn <= 4 "
+            f"    GROUP BY event_id"
+            f") finish ON finish.event_id = p.event_id "
+            "WHERE DATE(TIMESTAMP_MILLIS(b.ts_ms)) = @run_date AND b.product_id IN UNNEST(@product_ids) "
+            "ORDER BY b.ts_ms DESC LIMIT 200",
+            params=params,
+            cache_ttl=30,
+        )
+        if not bet_df.empty:
+            bet_rows = bet_df.to_dict("records")
+            for bet in bet_rows:
+                ts_ms = bet.get("ts_ms")
+                if ts_ms:
+                    try:
+                        bet_time = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc)
+                        bet["bet_time"] = bet_time.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        bet["bet_time"] = "—"
+                else:
+                    bet["bet_time"] = "—"
+                selections = [s.strip() for s in (bet.get("selection") or "").split(",") if s.strip()]
+                line_stakes_raw = _extract_line_stakes(bet.get("response_json"), selections)
+                line_stakes: dict[str, float] = {}
+                for ln, amt in line_stakes_raw.items():
+                    norm = _normalize_line(ln)
+                    if norm:
+                        line_stakes[norm] = amt
+                base_stake = bet.get("stake")
+                if not line_stakes and selections:
+                    total = _clean_float(base_stake, 0.0)
+                    if total > 0:
+                        even = total / max(len(selections), 1)
+                        for s in selections:
+                            norm = _normalize_line(s)
+                            if norm:
+                                line_stakes[norm] = even
+
+                if line_stakes:
+                    total_stake = sum(line_stakes.values())
+                elif base_stake is not None:
+                    total_stake = _clean_float(base_stake, 0.0)
+                else:
+                    total_stake = 0.0
+                bet["stake_total"] = total_stake if (line_stakes or base_stake is not None) else None
+
+                winning_line = _normalize_line(bet.get("finish_line")) if bet.get("finish_line") else None
+                dividend = _clean_float(bet.get("dividend"), None)
+
+                bet["winnings"] = None
+                bet["pnl"] = None
+                if line_stakes and total_stake:
+                    if winning_line:
+                        stake_hit = line_stakes.get(winning_line)
+                        if stake_hit is None:
+                            bet["winnings"] = 0.0
+                            bet["pnl"] = 0.0 - total_stake
+                        elif dividend is not None:
+                            winnings = stake_hit * dividend
+                            bet["winnings"] = winnings
+                            bet["pnl"] = winnings - total_stake
+                        else:
+                            bet["winnings"] = None
+                            bet["pnl"] = None
+                    else:
+                        bet["winnings"] = None
+                        bet["pnl"] = None
+
+    settled_entries = [bet for bet in bet_rows if bet.get("pnl") is not None]
+    summary = {
+        "recommendations": len(recommendations),
+        "ready": sum(1 for rec in recommendations if (rec.get("status") or "").lower() == "ready"),
+        "placed": sum(1 for rec in recommendations if (rec.get("status") or "").lower() == "placed"),
+        "total_stake": sum(_clean_float(rec.get("total_stake"), 0.0) for rec in recommendations),
+        "expected_profit": sum(_clean_float(rec.get("expected_profit"), 0.0) for rec in recommendations),
+        "live_checks": len(live_checks),
+        "last_check": live_checks[0]["checked"] if live_checks else "—",
+        "settled_bets": len(settled_entries),
+        "pnl": sum(bet.get("pnl", 0.0) for bet in settled_entries) if settled_entries else None,
+    }
+
+    context = {
+        "date_str": date_str,
+        "selected_product_id": selected_product_id,
+        "morning_rows": morning_rows,
+        "recommendations": recommendations,
+        "recommendation_options": recommendation_options,
+        "live_checks": live_checks,
+        "bet_rows": bet_rows,
+        "summary": summary,
+    }
+    return render_template("superfecta_automation.html", **context)
 
 
 def _build_bq_query(sql: str, params: Any) -> tuple[str, list[bigquery.ScalarQueryParameter]]:
@@ -3464,7 +3549,7 @@ def superfecta_ml_page():
         flash(f"Failed to load ML predictions: {exc}", "error")
         preds_df = pd.DataFrame()
 
-    events, events_map = _group_superfecta_predictions(preds_df)
+    events, events_map = group_superfecta_predictions(preds_df)
 
     product_id = request.values.get("product_id") or (events[0]["product_id"] if events else None)
     selected_event = events_map.get(product_id) if product_id else None
@@ -3489,7 +3574,7 @@ def superfecta_ml_page():
         if not selected_event:
             plan_errors.append("Select a Superfecta race to build a plan.")
         else:
-            result = _compute_superfecta_plan(selected_event, risk_profile, tote_bank_value)
+            result = compute_superfecta_plan(selected_event, risk_profile, tote_bank_value)
             plan_errors.extend(result.get("errors", []))
             plan_data = result.get("plan")
             if plan_data:

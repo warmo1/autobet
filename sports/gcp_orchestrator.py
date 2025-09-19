@@ -2,7 +2,7 @@ from __future__ import annotations
 import os
 import json
 import time
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from google.cloud import bigquery
 from typing import Any
 
@@ -11,6 +11,12 @@ from .config import cfg
 from .bq import get_bq_sink
 import uuid
 from .db import get_db
+
+from .superfecta_automation import (
+    execute_ready_recommendations,
+    run_live_monitor,
+    run_morning_scan,
+)
 
 app = Flask(__name__)
 
@@ -332,3 +338,45 @@ def handle_scheduler() -> tuple[str, int]:
         # Return 200 to prevent Cloud Scheduler from retrying a failed job logic.
         # The error is logged for debugging.
         return (f"Internal error processing job: {job_name}", 200)
+
+
+@app.post("/jobs/superfecta/morning")
+def superfecta_morning_job():
+    """Trigger the morning superfecta triage and persist recommendations."""
+    run_date = (request.args.get("date") or "").strip() or None
+    try:
+        summary = run_morning_scan(target_date=run_date)
+        _log_job_run("superfecta-morning", "OK", metrics=summary)
+        return jsonify(summary), 200
+    except Exception as exc:
+        _log_job_run("superfecta-morning", "ERROR", error=str(exc))
+        return (str(exc), 500)
+
+
+@app.post("/jobs/superfecta/live")
+def superfecta_live_job():
+    """Re-evaluate live EV for monitored superfecta recommendations."""
+    run_date = (request.args.get("date") or "").strip() or None
+    try:
+        summary = run_live_monitor(run_date=run_date)
+        _log_job_run("superfecta-live", "OK", metrics=summary)
+        return jsonify(summary), 200
+    except Exception as exc:
+        _log_job_run("superfecta-live", "ERROR", error=str(exc))
+        return (str(exc), 500)
+
+
+@app.post("/jobs/superfecta/execute")
+def superfecta_execute_job():
+    """Place bets for ready superfecta recommendations."""
+    auto_param = request.args.get("auto_place")
+    auto_place = None
+    if auto_param is not None:
+        auto_place = auto_param.lower() in ("1", "true", "yes", "on")
+    try:
+        summary = execute_ready_recommendations(auto_place=auto_place)
+        _log_job_run("superfecta-execute", "OK", metrics=summary)
+        return jsonify(summary), 200
+    except Exception as exc:
+        _log_job_run("superfecta-execute", "ERROR", error=str(exc))
+        return (str(exc), 500)
