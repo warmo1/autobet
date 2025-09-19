@@ -2302,9 +2302,23 @@ class BigQuerySink:
             r.fetched_ts,
             COALESCE(
               JSON_EXTRACT_SCALAR(line, '$.legs.lineSelections[0].selectionId'),
-              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId')
+              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId'),
+              JSON_EXTRACT_SCALAR(
+                JSON_EXTRACT_ARRAY(
+                  JSON_EXTRACT_ARRAY(line, '$.legs.nodes')
+                  [SAFE_OFFSET(0)],
+                  '$.lineSelections.nodes'
+                )[SAFE_OFFSET(0)],
+                '$.selectionId'
+              )
             ) AS selection_id,
-            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds.decimal') AS FLOAT64) AS decimal_odds
+            SAFE_CAST(
+              COALESCE(
+                JSON_EXTRACT_SCALAR(line, '$.odds.decimal'),
+                JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.odds.nodes')[SAFE_OFFSET(0)], '$.decimal')
+              )
+              AS FLOAT64
+            ) AS decimal_odds
           FROM `{ds}.raw_tote_probable_odds` r,
           UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
           UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line
@@ -2314,7 +2328,7 @@ class BigQuerySink:
                  ARRAY_AGG(decimal_odds ORDER BY fetched_ts DESC LIMIT 1)[OFFSET(0)] AS decimal_odds,
                  MAX(fetched_ts) AS ts_ms
           FROM exploded
-          WHERE selection_id IS NOT NULL AND decimal_odds IS NOT NULL AND product_id IS NOT NULL
+          WHERE selection_id IS NOT NULL AND product_id IS NOT NULL
           GROUP BY product_id, selection_id
         )
         SELECT
@@ -2339,9 +2353,22 @@ class BigQuerySink:
             r.fetched_ts AS ts_ms,
             COALESCE(
               JSON_EXTRACT_SCALAR(line, '$.legs.lineSelections[0].selectionId'),
-              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId')
+              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId'),
+              JSON_EXTRACT_SCALAR(
+                JSON_EXTRACT_ARRAY(
+                  JSON_EXTRACT_ARRAY(line, '$.legs.nodes')[SAFE_OFFSET(0)],
+                  '$.lineSelections.nodes'
+                )[SAFE_OFFSET(0)],
+                '$.selectionId'
+              )
             ) AS selection_id,
-            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds.decimal') AS FLOAT64) AS decimal_odds
+            SAFE_CAST(
+              COALESCE(
+                JSON_EXTRACT_SCALAR(line, '$.odds.decimal'),
+                JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.odds.nodes')[SAFE_OFFSET(0)], '$.decimal')
+              )
+              AS FLOAT64
+            ) AS decimal_odds
           FROM `{ds}.raw_tote_probable_odds` r,
           UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
           UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line
@@ -2353,20 +2380,14 @@ class BigQuerySink:
                e.ts_ms
         FROM exploded e
         LEFT JOIN `{ds}.tote_product_selections` s ON s.selection_id = e.selection_id AND s.product_id = e.product_id
-        WHERE e.selection_id IS NOT NULL AND e.decimal_odds IS NOT NULL;
+        WHERE e.selection_id IS NOT NULL;
         """
         job = client.query(sql)
         job.result()
 
         # vw_sf_strengths_from_win_horse: derive fallback runner strengths from WIN probable odds
-        # Drop the legacy view so we can install a materialized view under the same name.
-        try:
-            client.query(f"DROP VIEW IF EXISTS `{ds}.vw_sf_strengths_from_win_horse`").result()
-        except Exception:
-            pass
-
         sql = f"""
-        CREATE OR REPLACE MATERIALIZED VIEW `{ds}.mv_sf_strengths_from_win_horse` AS
+        CREATE OR REPLACE VIEW `{ds}.vw_sf_strengths_from_win_horse` AS
         WITH sf AS (
           SELECT product_id, event_id
           FROM `{ds}.tote_products`
@@ -2387,14 +2408,30 @@ class BigQuerySink:
             SAFE_CAST(JSON_EXTRACT_SCALAR(prod, '$.id') AS STRING) AS product_id,
             COALESCE(
               JSON_EXTRACT_SCALAR(line, '$.legs.lineSelections[0].selectionId'),
-              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId')
+              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId'),
+              JSON_EXTRACT_SCALAR(
+                JSON_EXTRACT_ARRAY(
+                  JSON_EXTRACT_ARRAY(line, '$.legs.nodes')[SAFE_OFFSET(0)],
+                  '$.lineSelections.nodes'
+                )[SAFE_OFFSET(0)],
+                '$.selectionId'
+              )
             ) AS selection_id,
-            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds.decimal') AS FLOAT64) AS decimal_odds,
+            SAFE_CAST(
+              COALESCE(
+                JSON_EXTRACT_SCALAR(line, '$.odds.decimal'),
+                JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.odds.nodes')[SAFE_OFFSET(0)], '$.decimal')
+              )
+              AS FLOAT64
+            ) AS decimal_odds,
             r.fetched_ts
           FROM `{ds}.raw_tote_probable_odds` r,
           UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
           UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line
-          WHERE JSON_EXTRACT_SCALAR(line, '$.odds.decimal') IS NOT NULL
+          WHERE COALESCE(
+                  JSON_EXTRACT_SCALAR(line, '$.odds.decimal'),
+                  JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.odds.nodes')[SAFE_OFFSET(0)], '$.decimal')
+                ) IS NOT NULL
         ),
         latest_odds AS (
           SELECT product_id, selection_id, decimal_odds
@@ -2463,12 +2500,6 @@ class BigQuerySink:
         """
         client.query(sql).result()
 
-        sql = f"""
-        CREATE OR REPLACE VIEW `{ds}.vw_sf_strengths_from_win_horse` AS
-        SELECT * FROM `{ds}.mv_sf_strengths_from_win_horse`;
-        """
-        client.query(sql).result()
-
         # vw_superfecta_runner_strength_any: prefer model strengths, fall back to WIN odds-derived weights
         sql = f"""
         CREATE OR REPLACE VIEW `{ds}.vw_superfecta_runner_strength_any` AS
@@ -2478,7 +2509,7 @@ class BigQuerySink:
         ),
         fallback AS (
           SELECT product_id, event_id, runner_id, strength
-          FROM `{ds}.mv_sf_strengths_from_win_horse`
+          FROM `{ds}.vw_sf_strengths_from_win_horse`
         ),
         pred_products AS (
           SELECT DISTINCT product_id FROM pred

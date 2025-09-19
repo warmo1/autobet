@@ -26,4 +26,4 @@ e.ts_ms
 FROM exploded e
 LEFT JOIN autobet-470818.autobet.tote_product_selections s
 ON s.selection_id = e.selection_id AND s.product_id = e.product_id
-WHERE e.product_id IS NOT NULL AND e.selection_id IS NOT NULL AND e.decimal_odds IS NOT NULL;
+WHERE e.product_id IS NOT NULL AND e.selection_id IS NOT NULL;

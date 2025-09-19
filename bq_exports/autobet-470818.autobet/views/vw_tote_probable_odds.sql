@@ -25,7 +25,7 @@ selection_id,
 ARRAY_AGG(decimal_odds ORDER BY fetched_ts DESC LIMIT 1)[OFFSET(0)] AS decimal_odds,
 MAX(fetched_ts) AS ts_ms
 FROM exploded
-WHERE product_id IS NOT NULL AND selection_id IS NOT NULL AND decimal_odds IS NOT NULL
+WHERE product_id IS NOT NULL AND selection_id IS NOT NULL
 GROUP BY product_id, selection_id
 )
 SELECT

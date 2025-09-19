@@ -274,7 +274,8 @@ def normalize_probable_lines(line_nodes: Any) -> List[Dict[str, Any]]:
     """Normalize GraphQL probable odds lines into the raw REST-like structure."""
 
     if isinstance(line_nodes, dict):
-        nodes = line_nodes.get("nodes") or []
+        maybe_nodes = line_nodes.get("nodes")
+        nodes = maybe_nodes if isinstance(maybe_nodes, list) else [line_nodes]
     else:
         nodes = line_nodes or []
 
@@ -284,40 +285,51 @@ def normalize_probable_lines(line_nodes: Any) -> List[Dict[str, Any]]:
             continue
 
         odds_obj = ln.get("odds")
-        decimal_val = None
+        decimal_val_raw = None
         if isinstance(odds_obj, dict):
-            decimal_val = odds_obj.get("decimal")
+            decimal_val_raw = odds_obj.get("decimal")
         elif isinstance(odds_obj, list):
             for item in odds_obj:
                 if isinstance(item, dict) and item.get("decimal") is not None:
-                    decimal_val = item.get("decimal")
+                    decimal_val_raw = item.get("decimal")
                     break
-        try:
-            decimal_val = float(decimal_val)
-        except (TypeError, ValueError):
-            continue
+
+        decimal_val = None
+        if decimal_val_raw is not None:
+            try:
+                decimal_val = float(decimal_val_raw)
+            except (TypeError, ValueError):
+                decimal_val = None
 
         legs_src = ln.get("legs")
+        legs_iter: List[Dict[str, Any]] = []
         if isinstance(legs_src, dict):
-            legs_iter = [legs_src]
+            leg_nodes = legs_src.get("nodes")
+            if isinstance(leg_nodes, list):
+                legs_iter.extend([leg for leg in leg_nodes if isinstance(leg, dict)])
+            else:
+                legs_iter.append(legs_src)
         elif isinstance(legs_src, list):
-            legs_iter = [leg for leg in legs_src if isinstance(leg, dict)]
-        else:
-            legs_iter = []
+            legs_iter.extend([leg for leg in legs_src if isinstance(leg, dict)])
 
         norm_legs: List[Dict[str, Any]] = []
         for leg in legs_iter:
             selections_obj = leg.get("lineSelections")
+            selection_items: List[Dict[str, Any]] = []
             if isinstance(selections_obj, dict):
-                selection_items = [selections_obj]
+                maybe_nodes = selections_obj.get("nodes")
+                if isinstance(maybe_nodes, list):
+                    selection_items.extend([sel for sel in maybe_nodes if isinstance(sel, dict)])
+                else:
+                    selection_items.append(selections_obj)
             elif isinstance(selections_obj, list):
-                selection_items = [sel for sel in selections_obj if isinstance(sel, dict)]
-            else:
-                selection_items = []
+                selection_items.extend([sel for sel in selections_obj if isinstance(sel, dict)])
 
             norm_selections = []
             for sel in selection_items:
                 sel_id = sel.get("selectionId")
+                if not sel_id and isinstance(sel.get("selection"), dict):
+                    sel_id = sel["selection"].get("id")
                 if sel_id:
                     norm_selections.append({"selectionId": sel_id})
             if norm_selections:
