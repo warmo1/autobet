@@ -27,6 +27,7 @@ from .superfecta_planner import (
     compute_superfecta_plan,
     group_superfecta_predictions,
 )
+from .superfecta_automation import run_morning_scan
 import itertools
 import math
 import requests
@@ -603,6 +604,29 @@ def superfecta_automation_page():
         "summary": summary,
     }
     return render_template("superfecta_automation.html", **context)
+
+
+@app.route("/superfecta/automation/run", methods=["POST"])
+def superfecta_automation_trigger():
+    """Manually kick off the morning scan for the selected date."""
+    if not _use_bq():
+        flash("BigQuery must be configured to run automation jobs.", "error")
+        return redirect(url_for("index"))
+
+    date_str = (request.form.get("date") or _today_iso()).strip()
+    product_id = (request.form.get("product_id") or "").strip()
+
+    try:
+        summary = run_morning_scan(target_date=date_str, author="web-ui")
+        flash(
+            "Morning scan complete for {date}: considered {considered}, accepted {accepted}, "
+            "filtered {filtered}, errors {errored}.".format(date=date_str, **summary),
+            "success",
+        )
+    except Exception as exc:
+        flash(f"Morning scan failed: {exc}", "error")
+
+    return redirect(url_for("superfecta_automation_page", date=date_str, product_id=product_id or None))
 
 
 def _build_bq_query(sql: str, params: Any) -> tuple[str, list[bigquery.ScalarQueryParameter]]:

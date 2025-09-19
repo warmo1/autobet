@@ -18,8 +18,14 @@
       {% endfor %}
     </select>
   </div>
-  <div class="col-auto align-self-end">
+  <div class="col-auto align-self-end d-flex gap-2">
     <button type="submit" class="btn btn-primary">Apply</button>
+    <button type="submit"
+            class="btn btn-outline-secondary"
+            formaction="{{ url_for('superfecta_automation_trigger') }}"
+            formmethod="post">
+      Run Morning Scan
+    </button>
   </div>
 </form>
 
