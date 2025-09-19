@@ -2811,7 +2811,9 @@ def api_status_upcoming():
     def _df_records(frame: pd.DataFrame | None) -> list[dict[str, Any]]:
         if frame is None or frame.empty:
             return []
-        return frame.to_dict("records")
+        safe = frame.copy()
+        safe = safe.where(~safe.isna(), None)
+        return safe.to_dict("records")
 
     # Primary view focuses on GB superfecta races with richer metrics.
     try:
