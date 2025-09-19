@@ -62,8 +62,10 @@ def scan_and_publish_pre_race_jobs():
         upcoming_df = db.query("""
             SELECT p.product_id, p.event_id
             FROM `autobet-470818.autobet.vw_products_latest_totals` p
+            LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id)
             WHERE p.status = 'OPEN'
               AND TIMESTAMP(p.start_iso) BETWEEN CURRENT_TIMESTAMP() AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 30 MINUTE)
+              AND COALESCE(e.country, '') NOT IN ('FR', 'ZA')
             GROUP BY p.product_id, p.event_id
         """).to_dataframe()
 
@@ -175,10 +177,12 @@ def scan_and_publish_probable_sweep():
     try:
         df = db.query(
             """
-            SELECT DISTINCT event_id
-            FROM `autobet-470818.autobet.tote_products`
-            WHERE UPPER(bet_type)='WIN' AND status='OPEN'
-              AND TIMESTAMP(start_iso) BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 15 MINUTE)
+            SELECT DISTINCT p.event_id
+            FROM `autobet-470818.autobet.tote_products` p
+            LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id)
+            WHERE UPPER(p.bet_type)='WIN' AND p.status='OPEN'
+              AND COALESCE(e.country, '') NOT IN ('FR', 'ZA')
+              AND TIMESTAMP(p.start_iso) BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 15 MINUTE)
                                            AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)
             LIMIT 500
             """
@@ -226,11 +230,13 @@ def publish_probable_bulk_jobs(window_hours: int = 12):
     try:
         df = db.query(
             f"""
-            SELECT DISTINCT event_id
-            FROM `{cfg.bq_project}.{cfg.bq_dataset}.vw_products_latest_totals`
-            WHERE status = 'OPEN'
-              AND UPPER(bet_type) = 'WIN'
-              AND TIMESTAMP(start_iso) BETWEEN CURRENT_TIMESTAMP()
+            SELECT DISTINCT p.event_id
+            FROM `{cfg.bq_project}.{cfg.bq_dataset}.vw_products_latest_totals` p
+            LEFT JOIN `{cfg.bq_project}.{cfg.bq_dataset}.tote_events` e USING(event_id)
+            WHERE p.status = 'OPEN'
+              AND UPPER(p.bet_type) = 'WIN'
+              AND COALESCE(e.country, '') NOT IN ('FR', 'ZA')
+              AND TIMESTAMP(p.start_iso) BETWEEN CURRENT_TIMESTAMP()
                                        AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL {int(window_hours)} HOUR)
             LIMIT 500
             """
