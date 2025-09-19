@@ -1233,100 +1233,100 @@ def tote_events_page():
         venue_options=venue_options,
     )
 
-@app.route("/tote-superfecta", methods=["GET","POST"])
-def tote_superfecta_page():
-    """List SUPERFECTA products with filters, upcoming widget, and audit helpers."""
-    if request.method == "POST":
-        flash("Paper betting is disabled. Use Audit placement.", "error")
-    # UI Improvement: Default country to GB and add a venue filter.
-    country = (request.args.get("country") or os.getenv("DEFAULT_COUNTRY", "GB")).strip().upper()
-    venue = (request.args.get("venue") or "").strip()
-    # Default to OPEN status unless explicitly filtered to something else.
-    status = (request.args.get("status") or "OPEN").strip().upper()
-    date_from = request.args.get("from") or _today_iso()
-    date_to = request.args.get("to") or _today_iso()
-    limit = int(request.args.get("limit", "200") or 200)
-    upcoming_flag = (request.args.get("upcoming") or "").lower() in ("1","true","yes","on")
+# @app.route("/tote-superfecta", methods=["GET","POST"])
+# def tote_superfecta_page():
+#     """List SUPERFECTA products with filters, upcoming widget, and audit helpers."""
+#     if request.method == "POST":
+#         flash("Paper betting is disabled. Use Audit placement.", "error")
+#     # UI Improvement: Default country to GB and add a venue filter.
+#     country = (request.args.get("country") or os.getenv("DEFAULT_COUNTRY", "GB")).strip().upper()
+#     venue = (request.args.get("venue") or "").strip()
+#     # Default to OPEN status unless explicitly filtered to something else.
+#     status = (request.args.get("status") or "OPEN").strip().upper()
+#     date_from = request.args.get("from") or _today_iso()
+#     date_to = request.args.get("to") or _today_iso()
+#     limit = int(request.args.get("limit", "200") or 200)
+#     upcoming_flag = (request.args.get("upcoming") or "").lower() in ("1","true","yes","on")
 
-    where = ["UPPER(p.bet_type)='SUPERFECTA'"]
-    params: list[object] = []
-    if country:
-        where.append("(UPPER(e.country)=? OR UPPER(p.currency)=?)"); params.extend([country, country])
-    if venue:
-        where.append("UPPER(COALESCE(e.venue, p.venue)) LIKE UPPER(?)"); params.append(f"%{venue}%")
-    if status:
-        where.append("UPPER(COALESCE(p.status,'')) = ?"); params.append(status)
-    if date_from:
-        where.append("substr(p.start_iso,1,10) >= ?"); params.append(date_from)
-    if date_to:
-        where.append("substr(p.start_iso,1,10) <= ?"); params.append(date_to)
-    if upcoming_flag:
-        from datetime import datetime, timezone
-        now_iso = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00','Z')
-        where.append("p.start_iso >= ?"); params.append(now_iso)
+#     where = ["UPPER(p.bet_type)='SUPERFECTA'"]
+#     params: list[object] = []
+#     if country:
+#         where.append("(UPPER(e.country)=? OR UPPER(p.currency)=?)"); params.extend([country, country])
+#     if venue:
+#         where.append("UPPER(COALESCE(e.venue, p.venue)) LIKE UPPER(?)"); params.append(f"%{venue}%")
+#     if status:
+#         where.append("UPPER(COALESCE(p.status,'')) = ?"); params.append(status)
+#     if date_from:
+#         where.append("substr(p.start_iso,1,10) >= ?"); params.append(date_from)
+#     if date_to:
+#         where.append("substr(p.start_iso,1,10) <= ?"); params.append(date_to)
+#     if upcoming_flag:
+#         from datetime import datetime, timezone
+#         now_iso = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00','Z')
+#         where.append("p.start_iso >= ?"); params.append(now_iso)
 
-    sql = (
-        "SELECT p.product_id, p.event_id, p.event_name, COALESCE(e.venue, p.venue) AS venue, e.country, p.start_iso, "
-        "COALESCE(p.status,'') AS status, p.currency, p.total_gross, p.total_net, p.rollover, "
-        # UI Improvement: The product_id column can be de-emphasized in the template in favor of more user-friendly info.
-        "(SELECT COUNT(1) FROM `autobet-470818.autobet.tote_product_selections` s WHERE s.product_id = p.product_id) AS n_runners "
-        "FROM `autobet-470818.autobet.vw_products_latest_totals` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) "
-    )
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY p.start_iso ASC LIMIT ?"; params.append(limit)
-    try:
-        df = sql_df(sql, params=tuple(params))
-    except Exception:
-        # Fallback to raw tote_products if view not present
-        sql2 = sql.replace("FROM `autobet-470818.autobet.vw_products_latest_totals` p", "FROM `autobet-470818.autobet.tote_products` p")
-        df = sql_df(sql2, params=tuple(params))
+#     sql = (
+#         "SELECT p.product_id, p.event_id, p.event_name, COALESCE(e.venue, p.venue) AS venue, e.country, p.start_iso, "
+#         "COALESCE(p.status,'') AS status, p.currency, p.total_gross, p.total_net, p.rollover, "
+#         # UI Improvement: The product_id column can be de-emphasized in the template in favor of more user-friendly info.
+#         "(SELECT COUNT(1) FROM `autobet-470818.autobet.tote_product_selections` s WHERE s.product_id = p.product_id) AS n_runners "
+#         "FROM `autobet-470818.autobet.vw_products_latest_totals` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) "
+#     )
+#     if where:
+#         sql += " WHERE " + " AND ".join(where)
+#     sql += " ORDER BY p.start_iso ASC LIMIT ?"; params.append(limit)
+#     try:
+#         df = sql_df(sql, params=tuple(params))
+#     except Exception:
+#         # Fallback to raw tote_products if view not present
+#         sql2 = sql.replace("FROM `autobet-470818.autobet.vw_products_latest_totals` p", "FROM `autobet-470818.autobet.tote_products` p")
+#         df = sql_df(sql2, params=tuple(params))
 
-    # Options for filters
-    try:
-        cdf = sql_df("SELECT country FROM `mv_event_filters_country` ORDER BY country")
-    except Exception:
-        cdf = sql_df("SELECT DISTINCT country FROM `autobet-470818.autobet.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
-    # UI Improvement: Dynamic venue options based on other filters for a better user experience.
-    vdf_sql = "SELECT DISTINCT COALESCE(e.venue, p.venue) AS venue FROM `autobet-470818.autobet.tote_products` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) WHERE UPPER(p.bet_type)='SUPERFECTA' AND COALESCE(e.venue, p.venue) IS NOT NULL AND COALESCE(e.venue, p.venue) <> ''"
-    vdf_params: list[object] = []
-    if country:
-        vdf_sql += " AND (UPPER(e.country)=? OR UPPER(p.currency)=?)"
-        vdf_params.extend([country, country])
-    if date_from and date_to:
-        vdf_sql += " AND substr(p.start_iso,1,10) BETWEEN ? AND ?"
-        vdf_params.extend([date_from, date_to])
-    vdf_sql += " ORDER BY venue"
-    vdf = sql_df(vdf_sql, params=tuple(vdf_params))
-    sdf = sql_df("SELECT DISTINCT COALESCE(status,'') AS status FROM tote_products WHERE bet_type='SUPERFECTA' ORDER BY 1")
+#     # Options for filters
+#     try:
+#         cdf = sql_df("SELECT country FROM `mv_event_filters_country` ORDER BY country")
+#     except Exception:
+#         cdf = sql_df("SELECT DISTINCT country FROM `autobet-470818.autobet.tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
+#     # UI Improvement: Dynamic venue options based on other filters for a better user experience.
+#     vdf_sql = "SELECT DISTINCT COALESCE(e.venue, p.venue) AS venue FROM `autobet-470818.autobet.tote_products` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) WHERE UPPER(p.bet_type)='SUPERFECTA' AND COALESCE(e.venue, p.venue) IS NOT NULL AND COALESCE(e.venue, p.venue) <> ''"
+#     vdf_params: list[object] = []
+#     if country:
+#         vdf_sql += " AND (UPPER(e.country)=? OR UPPER(p.currency)=?)"
+#         vdf_params.extend([country, country])
+#     if date_from and date_to:
+#         vdf_sql += " AND substr(p.start_iso,1,10) BETWEEN ? AND ?"
+#         vdf_params.extend([date_from, date_to])
+#     vdf_sql += " ORDER BY venue"
+#     vdf = sql_df(vdf_sql, params=tuple(vdf_params))
+#     sdf = sql_df("SELECT DISTINCT COALESCE(status,'') AS status FROM tote_products WHERE bet_type='SUPERFECTA' ORDER BY 1")
 
-    # Optional upcoming 60m (GB) from BigQuery
-    upcoming = []
-    try:
-        udf = sql_df("SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, n_competitors, combos, S, O_min, roi_current, viable_now FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso")
-        if not udf.empty:
-            upcoming = udf.to_dict("records")
-    except Exception: # The view might not exist, fail gracefully
-        upcoming = []
+#     # Optional upcoming 60m (GB) from BigQuery
+#     upcoming = []
+#     try:
+#         udf = sql_df("SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, n_competitors, combos, S, O_min, roi_current, viable_now FROM vw_gb_open_superfecta_next60_be ORDER BY start_iso")
+#         if not udf.empty:
+#             upcoming = udf.to_dict("records")
+#     except Exception: # The view might not exist, fail gracefully
+#         upcoming = []
 
-    products = df.to_dict("records") if not df.empty else []
-    return render_template(
-        "tote_superfecta.html",
-        products=products,
-        filters={
-            "country": country,
-            "venue": venue,
-            "status": status,
-            "from": date_from,
-            "to": date_to,
-            "limit": limit,
-            "upcoming": upcoming_flag,
-        },
-        venue_options=(vdf['venue'].tolist() if not vdf.empty else []),
-        country_options=(cdf['country'].tolist() if not cdf.empty else ['GB']),
-        status_options=(sdf['status'].tolist() if not sdf.empty else ['OPEN','CLOSED']),
-        upcoming=(upcoming or []),
-    )
+#     products = df.to_dict("records") if not df.empty else []
+#     return render_template(
+#         "tote_superfecta.html",
+#         products=products,
+#         filters={
+#             "country": country,
+#             "venue": venue,
+#             "status": status,
+#             "from": date_from,
+#             "to": date_to,
+#             "limit": limit,
+#             "upcoming": upcoming_flag,
+#         },
+#         venue_options=(vdf['venue'].tolist() if not vdf.empty else []),
+#         country_options=(cdf['country'].tolist() if not cdf.empty else ['GB']),
+#         status_options=(sdf['status'].tolist() if not sdf.empty else ['OPEN','CLOSED']),
+#         upcoming=(upcoming or []),
+#     )
 
 @app.route("/api/admin/refresh_product_status", methods=["GET","POST"])
 def api_admin_refresh_product_status():
@@ -2471,7 +2471,7 @@ def tote_audit_superfecta_post():
     """Handle audit bet placement for Superfecta, writing to BigQuery."""
     if not _use_bq():
         flash("Audit placement requires BigQuery to be configured.", "error")
-        return redirect(request.referrer or url_for('tote_superfecta_page'))
+        return redirect(request.referrer or url_for('tote_events_page'))
 
     pid = (request.form.get("product_id") or "").strip()
     # This is the new field for the audit bet form
@@ -2494,14 +2494,14 @@ def tote_audit_superfecta_post():
         mode = "audit"
     if not pid or (not sel and not sels_raw):
         flash("Missing product or selection(s)", "error")
-        return redirect(request.referrer or url_for('tote_superfecta_page'))
+        return redirect(request.referrer or url_for('tote_events_page'))
     try:
         sk = float(stake)
         if sk <= 0:
             raise ValueError
     except Exception:
         flash("Stake must be > 0", "error")
-        return redirect(request.referrer or url_for('tote_superfecta_page'))
+        return redirect(request.referrer or url_for('tote_events_page'))
 
     post_flag = (request.form.get("post") or "").lower() in ("1","true","yes","on")
     stake_type = (request.form.get("stake_type") or "total").strip().lower()
@@ -2538,7 +2538,7 @@ def tote_audit_superfecta_post():
         pstatus = (selling.get("status") or "").upper()
         if pstatus and pstatus != "OPEN":
             flash(f"Preflight: product not OPEN (status={pstatus}).", "error")
-            return redirect(request.referrer or url_for('tote_superfecta_page'))
+            return redirect(request.referrer or url_for('tote_events_page'))
         # Build number->(selection_id,status)
         legs = ((bp.get("legs") or {}).get("nodes")) or []
         selmap = {}
@@ -2564,15 +2564,15 @@ def tote_audit_superfecta_post():
                 pass
             if len(nums) < 4:
                 flash(f"Preflight: invalid selection line '{line}'.", "error")
-                return redirect(request.referrer or url_for('tote_superfecta_page'))
+                return redirect(request.referrer or url_for('tote_events_page'))
             missing = [str(n) for n in nums[:4] if n not in selmap]
             if missing:
                 flash(f"Preflight: unknown numbers {{{','.join(missing)}}}.", "error")
-                return redirect(request.referrer or url_for('tote_superfecta_page'))
+                return redirect(request.referrer or url_for('tote_events_page'))
             inactive = [str(n) for n in nums[:4] if selmap.get(n,(None,None))[1] not in ("ACTIVE","OPEN","AVAILABLE","VALID")]
             if inactive:
                 flash(f"Preflight: selection(s) not active: {{{','.join(inactive)}}}.", "error")
-                return redirect(request.referrer or url_for('tote_superfecta_page'))
+                return redirect(request.referrer or url_for('tote_events_page'))
     except Exception as e:
         # Non-fatal; continue to attempt placement but surface info
         flash(f"Preflight warning: {e}", "warning")
@@ -3470,7 +3470,7 @@ def tote_superfecta_detail(product_id: str):
     pdf = sql_df("SELECT * FROM `autobet-470818.autobet.vw_products_latest_totals` WHERE product_id=?", params=(product_id,))
     if pdf.empty:
         flash("Unknown product id", "error")
-        return redirect(url_for("tote_superfecta_page"))
+        return redirect(url_for("tote_events_page"))
     p = pdf.iloc[0].to_dict()
     runners_df = sql_df("SELECT DISTINCT number, competitor FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=? ORDER BY number", params=(product_id,))
     runners = runners_df.to_dict("records") if not runners_df.empty else []
