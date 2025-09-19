@@ -92,7 +92,8 @@
                         <label for="concentration" class="form-label">Bet Concentration (%)</label>
                         <div class="d-flex align-items-center">
                             <span class="small text-muted me-2">Max Coverage</span>
-                            <input type="range" class="form-range" id="concentration" name="concentration" min="0" max="100" step="1" value="{{ (calc_params.concentration * 100) | round(0) if calc_params.concentration <= 1 else calc_params.concentration }}">
+                            <input type="range" class="form-range flex-grow-1 me-2" id="concentration" name="concentration" min="0" max="100" step="1" value="{{ (calc_params.concentration * 100) | round(0) if calc_params.concentration <= 1 else calc_params.concentration }}">
+                            <input type="number" class="form-control" id="concentration_input" min="0" max="100" step="1" value="{{ (calc_params.concentration * 100) | round(0) if calc_params.concentration <= 1 else calc_params.concentration }}" style="width: 80px;">
                             <span class="small text-muted ms-2">Max Focus</span>
                         </div>
                         <div class="form-text">0 = spread stake across more lines; 100 = focus on top lines.</div>
@@ -101,7 +102,8 @@
                         <label for="market_inefficiency" class="form-label">Market Inefficiency (%)</label>
                         <div class="d-flex align-items-center">
                             <span class="small text-muted me-2">0%</span>
-                            <input type="range" class="form-range" id="market_inefficiency" name="market_inefficiency" min="0" max="100" step="1" value="{{ (calc_params.market_inefficiency * 100) | round(0) if calc_params.market_inefficiency <= 1 else calc_params.market_inefficiency }}">
+                            <input type="range" class="form-range flex-grow-1 me-2" id="market_inefficiency" name="market_inefficiency" min="0" max="100" step="1" value="{{ (calc_params.market_inefficiency * 100) | round(0) if calc_params.market_inefficiency <= 1 else calc_params.market_inefficiency }}">
+                            <input type="number" class="form-control" id="market_inefficiency_input" min="0" max="100" step="1" value="{{ (calc_params.market_inefficiency * 100) | round(0) if calc_params.market_inefficiency <= 1 else calc_params.market_inefficiency }}" style="width: 80px;">
                             <span class="small text-muted ms-2">100%</span>
                         </div>
                         <div class="form-text">Higher = more public money on poor lines (increases your f-share on winning lines).</div>
@@ -426,6 +428,36 @@ document.addEventListener('DOMContentLoaded', function() {
             });
         });
         updateRunnersGrid(); // Initial call
+    }
+
+    // Sync sliders with input boxes
+    const concentrationSlider = document.getElementById('concentration');
+    const concentrationInput = document.getElementById('concentration_input');
+    const marketInefficiencySlider = document.getElementById('market_inefficiency');
+    const marketInefficiencyInput = document.getElementById('market_inefficiency_input');
+
+    // Concentration slider sync
+    if (concentrationSlider && concentrationInput) {
+        concentrationSlider.addEventListener('input', function() {
+            concentrationInput.value = this.value;
+        });
+        concentrationInput.addEventListener('input', function() {
+            const value = Math.max(0, Math.min(100, parseInt(this.value) || 0));
+            this.value = value;
+            concentrationSlider.value = value;
+        });
+    }
+
+    // Market inefficiency slider sync
+    if (marketInefficiencySlider && marketInefficiencyInput) {
+        marketInefficiencySlider.addEventListener('input', function() {
+            marketInefficiencyInput.value = this.value;
+        });
+        marketInefficiencyInput.addEventListener('input', function() {
+            const value = Math.max(0, Math.min(100, parseInt(this.value) || 0));
+            this.value = value;
+            marketInefficiencySlider.value = value;
+        });
     }
 
     // Chart.js logic

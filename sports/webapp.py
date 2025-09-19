@@ -36,6 +36,11 @@ import requests
 _SQLDF_CACHE_LOCK = threading.Lock()
 _SQLDF_CACHE: dict[tuple, tuple[float, pd.DataFrame]] = {}
 
+# Redis client for distributed caching
+_REDIS_CLIENT = None
+_REDIS_CLIENT_LOCK = threading.Lock()
+_REDIS_CLIENT_ERROR = False
+
 try:  # Optional dependency; used if available
     import redis  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
@@ -45,8 +50,10 @@ _REDIS_CACHE_CLIENT = None
 _REDIS_CACHE_DISABLED = False
 _REDIS_CACHE_MAX_BYTES = 5 * 1024 * 1024
 
-_BQSTORAGE_CLIENT = None
-_BQSTORAGE_CLIENT_LOCK = threading.Lock()
+# BigQuery Storage API client pool for better performance
+_BQSTORAGE_CLIENT_POOL = []
+_BQSTORAGE_CLIENT_POOL_LOCK = threading.Lock()
+_BQSTORAGE_CLIENT_POOL_SIZE = 5
 _BQSTORAGE_CLIENT_ERROR = False
 
 
@@ -133,8 +140,32 @@ def _sqldf_cache_set_local(key: tuple, df: pd.DataFrame, ttl: int) -> None:
             _SQLDF_CACHE[key] = (exp, df)
 
 
-def _get_bqstorage_client():
-    global _BQSTORAGE_CLIENT, _BQSTORAGE_CLIENT_ERROR
+def _get_redis_client():
+    """Get Redis client for distributed caching."""
+    global _REDIS_CLIENT, _REDIS_CLIENT_ERROR
+    if _REDIS_CLIENT_ERROR or not cfg.redis_url:
+        return None
+    if _REDIS_CLIENT is not None:
+        return _REDIS_CLIENT
+    with _REDIS_CLIENT_LOCK:
+        if _REDIS_CLIENT is not None:
+            return _REDIS_CLIENT
+        try:
+            if redis is None:
+                _REDIS_CLIENT_ERROR = True
+                return None
+            _REDIS_CLIENT = redis.from_url(cfg.redis_url, decode_responses=False)
+            # Test connection
+            _REDIS_CLIENT.ping()
+        except Exception:
+            _REDIS_CLIENT_ERROR = True
+            _REDIS_CLIENT = None
+        return _REDIS_CLIENT
+
+
+def _get_bqstorage_client_pooled():
+    """Get a BigQuery Storage API client from the pool for better performance."""
+    global _BQSTORAGE_CLIENT_POOL, _BQSTORAGE_CLIENT_ERROR
     if _BQSTORAGE_CLIENT_ERROR:
         return None
     try:
@@ -142,15 +173,27 @@ def _get_bqstorage_client():
     except Exception:
         _BQSTORAGE_CLIENT_ERROR = True
         return None
-    with _BQSTORAGE_CLIENT_LOCK:
-        if _BQSTORAGE_CLIENT is not None:
-            return _BQSTORAGE_CLIENT
-        try:
-            _BQSTORAGE_CLIENT = bigquery_storage.BigQueryReadClient()
-        except Exception:
-            _BQSTORAGE_CLIENT_ERROR = True
-            _BQSTORAGE_CLIENT = None
-        return _BQSTORAGE_CLIENT
+    
+    with _BQSTORAGE_CLIENT_POOL_LOCK:
+        if not _BQSTORAGE_CLIENT_POOL:
+            # Initialize pool
+            for _ in range(_BQSTORAGE_CLIENT_POOL_SIZE):
+                try:
+                    client = bigquery_storage.BigQueryReadClient()
+                    _BQSTORAGE_CLIENT_POOL.append(client)
+                except Exception:
+                    _BQSTORAGE_CLIENT_ERROR = True
+                    break
+        
+        if _BQSTORAGE_CLIENT_POOL:
+            # Return first available client (simple round-robin)
+            return _BQSTORAGE_CLIENT_POOL[0]
+        return None
+
+
+def _get_bqstorage_client():
+    """Legacy function - now uses pooled client."""
+    return _get_bqstorage_client_pooled()
 
 
 def _sqldf_cache_get(key: tuple) -> Optional[pd.DataFrame]:
@@ -811,6 +854,8 @@ def sql_df(*args, **kwargs) -> pd.DataFrame:
         if hit is not None:
             return hit
 
+    # Performance monitoring
+    start_time = time.time()
     job_config = bigquery.QueryJobConfig(
         default_dataset=f"{cfg.bq_project}.{cfg.bq_dataset}",
         query_parameters=qp,
@@ -827,6 +872,11 @@ def sql_df(*args, **kwargs) -> pd.DataFrame:
     except Exception:
         df = it.to_dataframe()
 
+    # Log slow queries for performance monitoring
+    duration = time.time() - start_time
+    if duration > 2.0:  # Log queries taking more than 2 seconds
+        print(f"[PERF] Slow query ({duration:.2f}s): {sql[:100]}...")
+    
     max_rows = int(getattr(cfg, "web_sqldf_max_rows", 0) or 0)
     if max_rows > 0 and len(df) > max_rows:
         df = df.head(max_rows).copy()
@@ -834,6 +884,40 @@ def sql_df(*args, **kwargs) -> pd.DataFrame:
     # Cache the full dataframe
     _sqldf_cache_set(ck, df, cache_ttl)
     return df
+
+
+def sql_df_paginated(sql: str, page: int = 1, per_page: int = 50, **kwargs) -> tuple[pd.DataFrame, int]:
+    """Run a paginated query against BigQuery and return DataFrame + total count.
+    
+    Returns:
+        tuple: (dataframe, total_count)
+    """
+    if not _use_bq():
+        raise RuntimeError("BigQuery is not configured. Set BQ_PROJECT and BQ_DATASET.")
+    
+    # Calculate offset
+    offset = (page - 1) * per_page
+    
+    # Add pagination to SQL
+    paginated_sql = f"{sql} LIMIT {per_page} OFFSET {offset}"
+    
+    # Get the data
+    df = sql_df(paginated_sql, **kwargs)
+    
+    # Get total count (remove ORDER BY and LIMIT for count query)
+    count_sql = sql
+    # Simple regex to remove ORDER BY clause
+    import re
+    count_sql = re.sub(r'\s+ORDER\s+BY\s+[^;]+', '', count_sql, flags=re.IGNORECASE)
+    count_sql = f"SELECT COUNT(*) as total FROM ({count_sql})"
+    
+    try:
+        count_df = sql_df(count_sql, **kwargs)
+        total = int(count_df.iloc[0]['total']) if not count_df.empty else 0
+    except Exception:
+        total = len(df)  # Fallback to current page size
+    
+    return df, total
 
 @app.template_filter('datetime')
 def _fmt_datetime(ts: float | int | str):
@@ -900,22 +984,24 @@ def index():
     # Upcoming Superfecta (prefer 60m GB view with breakeven); graceful fallback if missing.
     try:
         sfs = sql_df(
-            "SELECT product_id, event_id, event_name, venue, country, start_iso, status, currency, COALESCE(total_net,0.0) AS total_net " +
-            "FROM `autobet-470818.autobet.vw_gb_open_superfecta_next60_be` ORDER BY start_iso LIMIT 20",
-            cache_ttl=0,
+            "SELECT s.product_id, s.event_id, s.event_name, s.venue, s.country, s.start_iso, s.status, s.currency, COALESCE(s.total_net,0.0) AS total_net, COALESCE(c.n_competitors, 0) AS n_competitors " +
+            "FROM `autobet-470818.autobet.vw_gb_open_superfecta_next60_be_optimized` s " +
+            "LEFT JOIN `autobet-470818.autobet.vw_product_competitor_counts` c USING(product_id) " +
+            "ORDER BY s.start_iso LIMIT 20",
+            cache_ttl=300,
         )
     except Exception:
         # Fallback: next 60 minutes using latest totals view
         sf_fallback = (
             "SELECT p.product_id, p.event_id, p.event_name, COALESCE(e.venue,p.venue) AS venue, "
             "UPPER(COALESCE(e.country,p.currency)) AS country, p.start_iso, COALESCE(p.status,'') AS status, p.currency, COALESCE(p.total_net,0.0) AS total_net "
-            "FROM `autobet-470818.autobet.vw_products_latest_totals` p LEFT JOIN `autobet-470818.autobet.tote_events` e USING(event_id) "
+            "FROM `autobet-470818.autobet.vw_products_latest_totals_optimized` p LEFT JOIN `autobet-470818.autobet.tote_events_optimized` e USING(event_id) "
             "WHERE UPPER(p.bet_type)='SUPERFECTA' "
             "AND TIMESTAMP(p.start_iso) BETWEEN CURRENT_TIMESTAMP() AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 60 MINUTE) "
             "AND UPPER(COALESCE(e.country,p.currency))='GB' "
             "ORDER BY p.start_iso ASC LIMIT 20"
         )
-        sfs = sql_df(sf_fallback, cache_ttl=10)
+        sfs = sql_df(sf_fallback, cache_ttl=60)
 
     return render_template(
         "index.html",
@@ -1094,22 +1180,22 @@ def tote_events_page():
     base_sql += order_by + " LIMIT ? OFFSET ?"
     params_paged = list(params) + [limit, offset]
     # Performance: Simplified total count query.
-    # Bypass cache for paged results to avoid any unexpected truncation/staleness
-    df = sql_df(base_sql, params=tuple(params_paged), cache_ttl=0)
-    total = int(sql_df(count_sql, params=tuple(params), cache_ttl=0).iloc[0]["c"])
+    # Use short cache for paged results to balance freshness and performance
+    df = sql_df(base_sql, params=tuple(params_paged), cache_ttl=30)
+    total = int(sql_df(count_sql, params=tuple(params), cache_ttl=60).iloc[0]["c"])
     try:
-        # Use the new materialized views for faster filter loading
-        countries_df = sql_df("SELECT country FROM `mv_event_filters_country` ORDER BY country")
-        sports_df = sql_df("SELECT sport FROM `mv_event_filters_sport` ORDER BY sport")
-        venues_df = sql_df("SELECT venue FROM `mv_event_filters_venue` ORDER BY venue")
+        # Use the existing materialized views for faster filter loading
+        countries_df = sql_df("SELECT country FROM `mv_event_filters_country` ORDER BY country", cache_ttl=60)
+        sports_df = sql_df("SELECT sport FROM `mv_event_filters_sport` ORDER BY sport", cache_ttl=60)
+        venues_df = sql_df("SELECT venue FROM `mv_event_filters_venue` ORDER BY venue", cache_ttl=60)
         country_options = countries_df['country'].tolist() if not countries_df.empty else []
         sport_options = sports_df['sport'].tolist() if not sports_df.empty else []
         venue_options = venues_df['venue'].tolist() if not venues_df.empty else []
     except Exception:
         # Fallback to direct queries if MV fails
-        countries_df = sql_df("SELECT DISTINCT country FROM `tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country")
-        sports_df = sql_df("SELECT DISTINCT sport FROM `tote_events` WHERE sport IS NOT NULL AND sport<>'' ORDER BY sport")
-        venues_df = sql_df("SELECT DISTINCT venue FROM `tote_events` WHERE venue IS NOT NULL AND venue<>'' ORDER BY venue")
+        countries_df = sql_df("SELECT DISTINCT country FROM `tote_events` WHERE country IS NOT NULL AND country<>'' ORDER BY country", cache_ttl=60)
+        sports_df = sql_df("SELECT DISTINCT sport FROM `tote_events` WHERE sport IS NOT NULL AND sport<>'' ORDER BY sport", cache_ttl=60)
+        venues_df = sql_df("SELECT DISTINCT venue FROM `tote_events` WHERE venue IS NOT NULL AND venue<>'' ORDER BY venue", cache_ttl=60)
         country_options = countries_df['country'].tolist() if not countries_df.empty else []
         sport_options = sports_df['sport'].tolist() if not sports_df.empty else []
         venue_options = venues_df['venue'].tolist() if not venues_df.empty else []

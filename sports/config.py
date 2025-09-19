@@ -65,6 +65,7 @@ class Config:
     # --- Redis cache (optional shared cache for web/sql_df) ---
     redis_url: str = os.getenv("REDIS_URL", "")
     redis_cache_prefix: str = os.getenv("REDIS_CACHE_PREFIX", "autobet:web")
+    redis_cache_enabled: bool = os.getenv("REDIS_CACHE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 
     # --- Web SQL cache (applies to sql_df) ---
     # Enable a small in-process TTL cache for repeated SELECTs.
