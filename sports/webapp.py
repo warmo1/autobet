@@ -10,6 +10,7 @@ from flask import Flask, render_template, request, redirect, flash, url_for, sen
 from .config import cfg
 from .db import get_db, init_db
 from pathlib import Path
+import math
 import json
 import threading
 import traceback
@@ -1028,12 +1029,15 @@ def tote_params_update():
 @app.route("/tote-events")
 def tote_events_page():
     """List Tote events with filters and pagination."""
-    country = (request.args.get("country") or "").strip().upper()
+    raw_country = request.args.get("country")
+    country = (raw_country.strip().upper() if raw_country is not None else os.getenv("DEFAULT_COUNTRY", "GB").strip().upper())
     sport = (request.args.get("sport") or "").strip()
     venue = (request.args.get("venue") or "").strip()
     name = (request.args.get("name") or "").strip()
-    date_from = (request.args.get("from") or "").strip()
-    date_to = (request.args.get("to") or "").strip()
+    raw_from = request.args.get("from")
+    raw_to = request.args.get("to")
+    date_from = (raw_from.strip() if raw_from is not None else _today_iso())
+    date_to = (raw_to.strip() if raw_to is not None else _today_iso())
     limit = max(1, int(request.args.get("limit", "200") or 200))
     page = max(1, int(request.args.get("page", "1") or 1))
     offset = (page - 1) * limit
@@ -1310,7 +1314,8 @@ def bets_page():
 def tote_pools_page():
     # Filters similar to Superfecta/Calculators for consistent UX
     bet_type = (request.values.get("bet_type") or "").strip().upper()
-    country = (request.values.get("country") or "").strip().upper()
+    raw_country = request.values.get("country")
+    country = (raw_country.strip().upper() if raw_country is not None else os.getenv("DEFAULT_COUNTRY", "GB").strip().upper())
     status = (request.values.get("status") or "").strip().upper()
     venue = (request.values.get("venue") or "").strip()
     date_filter = (request.values.get("date") or _today_iso()).strip()
@@ -2808,12 +2813,22 @@ def api_status_upcoming():
     upcoming: list[dict[str, Any]] = []
     errors: list[str] = []
 
+    def _normalize_json(obj: Any) -> Any:
+        if isinstance(obj, float):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+            return obj
+        if isinstance(obj, dict):
+            return {k: _normalize_json(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_normalize_json(v) for v in obj]
+        return obj
+
     def _df_records(frame: pd.DataFrame | None) -> list[dict[str, Any]]:
         if frame is None or frame.empty:
             return []
-        safe = frame.copy()
-        safe = safe.where(~safe.isna(), None)
-        return safe.to_dict("records")
+        records = frame.to_dict("records")
+        return [_normalize_json(rec) for rec in records]
 
     # Primary view focuses on GB superfecta races with richer metrics.
     try:
