@@ -15,119 +15,115 @@ query GetProducts($date: Date, $status: BettingProductSellingStatus, $first: Int
     nodes {
       id
       name
-      # Shape A: node is BettingProduct
-      ... on BettingProduct {
-        country { alpha2Code }
-        betType { code rules { bet { min { decimalAmount currency { code } } max { decimalAmount currency { code } } } line { min { decimalAmount currency { code } } max { decimalAmount currency { code } } increment { decimalAmount currency { code } } } } }
-        selling { status }
-        pool {
-          total { 
-            grossAmounts { decimalAmount currency { code } }
-            netAmounts { decimalAmount currency { code } }
-          }
-          carryIn { 
-            grossAmounts { decimalAmount currency { code } }
-            netAmounts { decimalAmount currency { code } }
-          }
-          guarantee { 
-            grossAmounts { decimalAmount currency { code } }
-            netAmounts { decimalAmount currency { code } }
-          }
-          takeout { percentage }
-          funds {
-            total { 
-              grossAmounts { decimalAmount currency { code } }
-              netAmounts { decimalAmount currency { code } }
+      type {
+        ... on BettingProduct {
+          pool {
+            total {
+              grossAmount { decimalAmount }
+              netAmount { decimalAmount }
             }
-            carryIn { 
-              grossAmounts { decimalAmount currency { code } }
-              netAmounts { decimalAmount currency { code } }
+            takeout {
+              percentage
+              amount { decimalAmount }
+            }
+            carryIn {
+              grossAmount { decimalAmount }
+              netAmount { decimalAmount }
             }
           }
-        }
-        legs {
-          nodes {
-            event { id name venue { name } scheduledStartDateTime { iso8601 } result { results { nodes { finishingPosition id name } } } }
+          betType {
             id
-            selections {
-              nodes {
-                id
-                name
-                eventCompetitor {
-                  __typename
-                  id
-                  name
-                  entryStatus
-                  ... on HorseRacingEventCompetitor { clothNumber }
+            code
+            rules {
+              bet {
+                min {
+                  decimalAmount
+                  currency { code name symbol }
+                }
+                max {
+                  decimalAmount
+                  currency { code name symbol }
+                }
+              }
+              line {
+                min {
+                  decimalAmount
+                  currency { code name symbol }
+                }
+                max {
+                  decimalAmount
+                  currency { code name symbol }
+                }
+                increment {
+                  decimalAmount
+                  currency { code name symbol }
                 }
               }
             }
           }
-        }
-        lines {
-          nodes {
-            id
-            legs { legId lineSelections { selectionId } }
-            odds { decimal name status }
-          }
-        }
-        result {
-          status
-          dividends {
-            nodes {
-              dividend { amount { decimalAmount } }
-              dividendLegs { nodes { dividendSelections { nodes { id finishingPosition } } } }
-            }
-          }
-        }
-      }
-      # Shape B: node has a type wrapper exposing BettingProduct
-      type {
-        ... on BettingProduct {
-          country { alpha2Code }
-          betType { code rules { bet { min { decimalAmount currency { code } } max { decimalAmount currency { code } } } line { min { decimalAmount currency { code } } max { decimalAmount currency { code } } increment { decimalAmount currency { code } } } } }
           selling { status }
-          pool {
-            total { grossAmount { decimalAmount } netAmount { decimalAmount } }
-            carryIn { grossAmount { decimalAmount } netAmount { decimalAmount } }
-            takeout { percentage }
-            funds {
-              total { grossAmount { decimalAmount } netAmount { decimalAmount } }
-              carryIn { grossAmount { decimalAmount } netAmount { decimalAmount } }
+          lineHistory
+          lines {
+            nodes {
+              legs {
+                legId
+                lineSelections { selectionId }
+              }
+              odds {
+                name
+                decimal
+                status
+                type
+              }
             }
           }
           legs {
             nodes {
-              event { id name venue { name } scheduledStartDateTime { iso8601 } result { results { nodes { finishingPosition id name } } } }
               id
+              event {
+                id
+                name
+                scheduledStartDateTime { iso8601 }
+                venue {
+                  id
+                  name
+                  country { name }
+                }
+              }
               selections {
                 nodes {
                   id
                   name
-                  eventCompetitor {
-                    __typename
+                  competitor {
                     id
                     name
                     entryStatus
-                    ... on HorseRacingEventCompetitor { clothNumber }
+                    details {
+                      ... on HorseDetails { clothNumber }
+                    }
                   }
                 }
               }
             }
           }
-        lines {
-          nodes {
-            id
-            legs { legId lineSelections { selectionId } }
-            odds { decimal name status }
-          }
-        }
           result {
             status
             dividends {
               nodes {
-                dividend { amount { decimalAmount } }
-                dividendLegs { nodes { dividendSelections { nodes { id finishingPosition } } } }
+                dividend { 
+                  name
+                  amount { decimalAmount }
+                }
+                dividendLegs { 
+                  nodes { 
+                    dividendSelections { 
+                      nodes { 
+                        id 
+                        finishingPosition 
+                      } 
+                    } 
+                  } 
+                }
               }
             }
           }
@@ -142,54 +138,119 @@ PRODUCT_BY_ID_QUERY = """
 query GetProduct($id: String!) {
   product(id: $id) {
     id
-    ... on BettingProduct { # This fragment is likely the most up-to-date
-      country { alpha2Code }
-      betType { code rules { bet { min { decimalAmount currency { code } } max { decimalAmount currency { code } } } line { min { decimalAmount currency { code } } max { decimalAmount currency { code } } increment { decimalAmount currency { code } } } } }
-      selling { status }
-      pool {
-        total { grossAmount { decimalAmount } netAmount { decimalAmount } }
-        carryIn { grossAmount { decimalAmount } netAmount { decimalAmount } }
-        takeout { percentage }
-        funds {
-          total { grossAmount { decimalAmount } netAmount { decimalAmount } }
-          carryIn { grossAmount { decimalAmount } netAmount { decimalAmount } }
+    name
+    type {
+      ... on BettingProduct {
+        pool {
+          total {
+            grossAmount { decimalAmount }
+            netAmount { decimalAmount }
+          }
+          takeout {
+            percentage
+            amount { decimalAmount }
+          }
+          carryIn {
+            grossAmount { decimalAmount }
+            netAmount { decimalAmount }
+          }
         }
-      }
-      lines {
-        nodes {
+        betType {
           id
-          legs { legId lineSelections { selectionId } }
-          odds { decimal name status }
-        }
-      }
-      legs {
-        nodes {
-          id
-          event { id name venue { name } scheduledStartDateTime { iso8601 } result { results { nodes { finishingPosition id name } } } }
-          selections {
-            nodes {
-              id
-              name
-              eventCompetitor {
-                __typename
-                id
-                name
-                entryStatus
-                ... on HorseRacingEventCompetitor { clothNumber }
+          code
+          rules {
+            bet {
+              min {
+                decimalAmount
+                currency { code name symbol }
+              }
+              max {
+                decimalAmount
+                currency { code name symbol }
+              }
+            }
+            line {
+              min {
+                decimalAmount
+                currency { code name symbol }
+              }
+              max {
+                decimalAmount
+                currency { code name symbol }
+              }
+              increment {
+                decimalAmount
+                currency { code name symbol }
               }
             }
           }
         }
-      }
-      result { status dividends { nodes { dividend { amount { decimalAmount } } dividendLegs { nodes { dividendSelections { nodes { id finishingPosition } } } } } } }
-    }
-    type { # This is a fallback for older schema versions
-      ... on BettingProduct {
-        country { alpha2Code }
-        betType { code }
         selling { status }
-        lines { nodes { id legs { legId lineSelections { selectionId } } odds { decimal name status } } }
-        legs { nodes { event { id name venue { name } scheduledStartDateTime { iso8601 } } selections { nodes { id competitor { name details { __typename ... on HorseDetails { clothNumber } } } } } } }
+        lineHistory
+        lines {
+          nodes {
+            legs {
+              legId
+              lineSelections { selectionId }
+            }
+            odds {
+              name
+              decimal
+              status
+              type
+            }
+          }
+        }
+        legs {
+          nodes {
+            id
+            event {
+              id
+              name
+              scheduledStartDateTime { iso8601 }
+              venue {
+                id
+                name
+                country { name }
+              }
+            }
+            selections {
+              nodes {
+                id
+                name
+                competitor {
+                  id
+                  name
+                  entryStatus
+                  details {
+                    ... on HorseDetails { clothNumber }
+                  }
+                }
+              }
+            }
+          }
+        }
+        result {
+          status
+          dividends {
+            nodes {
+              dividend { 
+                name
+                amount { decimalAmount }
+              }
+              dividendLegs { 
+                nodes { 
+                  dividendSelections { 
+                    nodes { 
+                      id 
+                      finishingPosition 
+                    } 
+                  } 
+                } 
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -271,11 +332,9 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
     rows_dividends: List[Dict[str, Any]] = []
     rows_runs: List[Dict[str, Any]] = []
     for p in products_nodes:
-        # Map current schema (BettingProduct fragment), supporting two shapes:
-        # 1) fields directly on node
-        # 2) fields under node.type (union wrapper)
+        # Map current schema - data is now under node.type
         bp = p or {}
-        src = (bp.get("type") or bp)
+        src = bp.get("type") or {}
         legs = ((src.get("legs") or {}).get("nodes") or []) if "legs" in src else []
         event = None
         if legs:
@@ -292,7 +351,7 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
                 "name": event.get("name"),
                 "sport": "horse_racing",
                 "venue": event.get("venue"),
-                "country": ((src.get("country") or {}).get("alpha2Code")),
+                "country": ((evt.get("venue") or {}).get("country") or {}).get("name"),
                 "start_iso": event.get("start_iso"),
                 # Use product selling status as a proxy for event status when available
                 "status": ((src.get("selling") or {}).get("status")),
@@ -303,30 +362,13 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
                 "away": None,
                 "source": "tote_api",
             })
-        # Pool totals - handle new array format from official API
+        # Pool totals
         pool = (src.get("pool") or {})
         total = (pool.get("total") or {})
-        
-        # Handle new array format
-        gross_amounts = total.get("grossAmounts", [])
-        net_amounts = total.get("netAmounts", [])
-        gross = gross_amounts[0].get("decimalAmount") if gross_amounts else None
-        net = net_amounts[0].get("decimalAmount") if net_amounts else None
-        
-        # Fallback to old format if new format is empty
-        if gross is None:
-            gross = ((total.get("grossAmount") or {}).get("decimalAmount"))
-        if net is None:
-            net = ((total.get("netAmount") or {}).get("decimalAmount"))
-        
+        gross = ((total.get("grossAmount") or {}).get("decimalAmount"))
+        net = ((total.get("netAmount") or {}).get("decimalAmount"))
         carry_in = (pool.get("carryIn") or {})
-        carry_in_gross = carry_in.get("grossAmounts", [])
-        rollover = carry_in_gross[0].get("decimalAmount") if carry_in_gross else None
-        
-        # Fallback to old format
-        if rollover is None:
-            rollover = ((carry_in.get("grossAmount") or {}).get("decimalAmount"))
-        
+        rollover = ((carry_in.get("grossAmount") or {}).get("decimalAmount"))
         takeout = (pool.get("takeout") or {})
         deduction_rate = takeout.get("percentage")
         # Fallback: sum pool.funds totals when aggregate totals are missing/zero
@@ -393,11 +435,12 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
             sels = ((leg.get("selections") or {}).get("nodes")) or []
             for sel in sels:
                 sid = sel.get("id")
-                event_comp = sel.get("eventCompetitor") or {}
-                n = event_comp.get("clothNumber") or event_comp.get("trapNumber")
+                competitor = sel.get("competitor") or {}
+                det = competitor.get("details") or {}
+                n = det.get("clothNumber") or det.get("trapNumber")
                 if n is None: # Legacy fallback
-                    det = (sel.get("competitor") or {}).get("details") or {}
-                    n = det.get("clothNumber") or det.get("trapNumber")
+                    event_comp = sel.get("eventCompetitor") or {}
+                    n = event_comp.get("clothNumber") or event_comp.get("trapNumber")
                 if sid and n is not None:
                     try:
                         sel_to_cloth_map[sid] = int(n)
@@ -414,15 +457,17 @@ def ingest_products(db: BigQuerySink, client: ToteClient, date_iso: str | None, 
             sels = ((leg.get("selections") or {}).get("nodes")) or []
             for sel in sels:
                 sid = sel.get("id")
-                # Handle new `eventCompetitor` structure and fall back to `competitor`
-                event_comp = sel.get("eventCompetitor") or {}
-                comp_name = sel.get("name") or event_comp.get("name")
-                n = event_comp.get("clothNumber") or event_comp.get("trapNumber")
+                # Handle new `competitor` structure and fall back to `eventCompetitor`
+                competitor = sel.get("competitor") or {}
+                comp_name = sel.get("name") or competitor.get("name")
+                det = competitor.get("details") or {}
+                n = det.get("clothNumber") or det.get("trapNumber")
                 if not comp_name: # Legacy fallback
-                    comp_name = (sel.get("competitor") or {}).get("name")
+                    event_comp = sel.get("eventCompetitor") or {}
+                    comp_name = event_comp.get("name")
                 if n is None: # Legacy fallback
-                    det = (sel.get("competitor") or {}).get("details") or {}
-                    n = det.get("clothNumber") or det.get("trapNumber")
+                    event_comp = sel.get("eventCompetitor") or {}
+                    n = event_comp.get("clothNumber") or event_comp.get("trapNumber")
                 try:
                     num_val = int(n) if n is not None else None
                 except (ValueError, TypeError):

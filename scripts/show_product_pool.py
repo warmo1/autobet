@@ -21,60 +21,21 @@ Q = """
 query($id:String!){
   product(id:$id){
     id
-    ... on BettingProduct {
-      pool {
-        total { 
-          grossAmounts { decimalAmount currency { code } }
-          netAmounts { decimalAmount currency { code } }
-        }
-        carryIn { 
-          grossAmounts { decimalAmount currency { code } }
-          netAmounts { decimalAmount currency { code } }
-        }
-        guarantee { 
-          grossAmounts { decimalAmount currency { code } }
-          netAmounts { decimalAmount currency { code } }
-        }
-        takeout { percentage }
-        funds {
-          total { 
-            grossAmounts { decimalAmount currency { code } }
-            netAmounts { decimalAmount currency { code } }
-          }
-          carryIn { 
-            grossAmounts { decimalAmount currency { code } }
-            netAmounts { decimalAmount currency { code } }
-          }
-        }
-      }
-      betType { code }
-      selling { status }
-    }
+    name
     type {
       ... on BettingProduct {
         pool {
           total { 
-            grossAmounts { decimalAmount currency { code } }
-            netAmounts { decimalAmount currency { code } }
+            grossAmount { decimalAmount }
+            netAmount { decimalAmount }
           }
           carryIn { 
-            grossAmounts { decimalAmount currency { code } }
-            netAmounts { decimalAmount currency { code } }
+            grossAmount { decimalAmount }
+            netAmount { decimalAmount }
           }
-          guarantee { 
-            grossAmounts { decimalAmount currency { code } }
-            netAmounts { decimalAmount currency { code } }
-          }
-          takeout { percentage }
-          funds {
-            total { 
-              grossAmounts { decimalAmount currency { code } }
-              netAmounts { decimalAmount currency { code } }
-            }
-            carryIn { 
-              grossAmounts { decimalAmount currency { code } }
-              netAmounts { decimalAmount currency { code } }
-            }
+          takeout { 
+            percentage
+            amount { decimalAmount }
           }
         }
         betType { code }

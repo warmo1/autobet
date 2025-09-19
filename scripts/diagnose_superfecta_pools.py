@@ -35,23 +35,25 @@ def check_api_pool_data(product_id: str) -> Dict[str, Any]:
     query GetProductPool($id: String!) {
       product(id: $id) {
         id
-        ... on BettingProduct {
-          betType { code }
-          selling { status }
-          pool {
-            total { 
-              grossAmounts { decimalAmount currency { code } }
-              netAmounts { decimalAmount currency { code } }
+        name
+        type {
+          ... on BettingProduct {
+            betType { code }
+            selling { status }
+            pool {
+              total { 
+                grossAmount { decimalAmount }
+                netAmount { decimalAmount }
+              }
+              carryIn { 
+                grossAmount { decimalAmount }
+                netAmount { decimalAmount }
+              }
+              takeout { 
+                percentage
+                amount { decimalAmount }
+              }
             }
-            carryIn { 
-              grossAmounts { decimalAmount currency { code } }
-              netAmounts { decimalAmount currency { code } }
-            }
-            guarantee { 
-              grossAmounts { decimalAmount currency { code } }
-              netAmounts { decimalAmount currency { code } }
-            }
-            takeout { percentage }
           }
         }
       }
@@ -65,20 +67,18 @@ def check_api_pool_data(product_id: str) -> Dict[str, Any]:
         if not product:
             return {"error": "Product not found in API"}
         
-        bet_type = product.get("betType", {}).get("code", "UNKNOWN")
-        status = product.get("selling", {}).get("status", "UNKNOWN")
-        pool = product.get("pool", {})
+        # Data is now under product.type
+        product_type = product.get("type", {})
+        bet_type = product_type.get("betType", {}).get("code", "UNKNOWN")
+        status = product_type.get("selling", {}).get("status", "UNKNOWN")
+        pool = product_type.get("pool", {})
         
         total = pool.get("total", {})
-        gross_amounts = total.get("grossAmounts", [])
-        net_amounts = total.get("netAmounts", [])
-        
-        gross = gross_amounts[0].get("decimalAmount") if gross_amounts else None
-        net = net_amounts[0].get("decimalAmount") if net_amounts else None
+        gross = total.get("grossAmount", {}).get("decimalAmount")
+        net = total.get("netAmount", {}).get("decimalAmount")
         
         carry_in = pool.get("carryIn", {})
-        carry_in_gross = carry_in.get("grossAmounts", [])
-        rollover = carry_in_gross[0].get("decimalAmount") if carry_in_gross else None
+        rollover = carry_in.get("grossAmount", {}).get("decimalAmount")
         
         takeout = pool.get("takeout", {}).get("percentage")
         
@@ -119,7 +119,7 @@ def check_database_pool_data(product_id: str) -> Dict[str, Any]:
     """
     
     try:
-        rows = db.query(query, (product_id,))
+        rows = list(db.query(query, (product_id,)))
         if not rows:
             return {"error": "No pool snapshots found in database"}
         
@@ -159,7 +159,7 @@ def check_product_data(product_id: str) -> Dict[str, Any]:
     """
     
     try:
-        rows = db.query(query, (product_id,))
+        rows = list(db.query(query, (product_id,)))
         if not rows:
             return {"error": "Product not found in database"}
         
@@ -200,7 +200,7 @@ def find_superfecta_products_for_event(event_id: str) -> list:
     """
     
     try:
-        rows = db.query(query, (event_id,))
+        rows = list(db.query(query, (event_id,)))
         return [dict(row) for row in rows]
     except Exception as e:
         print(f"❌ Error finding products: {e}")
