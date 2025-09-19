@@ -857,6 +857,166 @@ class BigQuerySink:
             ]),
         )
 
+
+    def upsert_superfecta_morning(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp(
+            "tote_superfecta_morning",
+            rows,
+            schema_hint={
+                "run_date": "DATE",
+                "run_ts": "INT64",
+                "n_competitors": "INT64",
+                "total_net": "FLOAT64",
+                "total_gross": "FLOAT64",
+                "rollover": "FLOAT64",
+                "roi_current": "FLOAT64",
+                "bankroll_allocated": "FLOAT64",
+                "total_stake": "FLOAT64",
+                "expected_profit": "FLOAT64",
+                "expected_return": "FLOAT64",
+                "hit_rate": "FLOAT64",
+                "minutes_to_post": "FLOAT64",
+                "created_ts": "INT64",
+            },
+        )
+        if not temp:
+            return
+        self._merge(
+            "tote_superfecta_morning",
+            temp,
+            key_expr="T.run_id = S.run_id",
+            update_set=",".join([
+                "run_date=COALESCE(S.run_date, T.run_date)",
+                "run_ts=COALESCE(S.run_ts, T.run_ts)",
+                "product_id=COALESCE(S.product_id, T.product_id)",
+                "event_id=COALESCE(S.event_id, T.event_id)",
+                "event_name=COALESCE(S.event_name, T.event_name)",
+                "venue=COALESCE(S.venue, T.venue)",
+                "country=COALESCE(S.country, T.country)",
+                "start_iso=COALESCE(S.start_iso, T.start_iso)",
+                "currency=COALESCE(S.currency, T.currency)",
+                "n_competitors=COALESCE(S.n_competitors, T.n_competitors)",
+                "total_net=COALESCE(S.total_net, T.total_net)",
+                "total_gross=COALESCE(S.total_gross, T.total_gross)",
+                "rollover=COALESCE(S.rollover, T.rollover)",
+                "roi_current=COALESCE(S.roi_current, T.roi_current)",
+                "preset_key=COALESCE(S.preset_key, T.preset_key)",
+                "bankroll_allocated=COALESCE(S.bankroll_allocated, T.bankroll_allocated)",
+                "total_stake=COALESCE(S.total_stake, T.total_stake)",
+                "expected_profit=COALESCE(S.expected_profit, T.expected_profit)",
+                "expected_return=COALESCE(S.expected_return, T.expected_return)",
+                "hit_rate=COALESCE(S.hit_rate, T.hit_rate)",
+                "plan_json=COALESCE(S.plan_json, T.plan_json)",
+                "selections_text=COALESCE(S.selections_text, T.selections_text)",
+                "status=COALESCE(S.status, T.status)",
+                "filter_reason=COALESCE(S.filter_reason, T.filter_reason)",
+                "notes=COALESCE(S.notes, T.notes)",
+                "created_by=COALESCE(S.created_by, T.created_by)",
+                "minutes_to_post=COALESCE(S.minutes_to_post, T.minutes_to_post)",
+                "created_ts=COALESCE(S.created_ts, T.created_ts)",
+            ]),
+        )
+
+    def upsert_superfecta_live_checks(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp(
+            "tote_superfecta_live_checks",
+            rows,
+            schema_hint={
+                "check_ts": "INT64",
+                "minutes_to_post": "FLOAT64",
+                "pool_total_net": "FLOAT64",
+                "pool_total_gross": "FLOAT64",
+                "rollover": "FLOAT64",
+                "roi_current": "FLOAT64",
+                "expected_profit": "FLOAT64",
+                "expected_return": "FLOAT64",
+                "hit_rate": "FLOAT64",
+                "plan_total_stake": "FLOAT64",
+                "decision_threshold_met": "BOOL",
+            },
+        )
+        if not temp:
+            return
+        self._merge(
+            "tote_superfecta_live_checks",
+            temp,
+            key_expr="T.check_id = S.check_id",
+            update_set=",".join([
+                "recommendation_id=COALESCE(S.recommendation_id, T.recommendation_id)",
+                "run_id=COALESCE(S.run_id, T.run_id)",
+                "product_id=COALESCE(S.product_id, T.product_id)",
+                "check_ts=COALESCE(S.check_ts, T.check_ts)",
+                "minutes_to_post=COALESCE(S.minutes_to_post, T.minutes_to_post)",
+                "pool_total_net=COALESCE(S.pool_total_net, T.pool_total_net)",
+                "pool_total_gross=COALESCE(S.pool_total_gross, T.pool_total_gross)",
+                "rollover=COALESCE(S.rollover, T.rollover)",
+                "roi_current=COALESCE(S.roi_current, T.roi_current)",
+                "expected_profit=COALESCE(S.expected_profit, T.expected_profit)",
+                "expected_return=COALESCE(S.expected_return, T.expected_return)",
+                "hit_rate=COALESCE(S.hit_rate, T.hit_rate)",
+                "plan_total_stake=COALESCE(S.plan_total_stake, T.plan_total_stake)",
+                "status=COALESCE(S.status, T.status)",
+                "notes=COALESCE(S.notes, T.notes)",
+                "plan_json=COALESCE(S.plan_json, T.plan_json)",
+                "decision_threshold_met=COALESCE(S.decision_threshold_met, T.decision_threshold_met)",
+            ]),
+        )
+
+    def upsert_superfecta_recommendations(self, rows: Iterable[Mapping[str, Any]]):
+        temp = self._load_to_temp(
+            "tote_superfecta_recommendations",
+            rows,
+            schema_hint={
+                "run_date": "DATE",
+                "created_ts": "INT64",
+                "updated_ts": "INT64",
+                "bankroll_allocated": "FLOAT64",
+                "total_stake": "FLOAT64",
+                "expected_profit": "FLOAT64",
+                "expected_return": "FLOAT64",
+                "hit_rate": "FLOAT64",
+                "auto_place": "BOOL",
+                "ready_ts": "INT64",
+                "final_ts": "INT64",
+                "minutes_to_post": "FLOAT64",
+                "last_check_ts": "INT64",
+            },
+        )
+        if not temp:
+            return
+        self._merge(
+            "tote_superfecta_recommendations",
+            temp,
+            key_expr="T.recommendation_id = S.recommendation_id",
+            update_set=",".join([
+                "run_id=COALESCE(S.run_id, T.run_id)",
+                "product_id=COALESCE(S.product_id, T.product_id)",
+                "event_id=COALESCE(S.event_id, T.event_id)",
+                "run_date=COALESCE(S.run_date, T.run_date)",
+                "created_ts=COALESCE(T.created_ts, S.created_ts)",
+                "updated_ts=COALESCE(S.updated_ts, T.updated_ts)",
+                "status=COALESCE(S.status, T.status)",
+                "preset_key=COALESCE(S.preset_key, T.preset_key)",
+                "bankroll_allocated=COALESCE(S.bankroll_allocated, T.bankroll_allocated)",
+                "total_stake=COALESCE(S.total_stake, T.total_stake)",
+                "expected_profit=COALESCE(S.expected_profit, T.expected_profit)",
+                "expected_return=COALESCE(S.expected_return, T.expected_return)",
+                "hit_rate=COALESCE(S.hit_rate, T.hit_rate)",
+                "currency=COALESCE(S.currency, T.currency)",
+                "plan_json=COALESCE(S.plan_json, T.plan_json)",
+                "selections_text=COALESCE(S.selections_text, T.selections_text)",
+                "auto_place=COALESCE(S.auto_place, T.auto_place)",
+                "decision_reason=COALESCE(S.decision_reason, T.decision_reason)",
+                "ready_ts=COALESCE(S.ready_ts, T.ready_ts)",
+                "final_ts=COALESCE(S.final_ts, T.final_ts)",
+                "bet_id=COALESCE(S.bet_id, T.bet_id)",
+                "live_metrics_json=COALESCE(S.live_metrics_json, T.live_metrics_json)",
+                "minutes_to_post=COALESCE(S.minutes_to_post, T.minutes_to_post)",
+                "last_check_ts=COALESCE(S.last_check_ts, T.last_check_ts)",
+                "source=COALESCE(S.source, T.source)",
+            ]),
+        )
+
     def ensure_views(self):
         """Create views required by the web app if missing (idempotent)."""
         client = self._client_obj(); self._ensure_dataset()
@@ -943,6 +1103,85 @@ class BigQuerySink:
           status STRING,
           response_json STRING,
           error STRING
+        );
+        CREATE TABLE IF NOT EXISTS `{ds}.tote_superfecta_morning`(
+          run_id STRING,
+          run_date DATE,
+          run_ts INT64,
+          product_id STRING,
+          event_id STRING,
+          event_name STRING,
+          venue STRING,
+          country STRING,
+          start_iso STRING,
+          currency STRING,
+          n_competitors INT64,
+          total_net FLOAT64,
+          total_gross FLOAT64,
+          rollover FLOAT64,
+          roi_current FLOAT64,
+          preset_key STRING,
+          bankroll_allocated FLOAT64,
+          total_stake FLOAT64,
+          expected_profit FLOAT64,
+          expected_return FLOAT64,
+          hit_rate FLOAT64,
+          plan_json STRING,
+          selections_text STRING,
+          status STRING,
+          filter_reason STRING,
+          notes STRING,
+          created_by STRING,
+          minutes_to_post FLOAT64,
+          created_ts INT64
+        );
+        CREATE TABLE IF NOT EXISTS `{ds}.tote_superfecta_live_checks`(
+          check_id STRING,
+          recommendation_id STRING,
+          run_id STRING,
+          product_id STRING,
+          check_ts INT64,
+          minutes_to_post FLOAT64,
+          pool_total_net FLOAT64,
+          pool_total_gross FLOAT64,
+          rollover FLOAT64,
+          roi_current FLOAT64,
+          expected_profit FLOAT64,
+          expected_return FLOAT64,
+          hit_rate FLOAT64,
+          plan_total_stake FLOAT64,
+          status STRING,
+          notes STRING,
+          plan_json STRING,
+          decision_threshold_met BOOL
+        );
+        CREATE TABLE IF NOT EXISTS `{ds}.tote_superfecta_recommendations`(
+          recommendation_id STRING,
+          run_id STRING,
+          product_id STRING,
+          event_id STRING,
+          run_date DATE,
+          created_ts INT64,
+          updated_ts INT64,
+          status STRING,
+          preset_key STRING,
+          bankroll_allocated FLOAT64,
+          total_stake FLOAT64,
+          expected_profit FLOAT64,
+          expected_return FLOAT64,
+          hit_rate FLOAT64,
+          currency STRING,
+          plan_json STRING,
+          selections_text STRING,
+          auto_place BOOL,
+          decision_reason STRING,
+          ready_ts INT64,
+          final_ts INT64,
+          bet_id STRING,
+          live_metrics_json STRING,
+          minutes_to_post FLOAT64,
+          last_check_ts INT64,
+          source STRING
         );
         """
         job = client.query(sql); job.result()

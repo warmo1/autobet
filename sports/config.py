@@ -73,4 +73,19 @@ class Config:
     # Optional soft cap on returned rows from sql_df; 0 disables.
     web_sqldf_max_rows: int = int(os.getenv("WEB_SQLDF_MAX_ROWS", "0"))
 
+    # --- Superfecta automation defaults ---
+    superfecta_default_bankroll: float = float(os.getenv("SUPERFECTA_DEFAULT_BANKROLL", "500"))
+    superfecta_default_preset: str = os.getenv("SUPERFECTA_DEFAULT_PRESET", "balanced")
+    superfecta_min_competitors: int = int(os.getenv("SUPERFECTA_MIN_COMPETITORS", "7"))
+    superfecta_max_competitors: int = int(os.getenv("SUPERFECTA_MAX_COMPETITORS", "18"))
+    superfecta_require_rollover: bool = os.getenv("SUPERFECTA_REQUIRE_ROLLOVER", "false").lower() in ("1", "true", "yes", "on")
+    superfecta_min_roi: float = float(os.getenv("SUPERFECTA_MIN_ROI", "0.05"))
+    superfecta_morning_max_candidates: int = int(os.getenv("SUPERFECTA_MORNING_MAX_CANDIDATES", "5"))
+    superfecta_live_min_roi: float = float(os.getenv("SUPERFECTA_LIVE_MIN_ROI", "0.05"))
+    superfecta_live_min_expected_profit: float = float(os.getenv("SUPERFECTA_LIVE_MIN_EXPECTED_PROFIT", "5"))
+    superfecta_decision_minutes_before: int = int(os.getenv("SUPERFECTA_DECISION_MINUTES_BEFORE", "7"))
+    superfecta_auto_cancel_minutes: int = int(os.getenv("SUPERFECTA_AUTO_CANCEL_MINUTES", "2"))
+    superfecta_auto_place_ready: bool = os.getenv("SUPERFECTA_AUTO_PLACE_READY", "false").lower() in ("1", "true", "yes", "on")
+    superfecta_monitor_hours_ahead: int = int(os.getenv("SUPERFECTA_MONITOR_HOURS_AHEAD", "6"))
+
 cfg = Config()

@@ -1,0 +1,204 @@
+{% extends "base.html" %}
+{% block title %}Superfecta Automation{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">Superfecta Automation</h1>
+<form method="get" class="row g-3 mb-4">
+  <div class="col-sm-3">
+    <label class="form-label" for="date-input">Race Date</label>
+    <input type="date" class="form-control" id="date-input" name="date" value="{{ date_str }}">
+  </div>
+  <div class="col-sm-4">
+    <label class="form-label" for="product-select">Recommendation</label>
+    <select class="form-select" id="product-select" name="product_id">
+      <option value="">All products</option>
+      {% for option in recommendation_options %}
+        <option value="{{ option.product_id }}" {% if option.product_id == selected_product_id %}selected{% endif %}>
+          {{ option.event_name }} — {{ option.start_time }}
+        </option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto align-self-end">
+    <button type="submit" class="btn btn-primary">Apply</button>
+  </div>
+</form>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <p class="text-muted mb-1">Recommendations</p>
+        <h3 class="mb-0">{{ summary.recommendations or 0 }}</h3>
+        <small class="text-muted">Ready: {{ summary.ready or 0 }} · Placed: {{ summary.placed or 0 }}</small>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <p class="text-muted mb-1">Stake Planned</p>
+        <h3 class="mb-0">£{{ summary.total_stake|round(2) if summary.total_stake else 0 }}</h3>
+        <small class="text-muted">Expected Profit £{{ summary.expected_profit|round(2) if summary.expected_profit else 0 }}</small>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <p class="text-muted mb-1">Live Checks Today</p>
+        <h3 class="mb-0">{{ summary.live_checks or 0 }}</h3>
+        <small class="text-muted">Last run: {{ summary.last_check or '—' }}</small>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <p class="text-muted mb-1">Settled P&L</p>
+        <h3 class="mb-0">£{{ summary.pnl|round(2) if summary.pnl else 0 }}</h3>
+        <small class="text-muted">{{ summary.settled_bets or 0 }} settled bets</small>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="mb-5">
+  <h2 class="h5">Morning Recommendations</h2>
+  <div class="table-responsive">
+    <table class="table table-sm table-striped align-middle">
+      <thead class="table-light">
+        <tr>
+          <th>Product</th>
+          <th>Start</th>
+          <th>Status</th>
+          <th>Stake (£)</th>
+          <th>Expected Profit (£)</th>
+          <th>ROI</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if morning_rows %}
+          {% for row in morning_rows %}
+            <tr>
+              <td>{{ row.event_name }}</td>
+              <td class="time-iso" data-iso="{{ row.start_iso }}">{{ row.start_iso or '—' }}</td>
+              <td><span class="badge bg-{% if row.status == 'accepted' %}success{% elif row.status == 'filtered' %}warning text-dark{% elif row.status == 'error' %}danger{% else %}secondary{% endif %}">{{ row.status|upper }}</span></td>
+              <td>{{ row.total_stake|round(2) if row.total_stake is not none else '—' }}</td>
+              <td>{{ row.expected_profit|round(2) if row.expected_profit is not none else '—' }}</td>
+              <td>{{ row.roi_current|round(3) if row.roi_current is not none else '—' }}</td>
+              <td>{{ row.notes or row.filter_reason or '—' }}</td>
+            </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td colspan="7" class="text-muted">No morning snapshot for the selected date.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="mb-5">
+  <h2 class="h5">Recommendation Status</h2>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover align-middle">
+      <thead class="table-light">
+        <tr>
+          <th>Event</th>
+          <th>Start</th>
+          <th>Status</th>
+          <th>Total Stake (£)</th>
+          <th>Expected Profit (£)</th>
+          <th>Last Check</th>
+          <th>Decision</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if recommendations %}
+          {% for rec in recommendations %}
+            <tr {% if rec.product_id == selected_product_id %}class="table-primary"{% endif %}>
+              <td>{{ rec.event_name }}</td>
+              <td class="time-iso" data-iso="{{ rec.start_iso }}">{{ rec.start_iso or '—' }}</td>
+              <td>{{ rec.status|upper }}</td>
+              <td>{{ rec.total_stake|round(2) if rec.total_stake is not none else '—' }}</td>
+              <td>{{ rec.expected_profit|round(2) if rec.expected_profit is not none else '—' }}</td>
+              <td>{{ rec.last_check }}</td>
+              <td>{{ rec.decision_reason or '—' }}</td>
+            </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td colspan="7" class="text-muted">No recommendations found.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="mb-5">
+  <h2 class="h5">Live Checks</h2>
+  <div class="table-responsive">
+    <table class="table table-sm table-striped align-middle">
+      <thead class="table-light">
+        <tr>
+          <th>Checked</th>
+          <th>Status</th>
+          <th>Minutes to Post</th>
+          <th>Stake (£)</th>
+          <th>Expected Profit (£)</th>
+          <th>Decision</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if live_checks %}
+          {% for check in live_checks %}
+            <tr>
+              <td>{{ check.checked }}</td>
+              <td>{{ check.status|upper }}</td>
+              <td>{{ check.minutes_to_post|round(1) if check.minutes_to_post is not none else '—' }}</td>
+              <td>{{ check.plan_total_stake|round(2) if check.plan_total_stake is not none else '—' }}</td>
+              <td>{{ check.expected_profit|round(2) if check.expected_profit is not none else '—' }}</td>
+              <td>{{ check.notes or '—' }}</td>
+            </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td colspan="6" class="text-muted">No live checks for the selection.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="mb-5">
+  <h2 class="h5">Settled Bets</h2>
+  <div class="table-responsive">
+    <table class="table table-sm table-striped align-middle">
+      <thead class="table-light">
+        <tr>
+          <th>Bet ID</th>
+          <th>Placed</th>
+          <th>Status</th>
+          <th>Total Stake (£)</th>
+          <th>Winnings (£)</th>
+          <th>P&amp;L (£)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if bet_rows %}
+          {% for bet in bet_rows %}
+            <tr>
+              <td>{{ bet.bet_id }}</td>
+              <td>{{ bet.bet_time }}</td>
+              <td>{{ bet.placement_status or '—' }}</td>
+              <td>{{ bet.stake_total|round(2) if bet.stake_total is not none else '—' }}</td>
+              <td>{{ bet.winnings|round(2) if bet.winnings is not none else '—' }}</td>
+              <td class="{% if bet.pnl is not none %}{% if bet.pnl > 0 %}text-success{% elif bet.pnl < 0 %}text-danger{% endif %}{% endif %}">{{ bet.pnl|round(2) if bet.pnl is not none else '—' }}</td>
+            </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td colspan="6" class="text-muted">No settled bets for this date.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
