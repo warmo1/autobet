@@ -2882,6 +2882,7 @@ def api_status_gcp():
     try:
         services: list[dict] = []
         run_status_code: int | None = None
+        run_errors: list[str] = []
         run_urls = [
             f"https://run.googleapis.com/v2/projects/{project}/locations/{region}/services",
             f"https://run.googleapis.com/v2/projects/{project}/locations/-/services",
@@ -2894,6 +2895,13 @@ def api_status_gcp():
             r = sess.get(url, timeout=10)
             if r.status_code != 200:
                 run_status_code = r.status_code
+                try:
+                    err_json = r.json()
+                    detail = err_json.get("error", {}).get("message") or err_json.get("message")
+                except Exception:
+                    detail = r.text[:300]
+                if detail:
+                    run_errors.append(detail)
                 continue
             run_status_code = 200
             for j in (r.json().get("services") or []):
@@ -2914,6 +2922,8 @@ def api_status_gcp():
                 break
         if run_status_code and run_status_code != 200:
             out["cloud_run"]["status_code"] = run_status_code
+            if run_errors:
+                out["cloud_run"]["error_detail"] = "; ".join(run_errors)
         out["cloud_run"]["services"] = services
     except Exception as e:
         out["cloud_run"]["error"] = str(e)
@@ -2922,6 +2932,7 @@ def api_status_gcp():
     try:
         jobs = []
         sched_status_code: int | None = None
+        sched_errors: list[str] = []
         sched_urls = [
             f"https://cloudscheduler.googleapis.com/v1/projects/{project}/locations/{region}/jobs",
             f"https://cloudscheduler.googleapis.com/v1/projects/{project}/locations/-/jobs",
@@ -2934,6 +2945,13 @@ def api_status_gcp():
             r = sess.get(url, timeout=10)
             if r.status_code != 200:
                 sched_status_code = r.status_code
+                try:
+                    err_json = r.json()
+                    detail = err_json.get("error", {}).get("message") or err_json.get("message")
+                except Exception:
+                    detail = r.text[:300]
+                if detail:
+                    sched_errors.append(detail)
                 continue
             sched_status_code = 200
             for j in r.json().get("jobs", []):
@@ -2947,6 +2965,8 @@ def api_status_gcp():
                 break
         if sched_status_code and sched_status_code != 200:
             out["scheduler"]["status_code"] = sched_status_code
+            if sched_errors:
+                out["scheduler"]["error_detail"] = "; ".join(sched_errors)
         out["scheduler"]["jobs"] = jobs
     except Exception as e:
         out["scheduler"]["error"] = str(e)
@@ -2957,10 +2977,16 @@ def api_status_gcp():
         sub = f"projects/{project}/subscriptions/ingest-fetcher-sub"
         t = sess.get(f"https://pubsub.googleapis.com/v1/{topic}", timeout=10)
         s = sess.get(f"https://pubsub.googleapis.com/v1/{sub}", timeout=10)
-        t_info = {"exists": (t.status_code == 200)}
-        s_info = {"exists": (s.status_code == 200)}
+        t_info = {"exists": (t.status_code == 200), "status_code": t.status_code}
+        s_info = {"exists": (s.status_code == 200), "status_code": s.status_code}
         if t.status_code == 200:
             t_info.update({"name": t.json().get("name")})
+        else:
+            try:
+                tj = t.json()
+                t_info["error_detail"] = tj.get("error", {}).get("message") or tj.get("message")
+            except Exception:
+                t_info["error_detail"] = t.text[:300]
         if s.status_code == 200:
             sj = s.json()
             s_info.update({
@@ -2969,6 +2995,12 @@ def api_status_gcp():
                 "ackDeadlineSeconds": sj.get("ackDeadlineSeconds"),
                 "pushEndpoint": ((sj.get("pushConfig") or {}).get("pushEndpoint")),
             })
+        else:
+            try:
+                sj = s.json()
+                s_info["error_detail"] = sj.get("error", {}).get("message") or sj.get("message")
+            except Exception:
+                s_info["error_detail"] = s.text[:300]
         out["pubsub"] = {"topic": t_info, "subscription": s_info}
     except Exception as e:
         out["pubsub"]["error"] = str(e)
