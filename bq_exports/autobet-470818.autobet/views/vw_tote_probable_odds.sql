@@ -15,6 +15,9 @@ JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.odds')[SAFE_OFFSET(0)], '$.decim
 JSON_EXTRACT_SCALAR(line, '$.odds.decimal')
 ) AS FLOAT64
 ) AS decimal_odds
+-- Assumes a consistent structure where legs is an array and odds is an object.
+JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId') AS selection_id,
+SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds.decimal') AS FLOAT64) AS decimal_odds
 FROM autobet-470818.autobet.raw_tote_probable_odds r,
 UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
 UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line

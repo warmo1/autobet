@@ -218,7 +218,10 @@ document.addEventListener('DOMContentLoaded', function() {
       `);
     } else {
       const statusNote = cloudRun.status_code ? ` (API status ${safeText(cloudRun.status_code)})` : '';
-      parts.push(`<div class="text-muted mb-3">No Cloud Run services found${statusNote}.</div>`);
+      parts.push(`<div class="text-muted mb-1">No Cloud Run services found${statusNote}.</div>`);
+      if (cloudRun.error_detail) {
+        parts.push(`<div class="small text-muted mb-3">${safeText(cloudRun.error_detail)}</div>`);
+      }
     }
 
     const scheduler = data.scheduler || {};
@@ -255,7 +258,10 @@ document.addEventListener('DOMContentLoaded', function() {
         `);
       } else {
         const schedNote = scheduler.status_code ? ` (API status ${safeText(scheduler.status_code)})` : '';
-        parts.push(`<div class="text-muted mb-3">No Cloud Scheduler jobs found${schedNote}.</div>`);
+        parts.push(`<div class="text-muted mb-1">No Cloud Scheduler jobs found${schedNote}.</div>`);
+        if (scheduler.error_detail) {
+          parts.push(`<div class="small text-muted mb-3">${safeText(scheduler.error_detail)}</div>`);
+        }
       }
     }
 
@@ -267,11 +273,17 @@ document.addEventListener('DOMContentLoaded', function() {
       const sub = pubsub.subscription || {};
       const topicStatus = topic.exists ? '<span class="badge bg-success">Exists</span>' : '<span class="badge bg-danger">Missing</span>';
       const subStatus = sub.exists ? '<span class="badge bg-success">Exists</span>' : '<span class="badge bg-danger">Missing</span>';
+      const topicDetail = topic.error_detail ? `<div class="small text-muted">${safeText(topic.error_detail)}</div>` : '';
+      const subDetail = sub.error_detail ? `<div class="small text-muted">${safeText(sub.error_detail)}</div>` : '';
+      const topicCode = topic.status_code !== undefined ? ` (status ${safeText(topic.status_code)})` : '';
+      const subCode = sub.status_code !== undefined ? ` (status ${safeText(sub.status_code)})` : '';
       parts.push(`
         <div class="mb-2">
           <h6 class="fw-semibold">Pub/Sub</h6>
-          <div class="small">Topic: ${topicStatus} ${safeText(topic.name || '')}</div>
-          <div class="small">Subscription: ${subStatus} ${safeText(sub.name || '')}</div>
+          <div class="small">Topic: ${topicStatus} ${safeText(topic.name || '')}${topicCode}</div>
+          ${topicDetail}
+          <div class="small">Subscription: ${subStatus} ${safeText(sub.name || '')}${subCode}</div>
+          ${subDetail}
           ${sub.topic ? `<div class="small text-muted">Topic binding: ${safeText(sub.topic)}</div>` : ''}
           ${sub.pushEndpoint ? `<div class="small text-muted">Push endpoint: ${safeText(sub.pushEndpoint)}</div>` : ''}
         </div>
