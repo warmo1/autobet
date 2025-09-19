@@ -81,8 +81,11 @@ class BigQuerySink:
             job_config.default_dataset = self._default_dataset
         if getattr(job_config, "use_query_cache", None) is None:
             job_config.use_query_cache = True
-        if getattr(job_config, "location", None) in (None, ""):
-            job_config.location = self.location
+
+        location = kwargs.pop("location", None) or self.location
+        if location:
+            kwargs["location"] = location
+
         return client.query(sql, job_config=job_config, **kwargs).result()
 
     def query_dataframe(self, sql: str, **kwargs):
@@ -1910,14 +1913,22 @@ class BigQuerySink:
                 client.query(f"ALTER TABLE `{ds}.tote_params` ADD COLUMN IF NOT EXISTS `{name}` {typ}").result()
             except Exception:
                 pass
-        # Insert default params if table is empty
-        sql = f"""
-        INSERT INTO `{ds}.tote_params`(t,f,stake_per_line,R)
-        SELECT 0.30, 1.0, 0.10, 0.0
-        FROM (SELECT 1) 
-        WHERE (SELECT COUNT(1) FROM `{ds}.tote_params`) = 0;
-        """
-        job = client.query(sql); job.result()
+        # Insert default params only once to avoid daily DML quotas
+        needs_defaults = False
+        try:
+            params_table = f"{ds}.tote_params"
+            cnt_job = client.query(f"SELECT COUNT(1) AS cnt FROM `{params_table}`")
+            row = next(iter(cnt_job.result()), None)
+            needs_defaults = (row is None) or (row[0] == 0)
+        except Exception:
+            # If the count fails, fall back to attempting the insert once
+            needs_defaults = True
+        if needs_defaults:
+            sql = f"""
+            INSERT INTO `{ds}.tote_params`(t,f,stake_per_line,R)
+            VALUES (0.30, 1.0, 0.10, 0.0);
+            """
+            client.query(sql).result()
 
         # Runner strength view (predictions-based): latest row per runner/product from model dataset
         model_dataset = os.getenv("BQ_MODEL_DATASET", f"{self.dataset}_model")
@@ -2386,8 +2397,21 @@ class BigQuerySink:
         job.result()
 
         # vw_sf_strengths_from_win_horse: derive fallback runner strengths from WIN probable odds
-        sql = f"""
-        CREATE OR REPLACE VIEW `{ds}.vw_sf_strengths_from_win_horse` AS
+        # Drop prior objects so we can recreate whichever variant (materialized view or regular view).
+        try:
+            client.query(f"DROP MATERIALIZED VIEW IF EXISTS `{ds}.mv_sf_strengths_from_win_horse`").result()
+        except Exception:
+            pass
+        try:
+            client.query(f"DROP VIEW IF EXISTS `{ds}.mv_sf_strengths_from_win_horse`").result()
+        except Exception:
+            pass
+        try:
+            client.query(f"DROP VIEW IF EXISTS `{ds}.vw_sf_strengths_from_win_horse`").result()
+        except Exception:
+            pass
+
+        strengths_query = f"""
         WITH sf AS (
           SELECT product_id, event_id
           FROM `{ds}.tote_products`
@@ -2496,10 +2520,27 @@ class BigQuerySink:
           SAFE_DIVIDE(w.weight, NULLIF(s.total_weight, 0)) AS strength
         FROM weights w
         JOIN sums s USING(product_id)
-        WHERE SAFE_DIVIDE(w.weight, NULLIF(s.total_weight, 0)) IS NOT NULL;
+        WHERE SAFE_DIVIDE(w.weight, NULLIF(s.total_weight, 0)) IS NOT NULL
+        """
+
+        mv_sql = (
+            f"CREATE MATERIALIZED VIEW `{ds}.mv_sf_strengths_from_win_horse`\n"
+            f"OPTIONS (enable_refresh = false) AS\n{strengths_query}"
+        )
+        try:
+            client.query(mv_sql).result()
+        except Exception:
+            # Fall back to a regular view if the materialized view is not supported (e.g. incremental restrictions).
+            view_sql = (
+                f"CREATE OR REPLACE VIEW `{ds}.mv_sf_strengths_from_win_horse` AS\n{strengths_query}"
+            )
+            client.query(view_sql).result()
+
+        sql = f"""
+        CREATE OR REPLACE VIEW `{ds}.vw_sf_strengths_from_win_horse` AS
+        SELECT * FROM `{ds}.mv_sf_strengths_from_win_horse`;
         """
         client.query(sql).result()
-
         # vw_superfecta_runner_strength_any: prefer model strengths, fall back to WIN odds-derived weights
         sql = f"""
         CREATE OR REPLACE VIEW `{ds}.vw_superfecta_runner_strength_any` AS

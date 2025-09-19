@@ -791,8 +791,6 @@ def sql_df(*args, **kwargs) -> pd.DataFrame:
         query_parameters=qp,
         use_query_cache=True,
     )
-    if getattr(job_config, "location", None) in (None, "") and cfg.bq_location:
-        job_config.location = cfg.bq_location
     db = get_db()
     it = db.query(q, job_config=job_config)
     bqs_client = _get_bqstorage_client() if cfg.bq_use_storage_api else None
