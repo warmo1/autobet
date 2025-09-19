@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import json
-from typing import Iterable, Mapping, Any
+import threading
+from typing import Iterable, Mapping, Any, Optional
 
 from .config import cfg
 
@@ -13,13 +14,22 @@ class BigQuerySink:
         self.dataset = dataset
         self.location = location
         self._client = None
+        self._bq = None
+        self._client_lock = threading.Lock()
+        self._default_dataset = f"{self.project}.{self.dataset}"
 
     @property
     def enabled(self) -> bool:
         return bool(self.project and self.dataset)
 
     def _client_obj(self):
-        if self._client is None:
+        if self._client is not None:
+            return self._client
+
+        with self._client_lock:
+            if self._client is not None:
+                return self._client
+
             try:
                 from google.cloud import bigquery  # type: ignore
             except Exception as e:
@@ -45,11 +55,12 @@ class BigQuerySink:
                 # Fall back to ADC below
                 creds = None
 
+            client_kwargs = {"project": self.project, "location": self.location}
             if creds is not None:
-                self._client = bigquery.Client(project=self.project, credentials=creds, location=self.location)
-            else:
-                # Fall back to Application Default Credentials (gcloud auth, metadata, etc.)
-                self._client = bigquery.Client(project=self.project, location=self.location)
+                client_kwargs["credentials"] = creds
+
+            # Fall back to Application Default Credentials (gcloud auth, metadata, etc.)
+            self._client = bigquery.Client(**client_kwargs)
         return self._client
 
     def query(self, sql: str, **kwargs):
@@ -62,11 +73,16 @@ class BigQuerySink:
         job_config = kwargs.pop("job_config", None)
         if job_config is None:
             job_config = self._bq.QueryJobConfig(
-                default_dataset=f"{self.project}.{self.dataset}"
+                default_dataset=self._default_dataset,
+                use_query_cache=True,
             )
         elif getattr(job_config, "default_dataset", None) in (None, ""):
             # Preserve provided config but add default dataset for convenience
-            job_config.default_dataset = f"{self.project}.{self.dataset}"
+            job_config.default_dataset = self._default_dataset
+        if getattr(job_config, "use_query_cache", None) is None:
+            job_config.use_query_cache = True
+        if getattr(job_config, "location", None) in (None, ""):
+            job_config.location = self.location
         return client.query(sql, job_config=job_config, **kwargs).result()
 
     def query_dataframe(self, sql: str, **kwargs):
@@ -2846,12 +2862,24 @@ class BigQuerySink:
         return deleted
 
 
+_BQ_SINK_SINGLETON: Optional[BigQuerySink] = None
+_BQ_SINK_LOCK = threading.Lock()
+
+
 def get_bq_sink() -> BigQuerySink | None:
     if not cfg.bq_write_enabled:
         return None
     if not cfg.bq_project or not cfg.bq_dataset:
         return None
-    try:
-        return BigQuerySink(cfg.bq_project, cfg.bq_dataset, cfg.bq_location)
-    except Exception:
-        return None
+
+    global _BQ_SINK_SINGLETON
+    if _BQ_SINK_SINGLETON is not None:
+        return _BQ_SINK_SINGLETON
+
+    with _BQ_SINK_LOCK:
+        if _BQ_SINK_SINGLETON is None:
+            try:
+                _BQ_SINK_SINGLETON = BigQuerySink(cfg.bq_project, cfg.bq_dataset, cfg.bq_location)
+            except Exception:
+                _BQ_SINK_SINGLETON = None
+        return _BQ_SINK_SINGLETON

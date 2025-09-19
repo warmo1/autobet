@@ -61,6 +61,10 @@ class Config:
     # Use the BigQuery Storage API for faster dataframe reads.
     bq_use_storage_api: bool = os.getenv("BQ_USE_STORAGE_API", "true").lower() in ("1", "true", "yes", "on")
 
+    # --- Redis cache (optional shared cache for web/sql_df) ---
+    redis_url: str = os.getenv("REDIS_URL", "")
+    redis_cache_prefix: str = os.getenv("REDIS_CACHE_PREFIX", "autobet:web")
+
     # --- Web SQL cache (applies to sql_df) ---
     # Enable a small in-process TTL cache for repeated SELECTs.
     web_sqldf_cache_enabled: bool = os.getenv("WEB_SQLDF_CACHE", "true").lower() in ("1", "true", "yes", "on")

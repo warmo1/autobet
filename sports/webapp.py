@@ -1,6 +1,9 @@
 from __future__ import annotations
 import os
 import time
+import io
+import pickle
+import hashlib
 import pandas as pd
 from datetime import date, timedelta, datetime
 from flask import Flask, render_template, request, redirect, flash, url_for, send_file, Response
@@ -54,9 +57,23 @@ SUPERFECTA_RISK_PRESETS = {
     },
 }
 
-# Simple in-process TTL cache for sql_df results
+# Simple in-process TTL cache for sql_df results with optional Redis backing
 _SQLDF_CACHE_LOCK = threading.Lock()
 _SQLDF_CACHE: dict[tuple, tuple[float, pd.DataFrame]] = {}
+
+try:  # Optional dependency; used if available
+    import redis  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    redis = None  # type: ignore
+
+_REDIS_CACHE_CLIENT = None
+_REDIS_CACHE_DISABLED = False
+_REDIS_CACHE_MAX_BYTES = 5 * 1024 * 1024
+
+_BQSTORAGE_CLIENT = None
+_BQSTORAGE_CLIENT_LOCK = threading.Lock()
+_BQSTORAGE_CLIENT_ERROR = False
+
 
 def _sqldf_cache_key(final_sql: str, params: Any) -> tuple:
     """Build a stable cache key from SQL, params, and active dataset settings."""
@@ -64,7 +81,6 @@ def _sqldf_cache_key(final_sql: str, params: Any) -> tuple:
     ds = cfg.bq_dataset or ""
     try:
         if isinstance(params, Mapping):
-            # Normalize mapping by sorting keys
             kv = tuple(sorted((str(k), None if v is None else (float(v) if isinstance(v, (int, float)) else str(v))) for k, v in params.items()))
         elif isinstance(params, (list, tuple)):
             kv = tuple(None if v is None else (float(v) if isinstance(v, (int, float)) else str(v)) for v in params)
@@ -73,9 +89,94 @@ def _sqldf_cache_key(final_sql: str, params: Any) -> tuple:
         else:
             kv = (str(params),)
     except Exception:
-        # Fallback to stringifying if any issue
         kv = (str(params),)
     return (proj, ds, final_sql, kv)
+
+
+def _redis_cache_key(key: tuple) -> str:
+    prefix = (cfg.redis_cache_prefix or "autobet:web").strip() or "autobet:web"
+    digest = hashlib.sha1(repr(key).encode("utf-8")).hexdigest()
+    return f"{prefix}:sqldf:{digest}"
+
+
+def _get_redis_client():
+    global _REDIS_CACHE_CLIENT, _REDIS_CACHE_DISABLED
+    if _REDIS_CACHE_DISABLED:
+        return None
+    if not cfg.redis_url or redis is None:
+        _REDIS_CACHE_DISABLED = True
+        return None
+    if _REDIS_CACHE_CLIENT is not None:
+        return _REDIS_CACHE_CLIENT
+    try:
+        _REDIS_CACHE_CLIENT = redis.from_url(
+            cfg.redis_url,
+            decode_responses=False,
+            socket_timeout=1.5,
+            socket_connect_timeout=1.5,
+        )
+        _REDIS_CACHE_CLIENT.ping()
+    except Exception:
+        _REDIS_CACHE_CLIENT = None
+        _REDIS_CACHE_DISABLED = True
+    return _REDIS_CACHE_CLIENT
+
+
+def _serialize_df(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    try:
+        df.to_parquet(buf, index=False)
+        return buf.getvalue()
+    except Exception:
+        return pickle.dumps(df, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def _deserialize_df(payload: bytes) -> pd.DataFrame:
+    try:
+        return pd.read_parquet(io.BytesIO(payload))
+    except Exception:
+        return pickle.loads(payload)
+
+
+def _sqldf_cache_set_local(key: tuple, df: pd.DataFrame, ttl: int) -> None:
+    if not cfg.web_sqldf_cache_enabled or ttl <= 0:
+        return
+    exp = time.time() + ttl
+    with _SQLDF_CACHE_LOCK:
+        if len(_SQLDF_CACHE) >= max(16, cfg.web_sqldf_cache_max_entries):
+            now = time.time()
+            expired = [k for k, (e, _) in _SQLDF_CACHE.items() if e < now]
+            for k in expired:
+                _SQLDF_CACHE.pop(k, None)
+            if len(_SQLDF_CACHE) >= cfg.web_sqldf_cache_max_entries:
+                oldest = sorted(_SQLDF_CACHE.items(), key=lambda it: it[1][0])[: max(1, len(_SQLDF_CACHE) - cfg.web_sqldf_cache_max_entries + 1)]
+                for k, _ in oldest:
+                    _SQLDF_CACHE.pop(k, None)
+        try:
+            _SQLDF_CACHE[key] = (exp, df.copy(deep=True))
+        except Exception:
+            _SQLDF_CACHE[key] = (exp, df)
+
+
+def _get_bqstorage_client():
+    global _BQSTORAGE_CLIENT, _BQSTORAGE_CLIENT_ERROR
+    if _BQSTORAGE_CLIENT_ERROR:
+        return None
+    try:
+        from google.cloud import bigquery_storage  # type: ignore
+    except Exception:
+        _BQSTORAGE_CLIENT_ERROR = True
+        return None
+    with _BQSTORAGE_CLIENT_LOCK:
+        if _BQSTORAGE_CLIENT is not None:
+            return _BQSTORAGE_CLIENT
+        try:
+            _BQSTORAGE_CLIENT = bigquery_storage.BigQueryReadClient()
+        except Exception:
+            _BQSTORAGE_CLIENT_ERROR = True
+            _BQSTORAGE_CLIENT = None
+        return _BQSTORAGE_CLIENT
+
 
 def _sqldf_cache_get(key: tuple) -> Optional[pd.DataFrame]:
     if not cfg.web_sqldf_cache_enabled:
@@ -83,44 +184,64 @@ def _sqldf_cache_get(key: tuple) -> Optional[pd.DataFrame]:
     now = time.time()
     with _SQLDF_CACHE_LOCK:
         ent = _SQLDF_CACHE.get(key)
-        if not ent:
-            return None
-        exp, df = ent
-        if exp < now:
-            # expired; drop
-            try:
-                del _SQLDF_CACHE[key]
-            except Exception:
-                pass
-            return None
-        # Return a deep copy to avoid mutation-by-callers
-        try:
-            return df.copy(deep=True)
-        except Exception:
-            return df
+        if ent:
+            exp, df = ent
+            if exp < now:
+                try:
+                    del _SQLDF_CACHE[key]
+                except Exception:
+                    pass
+            else:
+                try:
+                    return df.copy(deep=True)
+                except Exception:
+                    return df
+
+    client = _get_redis_client()
+    if not client:
+        return None
+    cache_key = _redis_cache_key(key)
+    try:
+        payload = client.get(cache_key)
+    except Exception:
+        return None
+    if not payload:
+        return None
+    try:
+        df = _deserialize_df(payload)
+    except Exception:
+        return None
+    ttl = None
+    try:
+        ttl_val = client.ttl(cache_key)
+        if isinstance(ttl_val, int) and ttl_val > 0:
+            ttl = ttl_val
+    except Exception:
+        ttl = None
+    local_ttl = ttl or max(1, int(cfg.web_sqldf_cache_ttl_s))
+    _sqldf_cache_set_local(key, df, local_ttl)
+    return df
+
 
 def _sqldf_cache_set(key: tuple, df: pd.DataFrame, ttl: int) -> None:
     if not cfg.web_sqldf_cache_enabled or ttl <= 0:
         return
-    exp = time.time() + ttl
-    with _SQLDF_CACHE_LOCK:
-        # Capacity guard: purge expired then trim if needed
-        if len(_SQLDF_CACHE) >= max(16, cfg.web_sqldf_cache_max_entries):
-            now = time.time()
-            # Remove expired entries first
-            expired = [k for k, (e, _) in _SQLDF_CACHE.items() if e < now]
-            for k in expired:
-                _SQLDF_CACHE.pop(k, None)
-            # If still over capacity, drop oldest entries
-            if len(_SQLDF_CACHE) >= cfg.web_sqldf_cache_max_entries:
-                oldest = sorted(_SQLDF_CACHE.items(), key=lambda it: it[1][0])[: max(1, len(_SQLDF_CACHE) - cfg.web_sqldf_cache_max_entries + 1)]
-                for k, _ in oldest:
-                    _SQLDF_CACHE.pop(k, None)
-        # Store a deep copy to isolate cache
-        try:
-            _SQLDF_CACHE[key] = (exp, df.copy(deep=True))
-        except Exception:
-            _SQLDF_CACHE[key] = (exp, df)
+    ttl = int(ttl)
+    if ttl <= 0:
+        return
+    _sqldf_cache_set_local(key, df, ttl)
+
+    client = _get_redis_client()
+    if not client:
+        return
+    try:
+        payload = _serialize_df(df)
+        if len(payload) > _REDIS_CACHE_MAX_BYTES:
+            return
+        cache_key = _redis_cache_key(key)
+        client.setex(cache_key, ttl, payload)
+    except Exception:
+        pass
 
 def _sql_is_readonly(sql: str) -> bool:
     """Best-effort check that a query is read-only (SELECT/WITH).
@@ -582,15 +703,24 @@ def sql_df(*args, **kwargs) -> pd.DataFrame:
     job_config = bigquery.QueryJobConfig(
         default_dataset=f"{cfg.bq_project}.{cfg.bq_dataset}",
         query_parameters=qp,
+        use_query_cache=True,
     )
+    if getattr(job_config, "location", None) in (None, "") and cfg.bq_location:
+        job_config.location = cfg.bq_location
     db = get_db()
     it = db.query(q, job_config=job_config)
-    # Prefer BQ Storage API if enabled; graceful fallback
-    use_bqs = bool(cfg.bq_use_storage_api)
+    bqs_client = _get_bqstorage_client() if cfg.bq_use_storage_api else None
     try:
-        df = it.to_dataframe(create_bqstorage_client=use_bqs)
+        if bqs_client is not None:
+            df = it.to_dataframe(bqstorage_client=bqs_client)
+        else:
+            df = it.to_dataframe()
     except Exception:
-        df = it.to_dataframe(create_bqstorage_client=False)
+        df = it.to_dataframe()
+
+    max_rows = int(getattr(cfg, "web_sqldf_max_rows", 0) or 0)
+    if max_rows > 0 and len(df) > max_rows:
+        df = df.head(max_rows).copy()
 
     # Cache the full dataframe
     _sqldf_cache_set(ck, df, cache_ttl)
