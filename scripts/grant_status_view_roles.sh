@@ -14,8 +14,8 @@ if [[ -z "${PRINCIPAL}" ]]; then
 fi
 
 case "${PRINCIPAL}" in
-  *"@gserviceaccount.com") MEMBER="serviceAccount:${PRINCIPAL}" ;;
-  *"@") MEMBER="user:${PRINCIPAL}" ;;
+  *@*.gserviceaccount.com) MEMBER="serviceAccount:${PRINCIPAL}" ;;
+  *@*) MEMBER="user:${PRINCIPAL}" ;;
   *)
     echo "Principal should be an email address (user or service account)." >&2
     exit 1
@@ -31,5 +31,9 @@ gcloud projects add-iam-policy-binding "${PROJECT}" \
 gcloud projects add-iam-policy-binding "${PROJECT}" \
   --member="${MEMBER}" \
   --role="roles/cloudscheduler.viewer"
+
+gcloud projects add-iam-policy-binding "${PROJECT}" \
+  --member="${MEMBER}" \
+  --role="roles/pubsub.viewer"
 
 echo "Done. It can take a minute for permissions to propagate."
