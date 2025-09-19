@@ -4,7 +4,7 @@ resource "google_cloud_run_v2_service_iam_binding" "orchestrator_invoker" {
   location = google_cloud_run_v2_service.orchestrator_service.location
   name     = google_cloud_run_v2_service.orchestrator_service.name
   role     = "roles/run.invoker"
-  members  = [
+  members = [
     "serviceAccount:${google_service_account.scheduler_sa.email}"
   ]
 }
@@ -16,7 +16,7 @@ resource "google_cloud_run_v2_service_iam_binding" "fetcher_invoker" {
   name     = google_cloud_run_v2_service.fetcher_service.name
   role     = "roles/run.invoker"
   # This uses a special service account managed by Google for Pub/Sub push subscriptions
-  members  = [
+  members = [
     # OIDC token is signed as the fetcher service account in subscription push_config
     "serviceAccount:${google_service_account.fetcher_sa.email}",
     # Keep Pub/Sub service agent as invoker too (defensive)
@@ -77,7 +77,7 @@ resource "google_cloud_scheduler_job" "pre_race_scanner" {
   attempt_deadline = "120s"
 
   http_target {
-    uri = google_cloud_run_v2_service.orchestrator_service.uri
+    uri         = google_cloud_run_v2_service.orchestrator_service.uri
     http_method = "POST"
     headers = {
       "Content-Type" = "application/json"
@@ -97,7 +97,7 @@ resource "google_cloud_scheduler_job" "post_race_results_scanner" {
   attempt_deadline = "120s"
 
   http_target {
-    uri = google_cloud_run_v2_service.orchestrator_service.uri
+    uri         = google_cloud_run_v2_service.orchestrator_service.uri
     http_method = "POST"
     headers = {
       "Content-Type" = "application/json"
@@ -118,7 +118,7 @@ resource "google_cloud_scheduler_job" "probable_odds_sweep" {
   attempt_deadline = "120s"
 
   http_target {
-    uri = google_cloud_run_v2_service.orchestrator_service.uri
+    uri         = google_cloud_run_v2_service.orchestrator_service.uri
     http_method = "POST"
     headers = {
       "Content-Type" = "application/json"
@@ -134,17 +134,78 @@ resource "google_cloud_scheduler_job" "probable_odds_sweep" {
 resource "google_cloud_scheduler_job" "probable_odds_bulk" {
   name             = "probable-odds-bulk"
   description      = "Publishes a bulk probable-odds job for events in the next 12 hours."
-  schedule         = "5 * * * *"  # Top of every hour with slight offset
+  schedule         = "5 * * * *" # Top of every hour with slight offset
   time_zone        = "UTC"
   attempt_deadline = "120s"
 
   http_target {
-    uri = google_cloud_run_v2_service.orchestrator_service.uri
+    uri         = google_cloud_run_v2_service.orchestrator_service.uri
     http_method = "POST"
     headers = {
       "Content-Type" = "application/json"
     }
     body = base64encode("{\"job_name\": \"probable-odds-bulk\", \"window_hours\": 12}")
+    oidc_token {
+      service_account_email = google_service_account.scheduler_sa.email
+    }
+  }
+}
+
+# Superfecta automation jobs
+resource "google_cloud_scheduler_job" "superfecta_morning" {
+  name             = "superfecta-morning"
+  description      = "Runs the morning superfecta triage to seed recommendations."
+  schedule         = "30 7 * * *"
+  time_zone        = "Europe/London"
+  attempt_deadline = "120s"
+
+  http_target {
+    uri         = "${google_cloud_run_v2_service.orchestrator_service.uri}/jobs/superfecta/morning"
+    http_method = "POST"
+    headers = {
+      "Content-Type" = "application/json"
+    }
+    body = base64encode("{}")
+    oidc_token {
+      service_account_email = google_service_account.scheduler_sa.email
+    }
+  }
+}
+
+resource "google_cloud_scheduler_job" "superfecta_live" {
+  name             = "superfecta-live"
+  description      = "Refresh live EV checks for monitored superfecta bets."
+  schedule         = "*/10 7-22 * * *"
+  time_zone        = "Europe/London"
+  attempt_deadline = "120s"
+
+  http_target {
+    uri         = "${google_cloud_run_v2_service.orchestrator_service.uri}/jobs/superfecta/live"
+    http_method = "POST"
+    headers = {
+      "Content-Type" = "application/json"
+    }
+    body = base64encode("{}")
+    oidc_token {
+      service_account_email = google_service_account.scheduler_sa.email
+    }
+  }
+}
+
+resource "google_cloud_scheduler_job" "superfecta_execute" {
+  name             = "superfecta-execute"
+  description      = "Attempts execution for ready superfecta recommendations."
+  schedule         = "*/5 7-22 * * *"
+  time_zone        = "Europe/London"
+  attempt_deadline = "120s"
+
+  http_target {
+    uri         = "${google_cloud_run_v2_service.orchestrator_service.uri}/jobs/superfecta/execute"
+    http_method = "POST"
+    headers = {
+      "Content-Type" = "application/json"
+    }
+    body = base64encode("{}")
     oidc_token {
       service_account_email = google_service_account.scheduler_sa.email
     }
@@ -160,7 +221,7 @@ resource "google_cloud_scheduler_job" "daily_event_ingest" {
   attempt_deadline = "120s"
 
   http_target {
-    uri = google_cloud_run_v2_service.orchestrator_service.uri
+    uri         = google_cloud_run_v2_service.orchestrator_service.uri
     http_method = "POST"
     headers = {
       "Content-Type" = "application/json"

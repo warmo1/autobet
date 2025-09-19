@@ -18,7 +18,7 @@ from google.cloud import bigquery
 import pandas as pd
 from .gcp import parse_pubsub_envelope, publish_pubsub_message
 from .config import cfg
-from .providers.tote_api import ToteClient, ToteError, rate_limited_get
+from .providers.tote_api import ToteClient, ToteError, rate_limited_get, normalize_probable_lines
 from .bq import get_bq_sink
 import uuid
 from .ingest.tote_events import ingest_tote_events
@@ -137,24 +137,15 @@ def handle_pubsub() -> tuple[str, int]:
                 print(f"GraphQL probable fetch failed for {win_product_id}: {te}")
                 return ("", 204)
             prod = (data or {}).get("product") or {}
-            lines = (((prod.get("lines") or {}).get("nodes")) or []) if isinstance(prod, dict) else []
-            norm_lines = []
-            for ln in lines:
-                try:
-                    odds = ((ln.get("odds") or {}).get("decimal"))
-                    legs_obj = ln.get("legs")
-                    sel_id = None
-                    if isinstance(legs_obj, dict):
-                        sels = legs_obj.get("lineSelections") or []
-                        if sels and isinstance(sels, list) and sels:
-                            sel_id = sels[0].get("selectionId")
-                    if sel_id and odds is not None:
-                        norm_lines.append({
-                            "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
-                            "odds": {"decimal": float(odds)},
-                        })
-                except Exception:
-                    continue
+            lines_container = prod.get("lines") if isinstance(prod, dict) else None
+            if isinstance(lines_container, dict):
+                raw_lines = lines_container.get("nodes") or []
+            elif isinstance(lines_container, list):
+                raw_lines = lines_container
+            else:
+                raw_lines = []
+
+            norm_lines = normalize_probable_lines(raw_lines)
             if not norm_lines:
                 print(f"No probable odds lines found via GraphQL for product {win_product_id}")
                 return ("", 204)
@@ -162,8 +153,8 @@ def handle_pubsub() -> tuple[str, int]:
             rid = f"probable:{int(time.time()*1000)}:{win_product_id}"
             ts_ms = int(time.time()*1000)
             sink.upsert_raw_tote_probable_odds([{"raw_id": rid, "fetched_ts": ts_ms, "payload": json.dumps(payload), "product_id": win_product_id}])
-            metrics = {"probable_for_product": win_product_id}
-            print(f"Ingested probable odds (GraphQL) for product {win_product_id}")
+            metrics = {"probable_for_product": win_product_id, "lines": len(norm_lines)}
+            print(f"Ingested probable odds (GraphQL) for product {win_product_id} (lines={len(norm_lines)})")
 
         elif task == "ingest_event_results":
             event_id = payload.get("event_id")

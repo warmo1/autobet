@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 import os
@@ -268,6 +268,67 @@ class ToteClient:
             }, timeout=self.timeout)
             resp.raise_for_status()
             return resp.text
+
+
+def normalize_probable_lines(line_nodes: Any) -> List[Dict[str, Any]]:
+    """Normalize GraphQL probable odds lines into the raw REST-like structure."""
+
+    if isinstance(line_nodes, dict):
+        nodes = line_nodes.get("nodes") or []
+    else:
+        nodes = line_nodes or []
+
+    normalized: List[Dict[str, Any]] = []
+    for ln in nodes:
+        if not isinstance(ln, dict):
+            continue
+
+        odds_obj = ln.get("odds")
+        decimal_val = None
+        if isinstance(odds_obj, dict):
+            decimal_val = odds_obj.get("decimal")
+        elif isinstance(odds_obj, list):
+            for item in odds_obj:
+                if isinstance(item, dict) and item.get("decimal") is not None:
+                    decimal_val = item.get("decimal")
+                    break
+        try:
+            decimal_val = float(decimal_val)
+        except (TypeError, ValueError):
+            continue
+
+        legs_src = ln.get("legs")
+        if isinstance(legs_src, dict):
+            legs_iter = [legs_src]
+        elif isinstance(legs_src, list):
+            legs_iter = [leg for leg in legs_src if isinstance(leg, dict)]
+        else:
+            legs_iter = []
+
+        norm_legs: List[Dict[str, Any]] = []
+        for leg in legs_iter:
+            selections_obj = leg.get("lineSelections")
+            if isinstance(selections_obj, dict):
+                selection_items = [selections_obj]
+            elif isinstance(selections_obj, list):
+                selection_items = [sel for sel in selections_obj if isinstance(sel, dict)]
+            else:
+                selection_items = []
+
+            norm_selections = []
+            for sel in selection_items:
+                sel_id = sel.get("selectionId")
+                if sel_id:
+                    norm_selections.append({"selectionId": sel_id})
+            if norm_selections:
+                norm_legs.append({"lineSelections": norm_selections})
+
+        if not norm_legs:
+            continue
+
+        normalized.append({"legs": norm_legs, "odds": {"decimal": decimal_val}})
+
+    return normalized
 
 
 class _RateLimiter:

@@ -18,6 +18,7 @@ from typing import Optional, Sequence, Mapping, Any
 from google.cloud import bigquery
 from .providers.tote_bets import place_audit_superfecta
 from .providers.tote_bets import refresh_bet_status, audit_list_bets, sync_bets_from_api
+from .providers.tote_api import normalize_probable_lines
 from .gcp import publish_pubsub_message
 from .providers.pl_calcs import calculate_pl_strategy, calculate_pl_from_perms
 from .superfecta_planner import (
@@ -3897,27 +3898,20 @@ def tote_product_calculator_page(product_id: str):
                                                     lines.extend(_extract_lines(it))
                                     return lines
                                 lines = _extract_lines(data)
-                                norm_lines = []
-                                for ln in lines:
+                                norm_lines = normalize_probable_lines(lines)
+                                for ln in norm_lines:
+                                    odds_val = None
                                     try:
-                                        odds = ((ln.get("odds") or {}).get("decimal"))
-                                        legs = ln.get("legs") or []
-                                        sel_id = None
-                                        if legs:
-                                            try:
-                                                sels = (legs[0].get("lineSelections") or [])
-                                                if sels:
-                                                    sel_id = sels[0].get("selectionId")
-                                            except Exception:
-                                                pass
-                                        if sel_id and odds is not None:
-                                            norm_lines.append({
-                                                "legs": [{"lineSelections": [{"selectionId": sel_id}]}],
-                                                "odds": {"decimal": float(odds)},
-                                            })
-                                            api_runner_odds[str(sel_id)] = float(odds)
-                                    except Exception:
+                                        odds_val = float((ln.get("odds") or {}).get("decimal"))
+                                    except (TypeError, ValueError):
+                                        odds_val = None
+                                    if odds_val is None:
                                         continue
+                                    for leg in ln.get("legs", []):
+                                        for sel in leg.get("lineSelections", []):
+                                            sel_id = sel.get("selectionId")
+                                            if sel_id:
+                                                api_runner_odds[str(sel_id)] = odds_val
                                 if norm_lines:
                                     from .bq import get_bq_sink
                                     sink = get_bq_sink()
