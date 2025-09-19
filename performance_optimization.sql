@@ -299,7 +299,134 @@ FROM `autobet-470818.autobet.mv_latest_win_odds`;
 -- - Query performance degradation
 -- - Cache hit rate drops
 
--- 10. VALIDATION QUERIES
+-- 10. OPTIMIZED MATERIALIZED VIEWS WITH FASTER REFRESH
+-- =====================================================
+
+-- Update mv_latest_win_odds with faster refresh (from 720 minutes to 60 minutes)
+CREATE OR REPLACE MATERIALIZED VIEW `autobet-470818.autobet.mv_latest_win_odds_fast`
+OPTIONS(
+  refresh_interval_minutes=60.0,
+  allow_non_incremental_definition=true,
+  max_staleness=INTERVAL '0-0 0 2:0:0' YEAR TO SECOND
+)
+AS SELECT
+  product_id,
+  selection_id,
+  (ARRAY_AGG(STRUCT(decimal_odds, ts) ORDER BY ts DESC LIMIT 1))[OFFSET(0)].decimal_odds AS decimal_odds,
+  MAX(ts) AS latest_ts,
+  DATE(MAX(ts)) AS latest_date
+FROM (
+  SELECT
+    SAFE_CAST(JSON_EXTRACT_SCALAR(prod, '$.id') AS STRING) AS product_id,
+    COALESCE(
+      JSON_EXTRACT_SCALAR(line, '$.legs.lineSelections[0].selectionId'),
+      JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId')
+    ) AS selection_id,
+    SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds.decimal') AS FLOAT64) AS decimal_odds,
+    TIMESTAMP_MILLIS(r.fetched_ts) AS ts
+  FROM `autobet-470818.autobet.raw_tote_probable_odds` r,
+  UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
+  UNNEST(IFNULL(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes'),
+                JSON_EXTRACT_ARRAY(prod, '$.lines'))) AS line
+  WHERE JSON_EXTRACT_SCALAR(line, '$.odds.decimal') IS NOT NULL
+)
+WHERE selection_id IS NOT NULL
+  AND decimal_odds IS NOT NULL AND decimal_odds > 0
+  AND product_id IS NOT NULL
+GROUP BY product_id, selection_id;
+
+-- Create materialized view for race status monitoring
+CREATE OR REPLACE MATERIALIZED VIEW `autobet-470818.autobet.mv_race_status_monitor`
+OPTIONS(
+  refresh_interval_minutes=5.0,
+  allow_non_incremental_definition=true,
+  max_staleness=INTERVAL '0-0 0 0:10:0' YEAR TO SECOND
+)
+AS SELECT
+  p.product_id,
+  p.event_id,
+  p.event_name,
+  p.venue,
+  p.start_iso,
+  p.status,
+  p.currency,
+  p.bet_type,
+  TIMESTAMP(p.start_iso) AS start_timestamp,
+  CURRENT_TIMESTAMP() AS check_time,
+  TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), TIMESTAMP(p.start_iso), MINUTE) AS minutes_since_start,
+  CASE 
+    WHEN TIMESTAMP(p.start_iso) < CURRENT_TIMESTAMP() AND UPPER(p.status) = 'OPEN' THEN 'SHOULD_BE_CLOSED'
+    WHEN TIMESTAMP(p.start_iso) > TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 30 MINUTE) AND UPPER(p.status) = 'CLOSED' THEN 'SHOULD_BE_OPEN'
+    ELSE 'STATUS_CORRECT'
+  END AS status_validation
+FROM `autobet-470818.autobet.vw_products_latest_totals` p
+WHERE TIMESTAMP(p.start_iso) BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) 
+  AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 4 HOUR);
+
+-- 11. REAL-TIME STATUS VALIDATION VIEWS
+-- =====================================================
+
+-- View to identify races that should be closed but are still open
+CREATE OR REPLACE VIEW `autobet-470818.autobet.vw_races_should_be_closed` AS
+SELECT 
+  product_id,
+  event_id,
+  event_name,
+  venue,
+  start_iso,
+  status,
+  minutes_since_start,
+  'Race started but still OPEN - may need manual closure' AS issue
+FROM `autobet-470818.autobet.mv_race_status_monitor`
+WHERE status_validation = 'SHOULD_BE_CLOSED'
+ORDER BY minutes_since_start DESC;
+
+-- View to identify races that should be open but are closed
+CREATE OR REPLACE VIEW `autobet-470818.autobet.vw_races_should_be_open` AS
+SELECT 
+  product_id,
+  event_id,
+  event_name,
+  venue,
+  start_iso,
+  status,
+  minutes_since_start,
+  'Race not started but already CLOSED - may be premature' AS issue
+FROM `autobet-470818.autobet.mv_race_status_monitor`
+WHERE status_validation = 'SHOULD_BE_OPEN'
+ORDER BY start_iso ASC;
+
+-- View for status update performance monitoring
+CREATE OR REPLACE VIEW `autobet-470818.autobet.vw_status_update_performance` AS
+SELECT 
+  CURRENT_TIMESTAMP() AS check_time,
+  COUNT(*) AS total_races_checked,
+  COUNTIF(status_validation = 'SHOULD_BE_CLOSED') AS races_should_be_closed,
+  COUNTIF(status_validation = 'SHOULD_BE_OPEN') AS races_should_be_open,
+  COUNTIF(status_validation = 'STATUS_CORRECT') AS races_status_correct,
+  ROUND(COUNTIF(status_validation = 'STATUS_CORRECT') * 100.0 / COUNT(*), 2) AS accuracy_percentage
+FROM `autobet-470818.autobet.mv_race_status_monitor`;
+
+-- 12. PEAK HOURS CACHE OPTIMIZATION
+-- =====================================================
+
+-- View to determine if we're in peak racing hours (7 AM - 10 PM UK time)
+CREATE OR REPLACE VIEW `autobet-470818.autobet.vw_peak_racing_hours` AS
+SELECT 
+  CURRENT_TIMESTAMP() AS check_time,
+  EXTRACT(HOUR FROM CURRENT_TIMESTAMP() AT TIME ZONE 'Europe/London') AS uk_hour,
+  CASE 
+    WHEN EXTRACT(HOUR FROM CURRENT_TIMESTAMP() AT TIME ZONE 'Europe/London') BETWEEN 7 AND 22 
+    THEN TRUE 
+    ELSE FALSE 
+  END AS is_peak_hours,
+  CASE 
+    WHEN EXTRACT(HOUR FROM CURRENT_TIMESTAMP() AT TIME ZONE 'Europe/London') BETWEEN 7 AND 22 
+    THEN 120  -- 2 minutes during peak hours
+    ELSE 300  -- 5 minutes during off-peak hours
+  END AS recommended_refresh_interval_seconds;
+
+-- 13. VALIDATION QUERIES
 -- =====================================================
 
 -- Validate that materialized views are working
@@ -307,7 +434,8 @@ SELECT
   'Materialized Views Status' as check_type,
   table_name,
   table_type,
-  creation_time
+  creation_time,
+  last_modified_time
 FROM `autobet-470818.autobet.INFORMATION_SCHEMA.TABLES`
 WHERE table_name LIKE 'mv_%'
 ORDER BY creation_time DESC;
@@ -323,3 +451,9 @@ FROM `autobet-470818.autobet.INFORMATION_SCHEMA.PARTITIONS`
 WHERE table_name IN ('tote_products_optimized', 'tote_events_optimized')
   AND partition_id IS NOT NULL
 ORDER BY table_name, partition_id;
+
+-- Check current status validation performance
+SELECT * FROM `autobet-470818.autobet.vw_status_update_performance`;
+
+-- Check if we're in peak hours
+SELECT * FROM `autobet-470818.autobet.vw_peak_racing_hours`;

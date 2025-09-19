@@ -112,6 +112,54 @@ def scan_and_publish_pre_race_jobs():
     return f"Published {published_count} pre-race jobs for {len(upcoming_df)} products.", 200
 
 
+def monitor_race_status():
+    """
+    Monitor race statuses and identify anomalies.
+    This endpoint is called by the Cloud Scheduler every 2 minutes during peak hours.
+    """
+    try:
+        from .scripts.monitor_race_status import RaceStatusMonitor
+        
+        monitor = RaceStatusMonitor()
+        monitor.run_monitoring_cycle()
+        
+        _log_job_run("race-status-monitor", "OK", metrics={})
+        return "Race status monitoring completed", 200
+        
+    except Exception as e:
+        err = str(e)
+        print(f"Error in race status monitoring: {err}")
+        _log_job_run("race-status-monitor", "ERROR", error=err)
+        return f"Race status monitoring failed: {err}", 500
+
+
+def refresh_cache():
+    """
+    Fast cache refresh during peak racing hours.
+    This endpoint is called by the Cloud Scheduler every 2 minutes during peak hours.
+    """
+    try:
+        from .scripts.refresh_cache import refresh_materialized_views, warm_cache, monitor_performance
+        
+        # Refresh materialized views
+        refresh_materialized_views()
+        
+        # Warm up caches
+        warm_cache()
+        
+        # Monitor performance
+        monitor_performance()
+        
+        _log_job_run("fast-cache-refresh", "OK", metrics={})
+        return "Fast cache refresh completed", 200
+        
+    except Exception as e:
+        err = str(e)
+        print(f"Error in fast cache refresh: {err}")
+        _log_job_run("fast-cache-refresh", "ERROR", error=err)
+        return f"Fast cache refresh failed: {err}", 500
+
+
 def scan_and_publish_results_jobs():
     """
     Scans for recently finished events that are missing results and triggers

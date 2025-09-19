@@ -164,6 +164,26 @@ def monitor_performance():
     except Exception as e:
         logger.error(f"Error monitoring performance: {e}")
 
+def get_peak_hours_refresh_interval(sink) -> int:
+    """Get refresh interval based on peak racing hours."""
+    try:
+        peak_hours_sql = """
+        SELECT recommended_refresh_interval_seconds, is_peak_hours, uk_hour
+        FROM `autobet-470818.autobet.vw_peak_racing_hours`
+        """
+        
+        result = sink.query(peak_hours_sql)
+        for row in result:
+            interval = row.recommended_refresh_interval_seconds
+            is_peak = row.is_peak_hours
+            uk_hour = row.uk_hour
+            logger.info(f"Peak hours: {'Yes' if is_peak else 'No'} (UK hour: {uk_hour}), refresh interval: {interval}s")
+            return interval
+    except Exception as e:
+        logger.warning(f"Could not determine peak hours, using default: {e}")
+    
+    return 300  # Default to 5 minutes
+
 def main():
     """Main cache refresh loop."""
     logger.info("Starting Autobet cache refresh service")
@@ -174,14 +194,30 @@ def main():
         from dotenv import load_dotenv
         load_dotenv(env_path)
     
-    refresh_interval = int(os.getenv("CACHE_REFRESH_INTERVAL", "300"))  # 5 minutes
+    sink = get_bq_sink()
+    if not sink.enabled:
+        logger.error("BigQuery not enabled, cannot run cache refresh service")
+        return
+    
+    # Get initial refresh interval based on peak hours
+    refresh_interval = get_peak_hours_refresh_interval(sink)
     cleanup_interval = int(os.getenv("CACHE_CLEANUP_INTERVAL", "3600"))  # 1 hour
+    peak_check_interval = 600  # Check peak hours every 10 minutes
     
     last_cleanup = time.time()
+    last_peak_check = time.time()
     
     while True:
         try:
             start_time = time.time()
+            
+            # Check if we need to adjust refresh interval based on peak hours
+            if time.time() - last_peak_check > peak_check_interval:
+                new_interval = get_peak_hours_refresh_interval(sink)
+                if new_interval != refresh_interval:
+                    refresh_interval = new_interval
+                    logger.info(f"Adjusted refresh interval to: {refresh_interval} seconds")
+                last_peak_check = time.time()
             
             # Refresh materialized views
             refresh_materialized_views()
@@ -198,7 +234,7 @@ def main():
                 last_cleanup = time.time()
             
             duration = time.time() - start_time
-            logger.info(f"Cache refresh cycle completed in {duration:.2f}s")
+            logger.info(f"Cache refresh cycle completed in {duration:.2f}s (next in {refresh_interval}s)")
             
             # Wait for next cycle
             time.sleep(refresh_interval)

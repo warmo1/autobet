@@ -113,13 +113,19 @@ def check_database_pool_data(product_id: str) -> Dict[str, Any]:
         ts_ms,
         created_at
     FROM `autobet-470818.autobet.tote_pool_snapshots`
-    WHERE product_id = ?
+    WHERE product_id = @product_id
     ORDER BY ts_ms DESC
     LIMIT 1
     """
     
     try:
-        rows = list(db.query(query, (product_id,)))
+        from google.cloud import bigquery
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("product_id", "STRING", product_id)
+            ]
+        )
+        rows = list(db.query(query, job_config=job_config))
         if not rows:
             return {"error": "No pool snapshots found in database"}
         
@@ -155,11 +161,17 @@ def check_product_data(product_id: str) -> Dict[str, Any]:
         event_id,
         start_iso
     FROM `autobet-470818.autobet.vw_products_latest_totals`
-    WHERE product_id = ?
+    WHERE product_id = @product_id
     """
     
     try:
-        rows = list(db.query(query, (product_id,)))
+        from google.cloud import bigquery
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("product_id", "STRING", product_id)
+            ]
+        )
+        rows = list(db.query(query, job_config=job_config))
         if not rows:
             return {"error": "Product not found in database"}
         

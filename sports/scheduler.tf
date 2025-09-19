@@ -175,7 +175,7 @@ resource "google_cloud_scheduler_job" "superfecta_morning" {
 resource "google_cloud_scheduler_job" "superfecta_live" {
   name             = "superfecta-live"
   description      = "Refresh live EV checks for monitored superfecta bets."
-  schedule         = "*/10 7-22 * * *"
+  schedule         = "*/5 7-22 * * *"  # Increased from */10 to */5 (every 5 minutes during peak hours)
   time_zone        = "Europe/London"
   attempt_deadline = "120s"
 
@@ -227,6 +227,48 @@ resource "google_cloud_scheduler_job" "daily_event_ingest" {
       "Content-Type" = "application/json"
     }
     body = base64encode("{\"job_name\": \"daily-event-ingest\"}")
+    oidc_token {
+      service_account_email = google_service_account.scheduler_sa.email
+    }
+  }
+}
+
+# Race status monitoring job (every 2 minutes during peak hours)
+resource "google_cloud_scheduler_job" "race_status_monitor" {
+  name             = "race-status-monitor"
+  description      = "Monitor race statuses and identify anomalies."
+  schedule         = "*/2 7-22 * * *"  # Every 2 minutes during peak hours (7 AM - 10 PM UK time)
+  time_zone        = "Europe/London"
+  attempt_deadline = "60s"
+
+  http_target {
+    uri         = "${google_cloud_run_v2_service.orchestrator_service.uri}/jobs/race-status/monitor"
+    http_method = "POST"
+    headers = {
+      "Content-Type" = "application/json"
+    }
+    body = base64encode("{}")
+    oidc_token {
+      service_account_email = google_service_account.scheduler_sa.email
+    }
+  }
+}
+
+# Fast cache refresh job (every 2 minutes during peak hours)
+resource "google_cloud_scheduler_job" "fast_cache_refresh" {
+  name             = "fast-cache-refresh"
+  description      = "Fast cache refresh during peak racing hours."
+  schedule         = "*/2 7-22 * * *"  # Every 2 minutes during peak hours
+  time_zone        = "Europe/London"
+  attempt_deadline = "60s"
+
+  http_target {
+    uri         = "${google_cloud_run_v2_service.orchestrator_service.uri}/jobs/cache/refresh"
+    http_method = "POST"
+    headers = {
+      "Content-Type" = "application/json"
+    }
+    body = base64encode("{}")
     oidc_token {
       service_account_email = google_service_account.scheduler_sa.email
     }
