@@ -10,6 +10,7 @@ AS SELECT
           p.currency,
           p.total_gross,
           p.total_net,
+          p.rollover,
           ARRAY_LENGTH(JSON_EXTRACT_ARRAY(te.competitors_json, '$')) AS n_competitors
         FROM `autobet-470818.autobet.tote_products` p
         LEFT JOIN `autobet-470818.autobet.tote_events` te USING(event_id)

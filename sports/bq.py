@@ -81,11 +81,8 @@ class BigQuerySink:
             job_config.default_dataset = self._default_dataset
         if getattr(job_config, "use_query_cache", None) is None:
             job_config.use_query_cache = True
-
-        location = kwargs.pop("location", None) or self.location
-        if location:
-            kwargs["location"] = location
-
+        if getattr(job_config, "location", None) in (None, ""):
+            job_config.location = self.location
         return client.query(sql, job_config=job_config, **kwargs).result()
 
     def query_dataframe(self, sql: str, **kwargs):
@@ -860,166 +857,6 @@ class BigQuerySink:
             ]),
         )
 
-
-    def upsert_superfecta_morning(self, rows: Iterable[Mapping[str, Any]]):
-        temp = self._load_to_temp(
-            "tote_superfecta_morning",
-            rows,
-            schema_hint={
-                "run_date": "DATE",
-                "run_ts": "INT64",
-                "n_competitors": "INT64",
-                "total_net": "FLOAT64",
-                "total_gross": "FLOAT64",
-                "rollover": "FLOAT64",
-                "roi_current": "FLOAT64",
-                "bankroll_allocated": "FLOAT64",
-                "total_stake": "FLOAT64",
-                "expected_profit": "FLOAT64",
-                "expected_return": "FLOAT64",
-                "hit_rate": "FLOAT64",
-                "minutes_to_post": "FLOAT64",
-                "created_ts": "INT64",
-            },
-        )
-        if not temp:
-            return
-        self._merge(
-            "tote_superfecta_morning",
-            temp,
-            key_expr="T.run_id = S.run_id",
-            update_set=",".join([
-                "run_date=COALESCE(S.run_date, T.run_date)",
-                "run_ts=COALESCE(S.run_ts, T.run_ts)",
-                "product_id=COALESCE(S.product_id, T.product_id)",
-                "event_id=COALESCE(S.event_id, T.event_id)",
-                "event_name=COALESCE(S.event_name, T.event_name)",
-                "venue=COALESCE(S.venue, T.venue)",
-                "country=COALESCE(S.country, T.country)",
-                "start_iso=COALESCE(S.start_iso, T.start_iso)",
-                "currency=COALESCE(S.currency, T.currency)",
-                "n_competitors=COALESCE(S.n_competitors, T.n_competitors)",
-                "total_net=COALESCE(S.total_net, T.total_net)",
-                "total_gross=COALESCE(S.total_gross, T.total_gross)",
-                "rollover=COALESCE(S.rollover, T.rollover)",
-                "roi_current=COALESCE(S.roi_current, T.roi_current)",
-                "preset_key=COALESCE(S.preset_key, T.preset_key)",
-                "bankroll_allocated=COALESCE(S.bankroll_allocated, T.bankroll_allocated)",
-                "total_stake=COALESCE(S.total_stake, T.total_stake)",
-                "expected_profit=COALESCE(S.expected_profit, T.expected_profit)",
-                "expected_return=COALESCE(S.expected_return, T.expected_return)",
-                "hit_rate=COALESCE(S.hit_rate, T.hit_rate)",
-                "plan_json=COALESCE(S.plan_json, T.plan_json)",
-                "selections_text=COALESCE(S.selections_text, T.selections_text)",
-                "status=COALESCE(S.status, T.status)",
-                "filter_reason=COALESCE(S.filter_reason, T.filter_reason)",
-                "notes=COALESCE(S.notes, T.notes)",
-                "created_by=COALESCE(S.created_by, T.created_by)",
-                "minutes_to_post=COALESCE(S.minutes_to_post, T.minutes_to_post)",
-                "created_ts=COALESCE(S.created_ts, T.created_ts)",
-            ]),
-        )
-
-    def upsert_superfecta_live_checks(self, rows: Iterable[Mapping[str, Any]]):
-        temp = self._load_to_temp(
-            "tote_superfecta_live_checks",
-            rows,
-            schema_hint={
-                "check_ts": "INT64",
-                "minutes_to_post": "FLOAT64",
-                "pool_total_net": "FLOAT64",
-                "pool_total_gross": "FLOAT64",
-                "rollover": "FLOAT64",
-                "roi_current": "FLOAT64",
-                "expected_profit": "FLOAT64",
-                "expected_return": "FLOAT64",
-                "hit_rate": "FLOAT64",
-                "plan_total_stake": "FLOAT64",
-                "decision_threshold_met": "BOOL",
-            },
-        )
-        if not temp:
-            return
-        self._merge(
-            "tote_superfecta_live_checks",
-            temp,
-            key_expr="T.check_id = S.check_id",
-            update_set=",".join([
-                "recommendation_id=COALESCE(S.recommendation_id, T.recommendation_id)",
-                "run_id=COALESCE(S.run_id, T.run_id)",
-                "product_id=COALESCE(S.product_id, T.product_id)",
-                "check_ts=COALESCE(S.check_ts, T.check_ts)",
-                "minutes_to_post=COALESCE(S.minutes_to_post, T.minutes_to_post)",
-                "pool_total_net=COALESCE(S.pool_total_net, T.pool_total_net)",
-                "pool_total_gross=COALESCE(S.pool_total_gross, T.pool_total_gross)",
-                "rollover=COALESCE(S.rollover, T.rollover)",
-                "roi_current=COALESCE(S.roi_current, T.roi_current)",
-                "expected_profit=COALESCE(S.expected_profit, T.expected_profit)",
-                "expected_return=COALESCE(S.expected_return, T.expected_return)",
-                "hit_rate=COALESCE(S.hit_rate, T.hit_rate)",
-                "plan_total_stake=COALESCE(S.plan_total_stake, T.plan_total_stake)",
-                "status=COALESCE(S.status, T.status)",
-                "notes=COALESCE(S.notes, T.notes)",
-                "plan_json=COALESCE(S.plan_json, T.plan_json)",
-                "decision_threshold_met=COALESCE(S.decision_threshold_met, T.decision_threshold_met)",
-            ]),
-        )
-
-    def upsert_superfecta_recommendations(self, rows: Iterable[Mapping[str, Any]]):
-        temp = self._load_to_temp(
-            "tote_superfecta_recommendations",
-            rows,
-            schema_hint={
-                "run_date": "DATE",
-                "created_ts": "INT64",
-                "updated_ts": "INT64",
-                "bankroll_allocated": "FLOAT64",
-                "total_stake": "FLOAT64",
-                "expected_profit": "FLOAT64",
-                "expected_return": "FLOAT64",
-                "hit_rate": "FLOAT64",
-                "auto_place": "BOOL",
-                "ready_ts": "INT64",
-                "final_ts": "INT64",
-                "minutes_to_post": "FLOAT64",
-                "last_check_ts": "INT64",
-            },
-        )
-        if not temp:
-            return
-        self._merge(
-            "tote_superfecta_recommendations",
-            temp,
-            key_expr="T.recommendation_id = S.recommendation_id",
-            update_set=",".join([
-                "run_id=COALESCE(S.run_id, T.run_id)",
-                "product_id=COALESCE(S.product_id, T.product_id)",
-                "event_id=COALESCE(S.event_id, T.event_id)",
-                "run_date=COALESCE(S.run_date, T.run_date)",
-                "created_ts=COALESCE(T.created_ts, S.created_ts)",
-                "updated_ts=COALESCE(S.updated_ts, T.updated_ts)",
-                "status=COALESCE(S.status, T.status)",
-                "preset_key=COALESCE(S.preset_key, T.preset_key)",
-                "bankroll_allocated=COALESCE(S.bankroll_allocated, T.bankroll_allocated)",
-                "total_stake=COALESCE(S.total_stake, T.total_stake)",
-                "expected_profit=COALESCE(S.expected_profit, T.expected_profit)",
-                "expected_return=COALESCE(S.expected_return, T.expected_return)",
-                "hit_rate=COALESCE(S.hit_rate, T.hit_rate)",
-                "currency=COALESCE(S.currency, T.currency)",
-                "plan_json=COALESCE(S.plan_json, T.plan_json)",
-                "selections_text=COALESCE(S.selections_text, T.selections_text)",
-                "auto_place=COALESCE(S.auto_place, T.auto_place)",
-                "decision_reason=COALESCE(S.decision_reason, T.decision_reason)",
-                "ready_ts=COALESCE(S.ready_ts, T.ready_ts)",
-                "final_ts=COALESCE(S.final_ts, T.final_ts)",
-                "bet_id=COALESCE(S.bet_id, T.bet_id)",
-                "live_metrics_json=COALESCE(S.live_metrics_json, T.live_metrics_json)",
-                "minutes_to_post=COALESCE(S.minutes_to_post, T.minutes_to_post)",
-                "last_check_ts=COALESCE(S.last_check_ts, T.last_check_ts)",
-                "source=COALESCE(S.source, T.source)",
-            ]),
-        )
-
     def ensure_views(self):
         """Create views required by the web app if missing (idempotent)."""
         client = self._client_obj(); self._ensure_dataset()
@@ -1106,85 +943,6 @@ class BigQuerySink:
           status STRING,
           response_json STRING,
           error STRING
-        );
-        CREATE TABLE IF NOT EXISTS `{ds}.tote_superfecta_morning`(
-          run_id STRING,
-          run_date DATE,
-          run_ts INT64,
-          product_id STRING,
-          event_id STRING,
-          event_name STRING,
-          venue STRING,
-          country STRING,
-          start_iso STRING,
-          currency STRING,
-          n_competitors INT64,
-          total_net FLOAT64,
-          total_gross FLOAT64,
-          rollover FLOAT64,
-          roi_current FLOAT64,
-          preset_key STRING,
-          bankroll_allocated FLOAT64,
-          total_stake FLOAT64,
-          expected_profit FLOAT64,
-          expected_return FLOAT64,
-          hit_rate FLOAT64,
-          plan_json STRING,
-          selections_text STRING,
-          status STRING,
-          filter_reason STRING,
-          notes STRING,
-          created_by STRING,
-          minutes_to_post FLOAT64,
-          created_ts INT64
-        );
-        CREATE TABLE IF NOT EXISTS `{ds}.tote_superfecta_live_checks`(
-          check_id STRING,
-          recommendation_id STRING,
-          run_id STRING,
-          product_id STRING,
-          check_ts INT64,
-          minutes_to_post FLOAT64,
-          pool_total_net FLOAT64,
-          pool_total_gross FLOAT64,
-          rollover FLOAT64,
-          roi_current FLOAT64,
-          expected_profit FLOAT64,
-          expected_return FLOAT64,
-          hit_rate FLOAT64,
-          plan_total_stake FLOAT64,
-          status STRING,
-          notes STRING,
-          plan_json STRING,
-          decision_threshold_met BOOL
-        );
-        CREATE TABLE IF NOT EXISTS `{ds}.tote_superfecta_recommendations`(
-          recommendation_id STRING,
-          run_id STRING,
-          product_id STRING,
-          event_id STRING,
-          run_date DATE,
-          created_ts INT64,
-          updated_ts INT64,
-          status STRING,
-          preset_key STRING,
-          bankroll_allocated FLOAT64,
-          total_stake FLOAT64,
-          expected_profit FLOAT64,
-          expected_return FLOAT64,
-          hit_rate FLOAT64,
-          currency STRING,
-          plan_json STRING,
-          selections_text STRING,
-          auto_place BOOL,
-          decision_reason STRING,
-          ready_ts INT64,
-          final_ts INT64,
-          bet_id STRING,
-          live_metrics_json STRING,
-          minutes_to_post FLOAT64,
-          last_check_ts INT64,
-          source STRING
         );
         """
         job = client.query(sql); job.result()
@@ -1913,22 +1671,14 @@ class BigQuerySink:
                 client.query(f"ALTER TABLE `{ds}.tote_params` ADD COLUMN IF NOT EXISTS `{name}` {typ}").result()
             except Exception:
                 pass
-        # Insert default params only once to avoid daily DML quotas
-        needs_defaults = False
-        try:
-            params_table = f"{ds}.tote_params"
-            cnt_job = client.query(f"SELECT COUNT(1) AS cnt FROM `{params_table}`")
-            row = next(iter(cnt_job.result()), None)
-            needs_defaults = (row is None) or (row[0] == 0)
-        except Exception:
-            # If the count fails, fall back to attempting the insert once
-            needs_defaults = True
-        if needs_defaults:
-            sql = f"""
-            INSERT INTO `{ds}.tote_params`(t,f,stake_per_line,R)
-            VALUES (0.30, 1.0, 0.10, 0.0);
-            """
-            client.query(sql).result()
+        # Insert default params if table is empty
+        sql = f"""
+        INSERT INTO `{ds}.tote_params`(t,f,stake_per_line,R)
+        SELECT 0.30, 1.0, 0.10, 0.0
+        FROM (SELECT 1) 
+        WHERE (SELECT COUNT(1) FROM `{ds}.tote_params`) = 0;
+        """
+        job = client.query(sql); job.result()
 
         # Runner strength view (predictions-based): latest row per runner/product from model dataset
         model_dataset = os.getenv("BQ_MODEL_DATASET", f"{self.dataset}_model")
@@ -2313,23 +2063,9 @@ class BigQuerySink:
             r.fetched_ts,
             COALESCE(
               JSON_EXTRACT_SCALAR(line, '$.legs.lineSelections[0].selectionId'),
-              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId'),
-              JSON_EXTRACT_SCALAR(
-                JSON_EXTRACT_ARRAY(
-                  JSON_EXTRACT_ARRAY(line, '$.legs.nodes')
-                  [SAFE_OFFSET(0)],
-                  '$.lineSelections.nodes'
-                )[SAFE_OFFSET(0)],
-                '$.selectionId'
-              )
+              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId')
             ) AS selection_id,
-            SAFE_CAST(
-              COALESCE(
-                JSON_EXTRACT_SCALAR(line, '$.odds.decimal'),
-                JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.odds.nodes')[SAFE_OFFSET(0)], '$.decimal')
-              )
-              AS FLOAT64
-            ) AS decimal_odds
+            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds.decimal') AS FLOAT64) AS decimal_odds
           FROM `{ds}.raw_tote_probable_odds` r,
           UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
           UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line
@@ -2339,7 +2075,7 @@ class BigQuerySink:
                  ARRAY_AGG(decimal_odds ORDER BY fetched_ts DESC LIMIT 1)[OFFSET(0)] AS decimal_odds,
                  MAX(fetched_ts) AS ts_ms
           FROM exploded
-          WHERE selection_id IS NOT NULL AND product_id IS NOT NULL
+          WHERE selection_id IS NOT NULL AND decimal_odds IS NOT NULL AND product_id IS NOT NULL
           GROUP BY product_id, selection_id
         )
         SELECT
@@ -2364,22 +2100,9 @@ class BigQuerySink:
             r.fetched_ts AS ts_ms,
             COALESCE(
               JSON_EXTRACT_SCALAR(line, '$.legs.lineSelections[0].selectionId'),
-              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId'),
-              JSON_EXTRACT_SCALAR(
-                JSON_EXTRACT_ARRAY(
-                  JSON_EXTRACT_ARRAY(line, '$.legs.nodes')[SAFE_OFFSET(0)],
-                  '$.lineSelections.nodes'
-                )[SAFE_OFFSET(0)],
-                '$.selectionId'
-              )
+              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId')
             ) AS selection_id,
-            SAFE_CAST(
-              COALESCE(
-                JSON_EXTRACT_SCALAR(line, '$.odds.decimal'),
-                JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.odds.nodes')[SAFE_OFFSET(0)], '$.decimal')
-              )
-              AS FLOAT64
-            ) AS decimal_odds
+            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds.decimal') AS FLOAT64) AS decimal_odds
           FROM `{ds}.raw_tote_probable_odds` r,
           UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
           UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line
@@ -2391,27 +2114,20 @@ class BigQuerySink:
                e.ts_ms
         FROM exploded e
         LEFT JOIN `{ds}.tote_product_selections` s ON s.selection_id = e.selection_id AND s.product_id = e.product_id
-        WHERE e.selection_id IS NOT NULL;
+        WHERE e.selection_id IS NOT NULL AND e.decimal_odds IS NOT NULL;
         """
         job = client.query(sql)
         job.result()
 
         # vw_sf_strengths_from_win_horse: derive fallback runner strengths from WIN probable odds
-        # Drop prior objects so we can recreate whichever variant (materialized view or regular view).
-        try:
-            client.query(f"DROP MATERIALIZED VIEW IF EXISTS `{ds}.mv_sf_strengths_from_win_horse`").result()
-        except Exception:
-            pass
-        try:
-            client.query(f"DROP VIEW IF EXISTS `{ds}.mv_sf_strengths_from_win_horse`").result()
-        except Exception:
-            pass
+        # Drop the legacy view so we can install a materialized view under the same name.
         try:
             client.query(f"DROP VIEW IF EXISTS `{ds}.vw_sf_strengths_from_win_horse`").result()
         except Exception:
             pass
 
-        strengths_query = f"""
+        sql = f"""
+        CREATE MATERIALIZED VIEW IF NOT EXISTS `{ds}.mv_sf_strengths_from_win_horse` AS
         WITH sf AS (
           SELECT product_id, event_id
           FROM `{ds}.tote_products`
@@ -2432,30 +2148,14 @@ class BigQuerySink:
             SAFE_CAST(JSON_EXTRACT_SCALAR(prod, '$.id') AS STRING) AS product_id,
             COALESCE(
               JSON_EXTRACT_SCALAR(line, '$.legs.lineSelections[0].selectionId'),
-              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId'),
-              JSON_EXTRACT_SCALAR(
-                JSON_EXTRACT_ARRAY(
-                  JSON_EXTRACT_ARRAY(line, '$.legs.nodes')[SAFE_OFFSET(0)],
-                  '$.lineSelections.nodes'
-                )[SAFE_OFFSET(0)],
-                '$.selectionId'
-              )
+              JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.legs')[SAFE_OFFSET(0)], '$.lineSelections[0].selectionId')
             ) AS selection_id,
-            SAFE_CAST(
-              COALESCE(
-                JSON_EXTRACT_SCALAR(line, '$.odds.decimal'),
-                JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.odds.nodes')[SAFE_OFFSET(0)], '$.decimal')
-              )
-              AS FLOAT64
-            ) AS decimal_odds,
+            SAFE_CAST(JSON_EXTRACT_SCALAR(line, '$.odds.decimal') AS FLOAT64) AS decimal_odds,
             r.fetched_ts
           FROM `{ds}.raw_tote_probable_odds` r,
           UNNEST(JSON_EXTRACT_ARRAY(r.payload, '$.products.nodes')) AS prod,
           UNNEST(JSON_EXTRACT_ARRAY(prod, '$.lines.nodes')) AS line
-          WHERE COALESCE(
-                  JSON_EXTRACT_SCALAR(line, '$.odds.decimal'),
-                  JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(line, '$.odds.nodes')[SAFE_OFFSET(0)], '$.decimal')
-                ) IS NOT NULL
+          WHERE JSON_EXTRACT_SCALAR(line, '$.odds.decimal') IS NOT NULL
         ),
         latest_odds AS (
           SELECT product_id, selection_id, decimal_odds
@@ -2520,27 +2220,16 @@ class BigQuerySink:
           SAFE_DIVIDE(w.weight, NULLIF(s.total_weight, 0)) AS strength
         FROM weights w
         JOIN sums s USING(product_id)
-        WHERE SAFE_DIVIDE(w.weight, NULLIF(s.total_weight, 0)) IS NOT NULL
+        WHERE SAFE_DIVIDE(w.weight, NULLIF(s.total_weight, 0)) IS NOT NULL;
         """
-
-        mv_sql = (
-            f"CREATE MATERIALIZED VIEW `{ds}.mv_sf_strengths_from_win_horse`\n"
-            f"OPTIONS (enable_refresh = false) AS\n{strengths_query}"
-        )
-        try:
-            client.query(mv_sql).result()
-        except Exception:
-            # Fall back to a regular view if the materialized view is not supported (e.g. incremental restrictions).
-            view_sql = (
-                f"CREATE OR REPLACE VIEW `{ds}.mv_sf_strengths_from_win_horse` AS\n{strengths_query}"
-            )
-            client.query(view_sql).result()
+        client.query(sql).result()
 
         sql = f"""
         CREATE OR REPLACE VIEW `{ds}.vw_sf_strengths_from_win_horse` AS
         SELECT * FROM `{ds}.mv_sf_strengths_from_win_horse`;
         """
         client.query(sql).result()
+
         # vw_superfecta_runner_strength_any: prefer model strengths, fall back to WIN odds-derived weights
         sql = f"""
         CREATE OR REPLACE VIEW `{ds}.vw_superfecta_runner_strength_any` AS
@@ -2550,7 +2239,7 @@ class BigQuerySink:
         ),
         fallback AS (
           SELECT product_id, event_id, runner_id, strength
-          FROM `{ds}.vw_sf_strengths_from_win_horse`
+          FROM `{ds}.mv_sf_strengths_from_win_horse`
         ),
         pred_products AS (
           SELECT DISTINCT product_id FROM pred
@@ -2682,11 +2371,11 @@ class BigQuerySink:
           ),
           perms AS (
             SELECT
-              pr.product_id,
+              p.product_id,
               t.h1, t.h2, t.h3, t.h4,
               t.p
-            FROM prods pr,
-                 `{ds}.tf_superfecta_perms_any`(pr.product_id, (SELECT top_n FROM params)) AS t
+            FROM prods AS p
+            CROSS JOIN `{ds}.tf_superfecta_perms_any`(p.product_id, (SELECT top_n FROM params)) AS t
           ),
           ranked AS (
             SELECT
@@ -2698,8 +2387,8 @@ class BigQuerySink:
             FROM perms
           ),
           answers AS (
-            SELECT pr.product_id, pr.event_id, w.h1, w.h2, w.h3, w.h4
-            FROM prods pr
+            SELECT p.product_id, p.event_id, w.h1, w.h2, w.h3, w.h4
+            FROM prods AS p
             JOIN winners w USING(event_id)
             WHERE w.h1 IS NOT NULL AND w.h2 IS NOT NULL AND w.h3 IS NOT NULL AND w.h4 IS NOT NULL
           ),
@@ -2724,21 +2413,21 @@ class BigQuerySink:
             GROUP BY product_id
           )
           SELECT
-            pr.product_id,
-            pr.event_id,
-            pr.event_name,
-            pr.venue,
-            pr.country,
-            pr.start_iso,
-            pr.total_net,
+            p.product_id,
+            p.event_id,
+            p.event_name,
+            p.venue,
+            p.country,
+            p.start_iso,
+            p.total_net,
             c.total_lines,
             h.winner_rank,
             h.winner_p,
             c.cover_lines,
             (h.winner_rank IS NOT NULL AND h.winner_rank <= c.cover_lines) AS hit_at_coverage
-          FROM prods pr
-          LEFT JOIN coverage_calc c USING(product_id)
-          LEFT JOIN hits h USING(product_id, event_id)
+          FROM prods AS p
+          LEFT JOIN coverage_calc c ON c.product_id = p.product_id
+          LEFT JOIN hits h ON h.product_id = p.product_id AND h.event_id = p.event_id
         );
         """
         job = client.query(sql)
@@ -2819,8 +2508,8 @@ class BigQuerySink:
             SELECT
               rn AS lines_covered,
               cum_prob AS hit_rate,
-              SUM(p * f_i) OVER (ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS sum_pf,
-              SUM(p) OVER (ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS sum_p
+              SUM(with_f.p * with_f.f_i) OVER (ORDER BY with_f.rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS sum_pf,
+              SUM(with_f.p) OVER (ORDER BY with_f.rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS sum_p
             FROM with_f
           )
           SELECT
@@ -3190,13 +2879,10 @@ def get_bq_sink() -> BigQuerySink | None:
         if _BQ_SINK_SINGLETON is None:
             try:
                 _BQ_SINK_SINGLETON = BigQuerySink(cfg.bq_project, cfg.bq_dataset, cfg.bq_location)
-                if cfg.bq_ensure_on_boot:
-                    try:
-                        _BQ_SINK_SINGLETON.ensure_views()
-                    except Exception as exc:
-                        print(f"Failed to ensure BigQuery views: {exc}")
-                else:
-                    print("Skipping BigQuery ensure_views on boot (BQ_ENSURE_ON_BOOT=false).")
+                try:
+                    _BQ_SINK_SINGLETON.ensure_views()
+                except Exception as exc:
+                    print(f"Failed to ensure BigQuery views: {exc}")
             except Exception:
                 _BQ_SINK_SINGLETON = None
         return _BQ_SINK_SINGLETON

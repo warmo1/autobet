@@ -14,6 +14,7 @@ AS WITH params AS (
           v.currency,
           v.total_gross,
           v.total_net,
+          v.rollover,
           v.n_competitors,
           -- permutations C = N*(N-1)*(N-2)*(N-3)
           SAFE_MULTIPLY(SAFE_MULTIPLY(SAFE_MULTIPLY(v.n_competitors, v.n_competitors-1), v.n_competitors-2), v.n_competitors-3) AS combos,
