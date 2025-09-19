@@ -4,6 +4,24 @@
 {% block head %}
 {{ super() }}
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+// Fallback if Chart.js fails to load
+window.addEventListener('load', function() {
+    if (typeof Chart === 'undefined') {
+        console.error('Chart.js failed to load from CDN');
+        // Try alternative CDN
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js';
+        script.onload = function() {
+            console.log('Chart.js loaded from fallback CDN');
+        };
+        script.onerror = function() {
+            console.error('Chart.js failed to load from both CDNs');
+        };
+        document.head.appendChild(script);
+    }
+});
+</script>
 {% endblock %}
 
 {% block content %}
@@ -488,51 +506,69 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // Chart.js logic
-    const gridData = {{ (results.pl_model.ev_grid if results and results.pl_model else []) | tojson }};
-    const canvas = document.getElementById('evChart');
-    if (canvas && Array.isArray(gridData) && gridData.length > 0) {
-        const ctx = canvas.getContext('2d');
-        const labels = gridData.map(d => Number(d.lines_covered || 0));
-        const profits = gridData.map(d => Number(d.expected_profit || 0));
+    function initChart() {
+        // Check if Chart.js is loaded
+        if (typeof Chart === 'undefined') {
+            console.error('Chart.js is not loaded!');
+            return;
+        }
         
-        let maxProfit = -Infinity;
-        let peakLines = 0;
-        profits.forEach((profit, index) => {
-            if (profit > maxProfit) {
-                maxProfit = profit;
-                peakLines = labels[index];
-            }
-        });
-
-        new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: labels,
-               datasets: [{
-                   label: 'Expected Profit (£)',
-                   data: profits,
-                    borderColor: 'rgb(75, 192, 192)',
-                    backgroundColor: 'rgba(75, 192, 192, 0.25)',
-                    tension: 0.2,
-                    fill: true,
-                    borderWidth: 2,
-                    pointRadius: 2,
-                    pointHitRadius: 6,
-                }]
-            },
-            options: {
-                responsive: true,
-                plugins: {
-                    title: { display: false },
-                    legend: { display: false },
-                },
-                scales: {
-                    y: { title: { display: true, text: 'Expected Profit (£)' } },
-                    x: { title: { display: true, text: 'Number of Lines Covered' } }
+        const gridData = {{ (results.pl_model.ev_grid if results and results.pl_model else []) | tojson }};
+        const canvas = document.getElementById('evChart');
+        if (canvas && Array.isArray(gridData) && gridData.length > 0) {
+            const ctx = canvas.getContext('2d');
+            const labels = gridData.map(d => Number(d.lines_covered || 0));
+            const profits = gridData.map(d => Number(d.expected_profit || 0));
+            
+            let maxProfit = -Infinity;
+            let peakLines = 0;
+            profits.forEach((profit, index) => {
+                if (profit > maxProfit) {
+                    maxProfit = profit;
+                    peakLines = labels[index];
                 }
-            }
-        });
+            });
+
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                   datasets: [{
+                       label: 'Expected Profit (£)',
+                       data: profits,
+                        borderColor: 'rgb(75, 192, 192)',
+                        backgroundColor: 'rgba(75, 192, 192, 0.25)',
+                        tension: 0.2,
+                        fill: true,
+                        borderWidth: 2,
+                        pointRadius: 2,
+                        pointHitRadius: 6,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        title: { display: false },
+                        legend: { display: false },
+                    },
+                    scales: {
+                        y: { title: { display: true, text: 'Expected Profit (£)' } },
+                        x: { title: { display: true, text: 'Number of Lines Covered' } }
+                    }
+                }
+            });
+        }
     }
+    
+    // Initialize chart - wait for Chart.js to be available
+    function waitForChart() {
+        if (typeof Chart !== 'undefined') {
+            initChart();
+        } else {
+            setTimeout(waitForChart, 50);
+        }
+    }
+    waitForChart();
     } catch (error) {
         console.error('JavaScript error in manual calculator:', error);
         // Show error to user
