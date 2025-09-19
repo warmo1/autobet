@@ -146,6 +146,7 @@ models/
 *.csv
 *.joblib
 *.parquet
+logs/
 
 # Ignore Terraform provider plugins and state
 **/.terraform/
