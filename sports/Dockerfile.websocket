@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY sports/ ./sports/
-COPY autobet/ ./autobet/
+COPY . ./autobet/
 
 # Set environment variables
 ENV PYTHONPATH=/app

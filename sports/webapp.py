@@ -2881,6 +2881,20 @@ def api_status_data_freshness():
         return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
 
+@app.get("/api/status/quota_usage")
+def api_status_quota_usage():
+    """Return current BigQuery quota usage statistics."""
+    try:
+        from .quota_manager import get_quota_manager
+        
+        quota_manager = get_quota_manager()
+        stats = quota_manager.get_usage_stats()
+        
+        return app.response_class(json.dumps(stats), mimetype="application/json")
+    except Exception as e:
+        return app.response_class(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
+
+
 @app.get("/api/status/qc")
 def api_status_qc():
     """Return QC gaps and counts from QC views."""

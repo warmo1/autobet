@@ -69,19 +69,40 @@ class BigQuerySink:
         If no QueryJobConfig is provided, set a default dataset so
         unqualified table names resolve to `<project>.<dataset>`.
         """
-        client = self._client_obj()
-        job_config = kwargs.pop("job_config", None)
-        if job_config is None:
-            job_config = self._bq.QueryJobConfig(
-                default_dataset=self._default_dataset,
-                use_query_cache=True)
-        elif getattr(job_config, "default_dataset", None) in (None, ""):
-            # Preserve provided config but add default dataset for convenience
-            job_config.default_dataset = self._default_dataset
-        if getattr(job_config, "use_query_cache", None) is None:
-            job_config.use_query_cache = True
-        # Note: location parameter should be passed to client.query() directly, not set on job_config
-        return client.query(sql, job_config=job_config, **kwargs).result()
+        from .quota_manager import get_quota_manager
+        from .retry_utils import exponential_backoff_with_jitter
+        
+        quota_manager = get_quota_manager()
+        
+        @exponential_backoff_with_jitter(base_delay=2.0, max_delay=60.0, max_retries=3)
+        def _execute_query():
+            # Check quota before executing
+            if not quota_manager.can_execute_query():
+                quota_manager.wait_if_needed('query', max_wait=60.0)
+            
+            client = self._client_obj()
+            job_config = kwargs.pop("job_config", None)
+            if job_config is None:
+                job_config = self._bq.QueryJobConfig(
+                    default_dataset=self._default_dataset,
+                    use_query_cache=True)
+            elif getattr(job_config, "default_dataset", None) in (None, ""):
+                # Preserve provided config but add default dataset for convenience
+                job_config.default_dataset = self._default_dataset
+            if getattr(job_config, "use_query_cache", None) is None:
+                job_config.use_query_cache = True
+            # Pass location parameter to client.query() directly
+            location = kwargs.pop("location", self.location)
+            
+            try:
+                result = client.query(sql, job_config=job_config, location=location, **kwargs).result()
+                quota_manager.record_query(success=True)
+                return result
+            except Exception as e:
+                quota_manager.record_query(success=False)
+                raise e
+        
+        return _execute_query()
 
     def query_dataframe(self, sql: str, **kwargs):
         """Run a query and return the result as a pandas DataFrame."""
@@ -424,21 +445,41 @@ class BigQuerySink:
         
         This is preferred for high-frequency appends to avoid DML quota issues.
         """
-        client = self._client_obj()
-        self._ensure_dataset() # Make sure dataset exists
-        table_id = f"{self.project}.{self.dataset}.tote_pool_snapshots"
+        from .quota_manager import get_quota_manager
+        from .retry_utils import exponential_backoff_with_jitter
         
-        rows_to_insert = list(rows)
-        if not rows_to_insert:
-            return
+        quota_manager = get_quota_manager()
+        
+        @exponential_backoff_with_jitter(base_delay=1.0, max_delay=30.0, max_retries=3)
+        def _execute_insert():
+            # Check quota before executing
+            if not quota_manager.can_execute_insert():
+                quota_manager.wait_if_needed('insert', max_wait=30.0)
+            
+            client = self._client_obj()
+            self._ensure_dataset() # Make sure dataset exists
+            table_id = f"{self.project}.{self.dataset}.tote_pool_snapshots"
+            
+            rows_to_insert = list(rows)
+            if not rows_to_insert:
+                return
 
-        # The streaming API is less strict about schema on insert, but the table must exist.
-        # We can rely on ensure_views() to have created it.
-        errors = client.insert_rows_json(table_id, rows_to_insert)
-        if errors:
-            # For production, consider more robust error handling like logging to another service.
-            print(f"BigQuery streaming insert errors for table {table_id}: {errors}")
-            raise RuntimeError(f"BigQuery streaming insert failed: {errors}")
+            # The streaming API is less strict about schema on insert, but the table must exist.
+            # We can rely on ensure_views() to have created it.
+            try:
+                errors = client.insert_rows_json(table_id, rows_to_insert)
+                if errors:
+                    # For production, consider more robust error handling like logging to another service.
+                    print(f"BigQuery streaming insert errors for table {table_id}: {errors}")
+                    quota_manager.record_insert(success=False)
+                    raise RuntimeError(f"BigQuery streaming insert failed: {errors}")
+                else:
+                    quota_manager.record_insert(success=True)
+            except Exception as e:
+                quota_manager.record_insert(success=False)
+                raise e
+        
+        return _execute_insert()
 
     def upsert_tote_dividend_updates(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_dividend_updates", rows, schema_hint={
