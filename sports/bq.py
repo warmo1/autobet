@@ -80,8 +80,7 @@ class BigQuerySink:
             job_config.default_dataset = self._default_dataset
         if getattr(job_config, "use_query_cache", None) is None:
             job_config.use_query_cache = True
-        if getattr(job_config, "location", None) is None:
-            job_config.location = self.location
+        # Note: location parameter should be passed to client.query() directly, not set on job_config
         return client.query(sql, job_config=job_config, **kwargs).result()
 
     def query_dataframe(self, sql: str, **kwargs):
@@ -136,8 +135,7 @@ class BigQuerySink:
             query_parameters=[
                 self._bq.ScalarQueryParameter("model_id", "STRING", model_id),
                 self._bq.ScalarQueryParameter("ts_ms", "INT64", int(ts_ms)),
-            ],
-            location=self.location
+            ]
         )
         sql = f"""
         UPDATE `{self.project}.{self.dataset}.tote_params`
@@ -145,7 +143,7 @@ class BigQuerySink:
             ts_ms = @ts_ms,
             updated_ts = CURRENT_TIMESTAMP()
         """
-        client.query(sql, job_config=job_config).result()
+        client.query(sql, job_config=job_config, location=self.location).result()
 
     # --- generic helpers ---
     def _ensure_dataset(self):
