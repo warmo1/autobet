@@ -103,8 +103,7 @@ def run_morning_scan(
         "ORDER BY start_iso"
     )
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("run_date", "DATE", run_date)],
-    )
+        query_parameters=[bigquery.ScalarQueryParameter("run_date", "DATE", run_date)])
     df = db.query_dataframe(sql, job_config=job_config)
 
     accepted = 0
@@ -277,8 +276,7 @@ def run_live_monitor(
         "WHERE r.run_date = @run_date AND r.status IN ('monitoring', 'hold', 'ready')"
     )
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("run_date", "DATE", run_date)],
-    )
+        query_parameters=[bigquery.ScalarQueryParameter("run_date", "DATE", run_date)])
     df = db.query_dataframe(sql, job_config=job_config)
     if df.empty:
         return {"evaluated": 0, "ready": 0, "skipped": 0}
