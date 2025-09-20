@@ -7,8 +7,8 @@ import hashlib
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
 from flask import Flask, render_template, request, redirect, flash, url_for, send_file, Response
-from .config import cfg
-from .db import get_db, init_db
+from sports.config import cfg
+from sports.db import get_db, init_db
 from pathlib import Path
 import math
 import json
@@ -17,17 +17,17 @@ import traceback
 import math
 from typing import Optional, Sequence, Mapping, Any
 from google.cloud import bigquery
-from .providers.tote_bets import place_audit_superfecta
-from .providers.tote_bets import refresh_bet_status, audit_list_bets, sync_bets_from_api
-from .providers.tote_api import normalize_probable_lines
-from .gcp import publish_pubsub_message
-from .providers.pl_calcs import calculate_pl_strategy, calculate_pl_from_perms
-from .superfecta_planner import (
+from sports.providers.tote_bets import place_audit_superfecta
+from sports.providers.tote_bets import refresh_bet_status, audit_list_bets, sync_bets_from_api
+from sports.providers.tote_api import normalize_probable_lines
+from sports.gcp import publish_pubsub_message
+from sports.providers.pl_calcs import calculate_pl_strategy, calculate_pl_from_perms
+from sports.superfecta_planner import (
     SUPERFECTA_RISK_PRESETS,
     compute_superfecta_plan,
     group_superfecta_predictions,
 )
-from .superfecta_automation import run_morning_scan
+from sports.superfecta_automation import run_morning_scan
 import itertools
 import math
 import requests
@@ -284,7 +284,7 @@ def _sql_is_readonly(sql: str) -> bool:
     except Exception:
         return False
 
-from .realtime import bus as event_bus
+from sports.realtime import bus as event_bus
 
 
 def _clean_float(value: Any, default: float = 0.0) -> float:
@@ -377,7 +377,7 @@ def _today_iso() -> str:
 _pool_thread_started = False
 
 def _pool_subscriber_loop():
-    from .providers.tote_subscriptions import run_subscriber
+    from sports.providers.tote_subscriptions import run_subscriber
     while True:
         try:
             # The subscriber loop will now use the BigQuery sink via the new db layer
@@ -1063,7 +1063,7 @@ def tote_schema_download():
 @app.route("/tote/schema/refresh")
 def tote_schema_refresh():
     try:
-        from .providers.tote_api import ToteClient
+        from sports.providers.tote_api import ToteClient
         client = ToteClient()
         sdl = client.graphql_sdl()
         _write_sdl(sdl)
@@ -1076,8 +1076,8 @@ def tote_schema_refresh():
 def tote_schema_probe():
     from flask import Response
     try:
-        from .providers.tote_api import ToteClient
-        from .ingest.tote_products import PRODUCTS_QUERY
+        from sports.providers.tote_api import ToteClient
+        from sports.ingest.tote_products import PRODUCTS_QUERY
         client = ToteClient()
         data = client.graphql(PRODUCTS_QUERY, {"first": 1, "status": "OPEN"})
         import json as _json
@@ -1350,7 +1350,7 @@ def api_admin_refresh_product_status():
     first = int(payload.get("first") or request.values.get("first") or 500)
 
     try:
-        from .providers.tote_api import ToteClient
+        from sports.providers.tote_api import ToteClient
         client = ToteClient()
     except Exception as e:
         return app.response_class(json.dumps({"ok": False, "error": f"ToteClient init failed: {e}"}), mimetype="application/json", status=500)
@@ -1579,9 +1579,9 @@ def tote_calculators_page():
     # Optional refresh of products (OPEN) to update units (BQ-only)
     if request.method == "POST" and (request.form.get("refresh") == "1"):
         try:
-            from .providers.tote_api import ToteClient
-            from .ingest.tote_products import ingest_products
-            from .db import get_db
+            from sports.providers.tote_api import ToteClient
+            from sports.ingest.tote_products import ingest_products
+            from sports.db import get_db
             date_iso = _today_iso()
             client = ToteClient()
             sink = get_db()
@@ -2389,7 +2389,7 @@ def api_tote_event_products(event_id: str):
     # Prefer live API for freshest product selling status; fallback to BQ if unavailable
     rows: list[dict] = []
     try:
-        from .providers.tote_api import ToteClient
+        from sports.providers.tote_api import ToteClient
         client = ToteClient()
         q = (
             "query GetEvent($id: String){\n"
@@ -2521,7 +2521,7 @@ def tote_audit_superfecta_post():
     # Preflight checks: product status OPEN and selection IDs valid/active
     # This part remains largely the same, as it queries the live Tote API
     try:
-        from .providers.tote_api import ToteClient
+        from sports.providers.tote_api import ToteClient
         client = ToteClient()
         gql = """
         query ProductForPlacement($id: String){
@@ -2581,7 +2581,7 @@ def tote_audit_superfecta_post():
     # Resolve placement-visible product id (match by event/date), with alias fallback
     placement_pid = pid
     try:
-        from .providers.tote_api import ToteClient
+        from sports.providers.tote_api import ToteClient
         client = ToteClient()
         # Use BQ to get event_id and date
         prod_info_df = sql_df("SELECT event_id, substr(start_iso,1,10) as day FROM tote_products WHERE product_id=?", params=(pid,))
@@ -2615,7 +2615,7 @@ def tote_audit_superfecta_post():
 
     # Explicitly create a ToteClient with the correct endpoint based on the mode.
     # This ensures audit bets are sent to the audit endpoint, preventing "Failed to fund ticket" errors.
-    from .providers.tote_api import ToteClient
+    from sports.providers.tote_api import ToteClient
     client_for_placement = ToteClient()
     if mode == 'audit':
         # Use configured audit endpoint if provided; otherwise leave as default
@@ -4162,7 +4162,7 @@ def tote_product_calculator_page(product_id: str):
                                             if sel_id:
                                                 api_runner_odds[str(sel_id)] = odds_val
                                 if norm_lines:
-                                    from .bq import get_bq_sink
+                                    from sports.bq import get_bq_sink
                                     sink = get_bq_sink()
                                     import time as _t
                                     ts_ms = int(_t.time() * 1000)
@@ -4329,7 +4329,7 @@ def tote_live_model_page():
         except Exception:
             line_amounts = None
         db = get_db()
-        from .providers.tote_api import ToteClient
+        from sports.providers.tote_api import ToteClient
         client = ToteClient()
         if mode == 'live':
             if cfg.tote_graphql_url:
@@ -4945,8 +4945,8 @@ def tote_bet_page():
         res = {}
 
         if bet_type in ["WIN", "PLACE"]:
-            from .providers.tote_bets import place_audit_simple_bet
-            from .providers.tote_api import ToteClient
+            from sports.providers.tote_bets import place_audit_simple_bet
+            from sports.providers.tote_api import ToteClient
             selection_id = request.form.get("selection_id")
             if not selection_id:
                 flash("A runner/selection must be chosen for a WIN/PLACE bet.", "error")
@@ -4960,8 +4960,8 @@ def tote_bet_page():
                     client_for_placement.base_url = cfg.tote_audit_graphql_url.strip()
             res = place_audit_simple_bet(db, mode=mode, product_id=product_id, selection_id=selection_id, stake=stake, currency=currency, post=True, client=client_for_placement)
         elif bet_type in ["SUPERFECTA", "TRIFECTA", "EXACTA"]:
-            from .providers.tote_bets import place_audit_superfecta
-            from .providers.tote_api import ToteClient
+            from sports.providers.tote_bets import place_audit_superfecta
+            from sports.providers.tote_api import ToteClient
             selections_text = (request.form.get("selections_text") or "").strip()
             if not selections_text:
                 flash("Selections must be provided for a combination bet (e.g., '1-2-3-4').", "error")
