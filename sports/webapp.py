@@ -3242,6 +3242,36 @@ def event_detail(event_id: str):
         cache_ttl=0,
     )
     runner_rows = runner_rows_df.to_dict("records") if not runner_rows_df.empty else []
+    
+    # Improve results section by combining with competitors JSON for better horse names
+    if runner_rows and event.get("competitors_json"):
+        try:
+            competitors_data = json.loads(event["competitors_json"]) or []
+            if isinstance(competitors_data, list):
+                # Create a mapping from cloth number to horse name
+                cloth_to_name = {}
+                for c in competitors_data:
+                    cloth_num = c.get("details", {}).get("clothNumber")
+                    horse_name = c.get("name")
+                    if cloth_num and horse_name:
+                        cloth_to_name[cloth_num] = horse_name
+                
+                # Update runner_rows with better horse names and deduplicate by cloth number
+                seen_cloth_numbers = set()
+                unique_runner_rows = []
+                
+                for runner in runner_rows:
+                    cloth_num = runner.get("cloth_number")
+                    if cloth_num and cloth_num not in seen_cloth_numbers:
+                        seen_cloth_numbers.add(cloth_num)
+                        if cloth_num in cloth_to_name:
+                            runner["horse_name"] = cloth_to_name[cloth_num]
+                        unique_runner_rows.append(runner)
+                
+                # Replace runner_rows with deduplicated version
+                runner_rows = unique_runner_rows
+        except (json.JSONDecodeError, TypeError):
+            pass  # Keep original data if parsing fails
 
     # Populate 'runners' list for display. Prioritize hr_horse_runs, then competitors_json.
     runners = []
