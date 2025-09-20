@@ -62,15 +62,16 @@ SELECT
 FROM `autobet-470818.autobet.tote_product_selections`
 GROUP BY product_id;
 
--- View for event runner counts (aggregated from products)
+-- View for event runner counts (only actual horses from WIN bets, not combinations)
 CREATE OR REPLACE VIEW `autobet-470818.autobet.vw_event_runner_counts` AS
 SELECT 
-  e.event_id,
-  COALESCE(MAX(pc.n_competitors), 0) AS n_runners
-FROM `autobet-470818.autobet.tote_events` e
-LEFT JOIN `autobet-470818.autobet.tote_products` p ON e.event_id = p.event_id
-LEFT JOIN `autobet-470818.autobet.vw_product_competitor_counts` pc ON p.product_id = pc.product_id
-GROUP BY e.event_id;
+  p.event_id,
+  COUNT(DISTINCT s.selection_id) AS n_runners
+FROM `autobet-470818.autobet.tote_products` p
+JOIN `autobet-470818.autobet.tote_product_selections` s ON p.product_id = s.product_id
+WHERE UPPER(p.bet_type) = 'WIN'
+  AND s.leg_index = 1
+GROUP BY p.event_id;
 
 -- Note: Using existing materialized views instead of creating new ones to avoid conflicts
 -- The existing mv_latest_win_odds and mv_event_filters_* materialized views are already optimized

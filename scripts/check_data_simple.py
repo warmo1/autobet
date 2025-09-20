@@ -30,7 +30,7 @@ def check_data_sources():
         query = """
         SELECT event_id, name, venue, start_iso, status
         FROM `autobet-470818.autobet.tote_events`
-        WHERE start_iso >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+        WHERE TIMESTAMP(start_iso) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
         ORDER BY start_iso DESC
         LIMIT 3
         """

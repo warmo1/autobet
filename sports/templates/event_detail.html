@@ -39,11 +39,7 @@
             <thead><tr><th>#</th><th>Horse</th><th>Probable (dec)</th><th>Updated</th></tr></thead>
             <tbody>
             {% set rows = runners_prob if runners_prob is defined and runners_prob else [] %}
-            {% if not rows and runners %}
-              {% for r in runners %}
-              <tr><td>{{ r.cloth }}</td><td>{{ r.name }}</td><td>—</td><td>—</td></tr>
-              {% endfor %}
-            {% else %}
+            {% if rows %}
               {% for r in rows %}
               <tr>
                 <td>{{ r.cloth_number if r.cloth_number is not none else (r.cloth or '—') }}</td>
@@ -51,6 +47,10 @@
                 <td>{% if r.decimal_odds is not none and r.decimal_odds > 0 %}{{ '%.2f' % r.decimal_odds }}{% else %}—{% endif %}</td>
                 <td>{% if r.odds_iso %}<span class="time-iso" data-iso="{{ r.odds_iso }}">{{ r.odds_iso }}</span>{% else %}—{% endif %}</td>
               </tr>
+              {% endfor %}
+            {% elif runners %}
+              {% for r in runners %}
+              <tr><td>{{ r.cloth }}</td><td>{{ r.name }}</td><td>—</td><td>—</td></tr>
               {% endfor %}
             {% endif %}
             </tbody>
