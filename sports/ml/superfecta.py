@@ -100,8 +100,7 @@ def _prepare_pipeline() -> Pipeline:
             ("imputer", SimpleImputer(strategy="most_frequent")),
             (
                 "onehot",
-                OneHotEncoder(handle_unknown="ignore", sparse_output=False),
-            ),
+                OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
         ]
     )
     preprocessor = ColumnTransformer(
@@ -197,8 +196,7 @@ def _build_prediction_payloads(
         lambda row: row["raw_proba"] / row["group_sum"]
         if row["group_sum"] > 0
         else 1.0 / float(row["group_count"]),
-        axis=1,
-    )
+        axis=1)
     df["rank"] = (
         df.groupby("event_id")["proba"].rank(method="first", ascending=False).astype(int)
     )
@@ -269,8 +267,7 @@ def train_superfecta_model(
     since: Optional[str] = None,
     max_rows: Optional[int] = None,
     predict_horizon_days: int = 2,
-    dry_run: bool = False,
-) -> TrainingResult:
+    dry_run: bool = False) -> TrainingResult:
     training_df = _query_training_frame(sink, since=since, max_rows=max_rows)
     if training_df.empty:
         raise RuntimeError("No training data found in BigQuery")
@@ -341,13 +338,11 @@ def train_superfecta_model(
                     "features_json": "{}",
                 }
             ],
-            model_dataset=model_dataset,
-        )
+            model_dataset=model_dataset)
 
     return TrainingResult(
         metrics=metrics,
         params=params,
         ts_ms=ts_ms,
         predictions_written=written,
-        predicted_events=predicted_events,
-    )
+        predicted_events=predicted_events)

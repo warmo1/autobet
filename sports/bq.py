@@ -74,9 +74,7 @@ class BigQuerySink:
         if job_config is None:
             job_config = self._bq.QueryJobConfig(
                 default_dataset=self._default_dataset,
-                use_query_cache=True,
-                location=self.location,
-            )
+                use_query_cache=True)
         elif getattr(job_config, "default_dataset", None) in (None, ""):
             # Preserve provided config but add default dataset for convenience
             job_config.default_dataset = self._default_dataset
@@ -256,8 +254,7 @@ class BigQuerySink:
                 "total_net": "FLOAT64",
                 "rollover": "FLOAT64",
                 "deduction_rate": "FLOAT64",
-            },
-        )
+            })
         if not temp:
             return
         self._merge(
@@ -276,8 +273,7 @@ class BigQuerySink:
                 "venue=S.venue",
                 "start_iso=S.start_iso",
                 "source=S.source",
-            ]),
-        )
+            ]))
 
     def upsert_tote_product_dividends(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_product_dividends", rows, schema_hint={
@@ -289,8 +285,7 @@ class BigQuerySink:
             "tote_product_dividends",
             temp,
             key_expr="T.product_id=S.product_id AND T.selection=S.selection AND T.ts=S.ts",
-            update_set="dividend=S.dividend",
-        )
+            update_set="dividend=S.dividend")
 
     def upsert_tote_events(self, rows: Iterable[Mapping[str, Any]]):
         # Ensure optional columns exist on the staging side so MERGE can reference them safely
@@ -303,8 +298,7 @@ class BigQuerySink:
                 "home": "STRING",
                 "away": "STRING",
                 "competitors_json": "STRING",
-            },
-        )
+            })
         if not temp:
             return
         # Backfill new columns if dest exists without them
@@ -326,8 +320,7 @@ class BigQuerySink:
                 "away=S.away",
                 "competitors_json=COALESCE(S.competitors_json, T.competitors_json)",
                 "source=S.source",
-            ]),
-        )
+            ]))
 
     def upsert_tote_event_competitors_log(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_event_competitors_log", rows)
@@ -337,8 +330,7 @@ class BigQuerySink:
             "tote_event_competitors_log",
             temp,
             key_expr="T.event_id=S.event_id AND T.ts_ms=S.ts_ms",
-            update_set="competitors_json=S.competitors_json",
-        )
+            update_set="competitors_json=S.competitors_json")
 
     def upsert_raw_tote(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("raw_tote", rows)
@@ -354,8 +346,7 @@ class BigQuerySink:
                 "sport=S.sport",
                 "fetched_ts=S.fetched_ts",
                 "payload=S.payload",
-            ]),
-        )
+            ]))
 
     def upsert_tote_product_selections(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_product_selections", rows, schema_hint={
@@ -377,8 +368,7 @@ class BigQuerySink:
                 "leg_event_name=S.leg_event_name",
                 "leg_venue=S.leg_venue",
                 "leg_start_iso=S.leg_start_iso",
-            ]),
-        )
+            ]))
 
     def upsert_tote_bet_rules(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_bet_rules", rows, schema_hint={
@@ -402,8 +392,7 @@ class BigQuerySink:
                 "min_line=S.min_line",
                 "max_line=S.max_line",
                 "line_increment=S.line_increment",
-            ]),
-        )
+            ]))
 
     def upsert_tote_pool_snapshots(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_pool_snapshots", rows, schema_hint={
@@ -430,8 +419,7 @@ class BigQuerySink:
                 "total_net=S.total_net",
                 "rollover=S.rollover",
                 "deduction_rate=S.deduction_rate",
-            ]),
-        )
+            ]))
 
     def stream_tote_pool_snapshots(self, rows: Iterable[Mapping[str, Any]]):
         """Stream rows into the tote_pool_snapshots table using the BQ Streaming API.
@@ -468,8 +456,7 @@ class BigQuerySink:
             "tote_dividend_updates",
             temp,
             key_expr="T.product_id=S.product_id AND T.ts_ms=S.ts_ms AND T.leg_id=S.leg_id AND T.selection_id=S.selection_id",
-            update_set="dividend_name=S.dividend_name, dividend_type=S.dividend_type, dividend_status=S.dividend_status, dividend_amount=S.dividend_amount, dividend_currency=S.dividend_currency, finishing_position=S.finishing_position",
-        )
+            update_set="dividend_name=S.dividend_name, dividend_type=S.dividend_type, dividend_status=S.dividend_status, dividend_amount=S.dividend_amount, dividend_currency=S.dividend_currency, finishing_position=S.finishing_position")
 
     def upsert_tote_event_results_log(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_event_results_log", rows, schema_hint={
@@ -482,8 +469,7 @@ class BigQuerySink:
             "tote_event_results_log",
             temp,
             key_expr="T.event_id=S.event_id AND T.ts_ms=S.ts_ms AND T.competitor_id=S.competitor_id",
-            update_set="finishing_position=S.finishing_position, status=S.status",
-        )
+            update_set="finishing_position=S.finishing_position, status=S.status")
 
     def upsert_tote_event_status_log(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_event_status_log", rows, schema_hint={"ts_ms": "INT64"})
@@ -493,8 +479,7 @@ class BigQuerySink:
             "tote_event_status_log",
             temp,
             key_expr="T.event_id=S.event_id AND T.ts_ms=S.ts_ms",
-            update_set="status=S.status",
-        )
+            update_set="status=S.status")
         # Also update tote_events.status to latest status from this batch
         client = self._client_obj(); self._ensure_dataset()
         ds = f"{self.project}.{self.dataset}"
@@ -521,8 +506,7 @@ class BigQuerySink:
             "tote_product_status_log",
             temp,
             key_expr="T.product_id=S.product_id AND T.ts_ms=S.ts_ms",
-            update_set="status=S.status",
-        )
+            update_set="status=S.status")
         # Mirror latest product status onto tote_products.status for UI queries
         client = self._client_obj(); self._ensure_dataset()
         ds = f"{self.project}.{self.dataset}"
@@ -549,8 +533,7 @@ class BigQuerySink:
             "tote_selection_status_log",
             temp,
             key_expr="T.product_id=S.product_id AND T.selection_id=S.selection_id AND T.ts_ms=S.ts_ms",
-            update_set="status=S.status",
-        )
+            update_set="status=S.status")
 
     def upsert_tote_event_updated_log(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_event_updated_log", rows, schema_hint={"ts_ms": "INT64"})
@@ -560,8 +543,7 @@ class BigQuerySink:
             "tote_event_updated_log",
             temp,
             key_expr="T.event_id=S.event_id AND T.ts_ms=S.ts_ms",
-            update_set="payload=S.payload",
-        )
+            update_set="payload=S.payload")
 
     def upsert_tote_lines_changed_log(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_lines_changed_log", rows, schema_hint={"ts_ms": "INT64"})
@@ -571,8 +553,7 @@ class BigQuerySink:
             "tote_lines_changed_log",
             temp,
             key_expr="T.product_id=S.product_id AND T.ts_ms=S.ts_ms",
-            update_set="payload=S.payload",
-        )
+            update_set="payload=S.payload")
 
     def upsert_tote_competitor_status_log(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("tote_competitor_status_log", rows, schema_hint={"ts_ms": "INT64"})
@@ -582,8 +563,7 @@ class BigQuerySink:
             "tote_competitor_status_log",
             temp,
             key_expr="T.event_id=S.event_id AND T.competitor_id=S.competitor_id AND T.ts_ms=S.ts_ms",
-            update_set="status=S.status",
-        )
+            update_set="status=S.status")
 
     def upsert_hr_horse_runs(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("hr_horse_runs", rows, schema_hint={
@@ -601,8 +581,7 @@ class BigQuerySink:
                 "status=S.status",
                 "cloth_number=S.cloth_number",
                 "recorded_ts=S.recorded_ts",
-            ]),
-        )
+            ]))
 
     def upsert_hr_horses(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("hr_horses", rows)
@@ -615,8 +594,7 @@ class BigQuerySink:
             update_set=",".join([
                 "name=S.name",
                 "country=S.country",
-            ]),
-        )
+            ]))
 
     def upsert_race_conditions(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("race_conditions", rows, schema_hint={
@@ -643,8 +621,7 @@ class BigQuerySink:
                 "weather_precip_mm=S.weather_precip_mm",
                 "source=S.source",
                 "fetched_ts=S.fetched_ts",
-            ]),
-        )
+            ]))
 
     def upsert_models(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("models", rows, schema_hint={
@@ -663,8 +640,7 @@ class BigQuerySink:
                 "params_json=S.params_json",
                 "metrics_json=S.metrics_json",
                 "path=S.path",
-            ]),
-        )
+            ]))
 
     def upsert_predictions(self, rows: Iterable[Mapping[str, Any]]):
         temp = self._load_to_temp("predictions", rows, schema_hint={
@@ -682,15 +658,13 @@ class BigQuerySink:
                 "market=S.market",
                 "proba=S.proba",
                 "rank=S.rank",
-            ]),
-        )
+            ]))
 
     def load_superfecta_predictions(
         self,
         rows: Iterable[Mapping[str, Any]],
         *,
-        model_dataset: str | None = None,
-    ) -> None:
+        model_dataset: str | None = None) -> None:
         payload = list(rows)
         if not payload:
             return
@@ -739,8 +713,7 @@ class BigQuerySink:
                 "wins_last5=S.wins_last5",
                 "places_last5=S.places_last5",
                 "days_since_last_run=S.days_since_last_run",
-            ]),
-        )
+            ]))
 
     def upsert_raw_tote_probable_odds(self, rows: Iterable[Mapping[str, Any]]):
         """Append/merge raw probable odds payloads.
@@ -754,8 +727,7 @@ class BigQuerySink:
                 "fetched_ts": "INT64",
                 "product_id": "STRING",
                 "raw_id": "STRING",
-            },
-        )
+            })
         if not temp:
             return
         # Ensure required columns exist on destination
@@ -768,8 +740,7 @@ class BigQuerySink:
                 "fetched_ts=S.fetched_ts",
                 "payload=S.payload",
                 "product_id=S.product_id",
-            ]),
-        )
+            ]))
 
     def upsert_ingest_job_runs(self, rows: Iterable[Mapping[str, Any]]):
         """Insert/merge job run records for status dashboard.
@@ -793,8 +764,7 @@ class BigQuerySink:
                 "started_ts": "INT64",
                 "ended_ts": "INT64",
                 "duration_ms": "INT64",
-            },
-        )
+            })
         if not temp:
             return
         # Ensure destination has all expected columns if it already exists
@@ -811,8 +781,7 @@ class BigQuerySink:
                 "payload_json": "STRING",
                 "error": "STRING",
                 "metrics_json": "STRING",
-            },
-        )
+            })
         self._merge(
             "ingest_job_runs",
             temp,
@@ -827,8 +796,7 @@ class BigQuerySink:
                 "payload_json=S.payload_json",
                 "error=S.error",
                 "metrics_json=S.metrics_json",
-            ]),
-        )
+            ]))
 
     def upsert_tote_audit_bets(self, rows: Iterable[Mapping[str, Any]]):
         """Insert/merge audit bet records."""
@@ -838,8 +806,7 @@ class BigQuerySink:
             schema_hint={
                 "ts_ms": "INT64",
                 "stake": "FLOAT64",
-            },
-        )
+            })
         if not temp:
             return
         self._merge(
@@ -856,8 +823,7 @@ class BigQuerySink:
                 "status=S.status",
                 "response_json=S.response_json",
                 "error=S.error",
-            ]),
-        )
+            ]))
 
     def ensure_views(self):
         """Create views required by the web app if missing (idempotent)."""
@@ -1667,8 +1633,7 @@ class BigQuerySink:
             ("model_id", "STRING"),
             ("ts_ms", "INT64"),
             ("default_top_n", "INT64"),
-            ("target_coverage", "FLOAT64"),
-        ):
+            ("target_coverage", "FLOAT64")):
             try:
                 self.query(f"ALTER TABLE `{ds}.tote_params` ADD COLUMN IF NOT EXISTS `{name}` {typ}").result()
             except Exception:
@@ -2654,8 +2619,7 @@ class BigQuerySink:
                     "days_since_last_run": "INT64",
                     "weight_kg": "FLOAT64",
                     "weight_lbs": "FLOAT64",
-                },
-            )
+                })
 
         # vw_superfecta_training_base: historical runners with clean horse_ids for modeling
         sql = f"""

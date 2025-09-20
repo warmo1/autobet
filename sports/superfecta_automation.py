@@ -16,8 +16,7 @@ from .superfecta_planner import (
     SUPERFECTA_RISK_PRESETS,
     compute_superfecta_plan,
     group_superfecta_predictions,
-    safe_float,
-)
+    safe_float)
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -67,8 +66,7 @@ def _load_event_context(db, product_id: str) -> Optional[Dict[str, Any]]:
 def _prepare_plan(
     event: Dict[str, Any],
     preset_key: str,
-    bankroll_override: Optional[float] = None,
-) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    bankroll_override: Optional[float] = None) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     errors: List[str] = []
     preset_key = preset_key if preset_key in SUPERFECTA_RISK_PRESETS else cfg.superfecta_default_preset
     tote_bank = bankroll_override if bankroll_override is not None else cfg.superfecta_default_bankroll
@@ -85,8 +83,7 @@ def _default_run_id(product_id: str, run_date: str) -> str:
 def run_morning_scan(
     *,
     target_date: Optional[str] = None,
-    author: str = "automation",
-) -> Dict[str, Any]:
+    author: str = "automation") -> Dict[str, Any]:
     """Evaluate morning superfecta opportunities and persist recommendations."""
     db = get_db()
     sink = get_bq_sink()
@@ -264,8 +261,7 @@ def run_morning_scan(
 
 def run_live_monitor(
     *,
-    run_date: Optional[str] = None,
-) -> Dict[str, Any]:
+    run_date: Optional[str] = None) -> Dict[str, Any]:
     """Re-evaluate live EV for recommendations and update statuses."""
     db = get_db()
     sink = get_bq_sink()
@@ -414,8 +410,7 @@ def run_live_monitor(
 
 def execute_ready_recommendations(
     *,
-    auto_place: Optional[bool] = None,
-) -> Dict[str, Any]:
+    auto_place: Optional[bool] = None) -> Dict[str, Any]:
     """Place bets for ready recommendations (or perform a dry run)."""
     db = get_db()
     sink = get_bq_sink()
@@ -525,8 +520,7 @@ def execute_ready_recommendations(
             post=True,
             stake_type="total",
             mode="audit",
-            line_amounts=line_amounts,
-        )
+            line_amounts=line_amounts)
         error = resp.get("error") if isinstance(resp, Mapping) else None
         bet_id = resp.get("bet_id") if isinstance(resp, Mapping) else None
         if error:
