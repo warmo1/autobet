@@ -187,6 +187,13 @@ def add_missing_imports(file_path):
 def test_bigquery_connection():
     """Test if BigQuery connection works after fixes."""
     try:
+        # Add the project root to Python path
+        import sys
+        from pathlib import Path
+        project_root = Path(__file__).parent.parent
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        
         from sports.db import get_db
         print("Testing BigQuery connection...")
         db = get_db()
