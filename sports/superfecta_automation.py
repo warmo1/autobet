@@ -53,8 +53,7 @@ def _load_event_context(db, product_id: str) -> Optional[Dict[str, Any]]:
         "WHERE product_id = @pid"
     )
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("pid", "STRING", product_id)],
-        location=cfg.bq_location
+        query_parameters=[bigquery.ScalarQueryParameter("pid", "STRING", product_id)]
     )
     df = db.query_dataframe(sql, job_config=job_config)
     if df.empty:
@@ -105,7 +104,6 @@ def run_morning_scan(
     )
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("run_date", "DATE", run_date)],
-        location=cfg.bq_location
     )
     df = db.query_dataframe(sql, job_config=job_config)
 
@@ -280,7 +278,6 @@ def run_live_monitor(
     )
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("run_date", "DATE", run_date)],
-        location=cfg.bq_location
     )
     df = db.query_dataframe(sql, job_config=job_config)
     if df.empty:

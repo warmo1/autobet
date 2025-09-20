@@ -5,6 +5,7 @@ REPO ?= autobet-services
 # Service names deployed by Terraform / Cloud Run
 SRV_FETCHER ?= ingestion-fetcher
 SRV_ORCH ?= ingestion-orchestrator
+SRV_WEBSOCKET ?= websocket-subscription
 SRV_SUPERFECTA ?= superfecta-trainer
 
 # Image tag defaults to timestamp + git sha for immutability
@@ -12,6 +13,7 @@ TAG ?= $(shell date +%Y%m%d%H%M%S)-$(shell git rev-parse --short HEAD)
 
 IMAGE_FETCHER := $(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_FETCHER):$(TAG)
 IMAGE_ORCH := $(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_ORCH):$(TAG)
+IMAGE_WEBSOCKET := $(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_WEBSOCKET):$(TAG)
 IMAGE_SUPERFECTA := $(REGION)-docker.pkg.dev/$(PROJECT)/$(REPO)/$(SRV_SUPERFECTA):$(TAG)
 
 ML_BQ_PROJECT ?= $(PROJECT)
@@ -60,13 +62,14 @@ build-and-push-gcb:
 	@echo "Building images via Cloud Build (source: parent dir):"
 	@echo "  FETCHER:        $(IMAGE_FETCHER)"
 	@echo "  ORCHESTRATOR:   $(IMAGE_ORCH)"
+	@echo "  WEBSOCKET:      $(IMAGE_WEBSOCKET)"
 	@echo "  SUPERFECTA JOB: $(IMAGE_SUPERFECTA)"
 	# Submit the parent directory so the workspace contains the 'autobet/' folder.
 	# This keeps Dockerfile paths like autobet/sports/Dockerfile.* valid and preserves
 	# the autobet.sports.* import path inside the container.
 	gcloud builds submit .. \
 	  --config sports/cloudbuild.yaml \
-	  --substitutions _IMAGE_FETCHER="$(IMAGE_FETCHER)",_IMAGE_ORCHESTRATOR="$(IMAGE_ORCH)",_IMAGE_SUPERFECTA="$(IMAGE_SUPERFECTA)" \
+	  --substitutions _IMAGE_FETCHER="$(IMAGE_FETCHER)",_IMAGE_ORCHESTRATOR="$(IMAGE_ORCH)",_IMAGE_WEBSOCKET="$(IMAGE_WEBSOCKET)",_IMAGE_SUPERFECTA="$(IMAGE_SUPERFECTA)" \
 	  --project "$(PROJECT)"
 	@echo "$(TAG)" > .last_tag
 	@echo "Saved tag to .last_tag: $(TAG)"

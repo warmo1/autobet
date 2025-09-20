@@ -6,7 +6,7 @@ import pickle
 import hashlib
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
-from flask import Flask, render_template, request, redirect, flash, url_for, send_file, Response
+from flask import Flask, render_template, request, redirect, flash, url_for, send_file, Response, jsonify
 from sports.config import cfg
 from sports.db import get_db, init_db
 from pathlib import Path
@@ -283,6 +283,7 @@ def _sql_is_readonly(sql: str) -> bool:
         return False
 
 from sports.realtime import bus as event_bus
+from sports.pubsub_consumer import start_pubsub_consumer, stop_pubsub_consumer, is_consumer_running
 
 
 def _clean_float(value: Any, default: float = 0.0) -> float:
@@ -434,6 +435,39 @@ def stream():
             event_bus.unsubscribe(sub)
     
     return Response(event_generator(), mimetype='text/event-stream')
+
+
+@app.route('/pubsub/start', methods=['POST'])
+def start_pubsub():
+    """Start Pub/Sub consumer for real-time events"""
+    try:
+        if is_consumer_running():
+            return jsonify({"status": "already_running", "message": "Pub/Sub consumer already running"}), 200
+        
+        start_pubsub_consumer()
+        return jsonify({"status": "started", "message": "Pub/Sub consumer started"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to start consumer: {str(e)}"}), 500
+
+@app.route('/pubsub/stop', methods=['POST'])
+def stop_pubsub():
+    """Stop Pub/Sub consumer"""
+    try:
+        if not is_consumer_running():
+            return jsonify({"status": "not_running", "message": "Pub/Sub consumer not running"}), 200
+        
+        stop_pubsub_consumer()
+        return jsonify({"status": "stopped", "message": "Pub/Sub consumer stopped"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to stop consumer: {str(e)}"}), 500
+
+@app.route('/pubsub/status')
+def pubsub_status():
+    """Get Pub/Sub consumer status"""
+    return jsonify({
+        "consumer_running": is_consumer_running(),
+        "timestamp": time.time()
+    }), 200
 
 
 @app.route("/dashboard")

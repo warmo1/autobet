@@ -42,7 +42,6 @@ async def daily_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         job_config = bigquery.QueryJobConfig(
         default_dataset=f"{cfg.bq_project}.{cfg.bq_dataset}",
-        location=cfg.bq_location
     )
         suggestion_df = db.query(query, job_config=job_config).to_dataframe()
     except Exception as e:

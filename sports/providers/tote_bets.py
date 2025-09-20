@@ -69,7 +69,6 @@ def _bq_query_rows(sink, sql: str, params: Dict[str, Any] | None = None) -> list
                 qp.append(bigquery.ScalarQueryParameter(k, "STRING", None if v is None else str(v)))
     job_cfg = bigquery.QueryJobConfig(
         query_parameters=qp,
-        location=cfg.bq_location
     )
     rs = sink.query(sql, job_config=job_cfg)
     try:
@@ -459,7 +458,6 @@ def place_audit_simple_bet(
             job_config=bigquery.QueryJobConfig(
         query_parameters=[
                 bigquery.ScalarQueryParameter("pid", "STRING", product_id,
-        location=cfg.bq_location
     ),
             ])
         ).to_dataframe()
@@ -477,7 +475,6 @@ def place_audit_simple_bet(
                 job_config=bigquery.QueryJobConfig(
         query_parameters=[
                     bigquery.ScalarQueryParameter("pid", "STRING", product_id,
-        location=cfg.bq_location
     ),
                     bigquery.ScalarQueryParameter("sid", "STRING", selection_id),
                 ])
@@ -1340,7 +1337,6 @@ def refresh_bet_status(sink, *, bet_id: str, post: bool = False) -> Dict[str, An
                 job_cfg = bigquery.QueryJobConfig(
         query_parameters=[
                     bigquery.ScalarQueryParameter("st", "STRING", st,
-        location=cfg.bq_location
     ),
                     bigquery.ScalarQueryParameter("bid", "STRING", bet_id),
                 ])
@@ -1393,7 +1389,6 @@ def sync_bets_from_api(sink, api_data: Dict[str, Any]) -> int:
             job_cfg = bigquery.QueryJobConfig(
         query_parameters=[
                 bigquery.ScalarQueryParameter("tid", "STRING", bet_tid,
-        location=cfg.bq_location
     ),
                 bigquery.ScalarQueryParameter("st", "STRING", status),
             ])

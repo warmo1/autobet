@@ -27,6 +27,12 @@ variable "service_name_orchestrator" {
   default     = "ingestion-orchestrator"
 }
 
+variable "service_name_websocket" {
+  description = "Name for the WebSocket subscription Cloud Run service."
+  type        = string
+  default     = "websocket-subscription"
+}
+
 variable "bq_dataset" {
   description = "BigQuery dataset name for the app."
   type        = string

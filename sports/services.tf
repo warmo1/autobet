@@ -10,6 +10,12 @@ resource "google_service_account" "orchestrator_sa" {
   display_name = "Service Account for Ingestion Orchestrator"
 }
 
+# Service Account for the WebSocket service
+resource "google_service_account" "websocket_sa" {
+  account_id   = var.service_name_websocket
+  display_name = "Service Account for WebSocket Subscription Service"
+}
+
 # IAM bindings for service accounts
 resource "google_project_iam_member" "fetcher_bq_user" {
   project = var.project_id
@@ -41,6 +47,23 @@ resource "google_project_iam_member" "orchestrator_pubsub_publisher" {
   project = var.project_id
   role    = "roles/pubsub.publisher"
   member  = "serviceAccount:${google_service_account.orchestrator_sa.email}"
+}
+
+# IAM bindings for WebSocket service account
+resource "google_project_iam_member" "websocket_bq_user" {
+  project = var.project_id
+  role    = "roles/bigquery.user"
+  member  = "serviceAccount:${google_service_account.websocket_sa.email}"
+}
+resource "google_project_iam_member" "websocket_bq_editor" {
+  project = var.project_id
+  role    = "roles/bigquery.dataEditor"
+  member  = "serviceAccount:${google_service_account.websocket_sa.email}"
+}
+resource "google_project_iam_member" "websocket_pubsub_publisher" {
+  project = var.project_id
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${google_service_account.websocket_sa.email}"
 }
 
 # Cloud Run Service: ingestion-fetcher

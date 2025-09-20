@@ -289,6 +289,47 @@ resource "google_cloud_scheduler_job" "bq_tmp_cleanup" {
   }
 }
 
+# WebSocket service management jobs
+resource "google_cloud_scheduler_job" "websocket_start" {
+  name             = "websocket-start"
+  description      = "Start WebSocket subscription service during peak hours"
+  schedule         = "0 6 * * *" # Every day at 06:00 UK time
+  time_zone        = "Europe/London"
+  attempt_deadline = "60s"
+
+  http_target {
+    uri         = "${google_cloud_run_v2_service.websocket_service.uri}/start"
+    http_method = "POST"
+    headers = {
+      "Content-Type" = "application/json"
+    }
+    body = base64encode("{}")
+    oidc_token {
+      service_account_email = google_service_account.scheduler_sa.email
+    }
+  }
+}
+
+resource "google_cloud_scheduler_job" "websocket_stop" {
+  name             = "websocket-stop"
+  description      = "Stop WebSocket subscription service after peak hours"
+  schedule         = "0 23 * * *" # Every day at 23:00 UK time
+  time_zone        = "Europe/London"
+  attempt_deadline = "60s"
+
+  http_target {
+    uri         = "${google_cloud_run_v2_service.websocket_service.uri}/stop"
+    http_method = "POST"
+    headers = {
+      "Content-Type" = "application/json"
+    }
+    body = base64encode("{}")
+    oidc_token {
+      service_account_email = google_service_account.scheduler_sa.email
+    }
+  }
+}
+
 # Hourly aggressive cleanup during peak hours to prevent accumulation
 resource "google_cloud_scheduler_job" "bq_tmp_cleanup_aggressive" {
   name             = "bq-tmp-cleanup-aggressive"
