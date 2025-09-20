@@ -1,0 +1,26 @@
+# Dockerfile for the orchestrator service (orchestrator-service)
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Copy requirements from parent directory
+COPY ../requirements.txt ./requirements.txt
+
+# Suppress pip warnings and upgrade pip
+ENV PIP_ROOT_USER_ACTION=ignore \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir -r requirements.txt
+
+# Copy the sports module
+COPY . ./sports/
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Set Flask app
+ENV FLASK_APP=sports.gcp_orchestrator:app
+
+# Use gunicorn for production with increased timeout for BigQuery jobs
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "8", "--timeout", "0", "sports.gcp_orchestrator:app"]

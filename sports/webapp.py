@@ -480,7 +480,13 @@ def api_status_websocket():
         # Try to get health status
         try:
             response = requests.get(f"{websocket_url}/health", timeout=5)
-            service_status = "running" if response.status_code == 200 else "stopped"
+            if response.status_code == 200:
+                service_status = "running"
+            elif response.status_code == 403:
+                # Service is running but requires authentication
+                service_status = "running"
+            else:
+                service_status = "stopped"
         except:
             service_status = "unknown"
         
