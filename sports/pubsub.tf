@@ -1,7 +1,7 @@
-# Pub/Sub topic for ingestion jobs (already exists)
-# resource "google_pubsub_topic" "ingest_jobs_topic" {
-#   name = "ingest-jobs"
-# }
+# Pub/Sub topic for ingestion jobs
+resource "google_pubsub_topic" "ingest_jobs_topic" {
+  name = "ingest-jobs"
+}
 
 # Real-time WebSocket event topics
 resource "google_pubsub_topic" "tote_pool_total_changed" {

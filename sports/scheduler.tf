@@ -25,11 +25,11 @@ resource "google_cloud_run_v2_service_iam_binding" "fetcher_invoker" {
 }
 
 # Service account for Cloud Scheduler jobs
-# Service Account for Cloud Scheduler (already exists)
-# resource "google_service_account" "scheduler_sa" {
-#   account_id   = "autobet-scheduler"
-#   display_name = "Service Account for Autobet Cloud Scheduler"
-# }
+# Service Account for Cloud Scheduler
+resource "google_service_account" "scheduler_sa" {
+  account_id   = "autobet-scheduler"
+  display_name = "Service Account for Autobet Cloud Scheduler"
+}
 
 # Data source to get the project number
 data "google_project" "project" {}

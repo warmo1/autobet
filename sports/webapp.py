@@ -7,6 +7,7 @@ import hashlib
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
 from flask import Flask, render_template, request, redirect, flash, url_for, send_file, Response, jsonify
+import requests
 from sports.config import cfg
 from sports.db import get_db, init_db
 from pathlib import Path
@@ -468,6 +469,36 @@ def pubsub_status():
         "consumer_running": is_consumer_running(),
         "timestamp": time.time()
     }), 200
+
+@app.route('/api/status/websocket')
+def api_status_websocket():
+    """Get WebSocket service status"""
+    try:
+        # Check if WebSocket service is running
+        websocket_url = "https://websocket-subscription-539619253741.europe-west2.run.app"
+        
+        # Try to get health status
+        try:
+            response = requests.get(f"{websocket_url}/health", timeout=5)
+            service_status = "running" if response.status_code == 200 else "stopped"
+        except:
+            service_status = "unknown"
+        
+        return jsonify({
+            "service": {
+                "status": service_status,
+                "url": websocket_url
+            },
+            "consumer_running": is_consumer_running(),
+            "timestamp": time.time()
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "service": {"status": "unknown", "url": "N/A"},
+            "consumer_running": False,
+            "timestamp": time.time()
+        }), 500
 
 
 @app.route("/dashboard")

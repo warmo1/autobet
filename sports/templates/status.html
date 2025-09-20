@@ -40,6 +40,17 @@
 
   <div class="card mb-4">
     <div class="card-header">
+      <h5>WebSocket Service Status</h5>
+    </div>
+    <div class="card-body">
+      <div id="websocket-status-container">
+        <div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header">
       <h5>GCP Infrastructure Status</h5>
     </div>
     <div class="card-body">
@@ -172,6 +183,38 @@ document.addEventListener('DOMContentLoaded', function() {
         <div class="stat-card text-center p-3 border rounded">
           <h6 class="text-muted">GB SF Missing Snapshots</h6>
           <p class="fs-4 fw-bold mb-0">${safeText(data.gb_sf_missing_snapshots)}</p>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderWebSocket(container, data) {
+    const service = data.service || {};
+    const status = service.status || 'unknown';
+    const statusClass = status === 'running' ? 'bg-success' : status === 'stopped' ? 'bg-warning' : 'bg-danger';
+    const statusText = status === 'running' ? 'Running' : status === 'stopped' ? 'Stopped' : 'Unknown';
+    
+    container.innerHTML = `
+      <div class="row">
+        <div class="col-md-6">
+          <div class="d-flex align-items-center">
+            <span class="badge ${statusClass} me-2">${statusText}</span>
+            <span class="fw-semibold">WebSocket Service</span>
+          </div>
+          <div class="small text-muted mt-1">
+            URL: <a href="${service.url || '#'}" target="_blank" rel="noopener">${service.url || 'N/A'}</a>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="d-flex align-items-center">
+            <span class="badge ${data.consumer_running ? 'bg-success' : 'bg-danger'} me-2">
+              ${data.consumer_running ? 'Active' : 'Inactive'}
+            </span>
+            <span class="fw-semibold">Pub/Sub Consumer</span>
+          </div>
+          <div class="small text-muted mt-1">
+            Last updated: ${formatLocalTime(data.timestamp)}
+          </div>
         </div>
       </div>
     `;
@@ -383,6 +426,7 @@ document.addEventListener('DOMContentLoaded', function() {
     return Promise.all([
       fetchData('/api/status/data_freshness', 'data-freshness-container', renderFreshness),
       fetchData('/api/status/qc', 'data-quality-container', renderQuality),
+      fetchData('/api/status/websocket', 'websocket-status-container', renderWebSocket),
       fetchData('/api/status/gcp', 'gcp-status-container', renderGcp),
       fetchData('/api/status/upcoming', 'upcoming-races-container', renderUpcoming),
       fetchData('/api/status/job_log', 'job-log-container', renderJobs),

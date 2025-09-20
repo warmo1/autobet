@@ -1,14 +1,14 @@
-# Service Account for the fetcher service (already exists)
-# resource "google_service_account" "fetcher_sa" {
-#   account_id   = var.service_name_fetcher
-#   display_name = "Service Account for Ingestion Fetcher"
-# }
+# Service Account for the fetcher service
+resource "google_service_account" "fetcher_sa" {
+  account_id   = var.service_name_fetcher
+  display_name = "Service Account for Ingestion Fetcher"
+}
 
-# Service Account for the orchestrator service (already exists)
-# resource "google_service_account" "orchestrator_sa" {
-#   account_id   = var.service_name_orchestrator
-#   display_name = "Service Account for Ingestion Orchestrator"
-# }
+# Service Account for the orchestrator service
+resource "google_service_account" "orchestrator_sa" {
+  account_id   = var.service_name_orchestrator
+  display_name = "Service Account for Ingestion Orchestrator"
+}
 
 # Service Account for the WebSocket service
 resource "google_service_account" "websocket_sa" {
