@@ -63,7 +63,7 @@ def _query_training_frame(
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY event_date DESC" + limit_clause
     job_config = (
-        sink._bq.QueryJobConfig(query_parameters=params, location=sink.location)  # type: ignore[attr-defined]
+        sink._bq.QueryJobConfig(query_parameters=params)  # type: ignore[attr-defined]
         if params
         else None
     )
@@ -84,7 +84,7 @@ def _query_prediction_frame(
     WHERE event_date BETWEEN CURRENT_DATE() AND DATE_ADD(CURRENT_DATE(), INTERVAL @horizon_days DAY)
       AND UPPER(COALESCE(status, '')) IN ('OPEN', 'UNKNOWN')
     """
-    job_config = sink._bq.QueryJobConfig(query_parameters=params, location=sink.location)  # type: ignore[attr-defined]
+    job_config = sink._bq.QueryJobConfig(query_parameters=params)  # type: ignore[attr-defined]
     return sink.query_dataframe(sql, job_config=job_config)
 
 
