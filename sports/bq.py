@@ -127,7 +127,7 @@ class BigQuerySink:
             safe_name = name.replace('`','')
             alters.append(f"ADD COLUMN IF NOT EXISTS `{safe_name}` {typ}")
         sql = f"ALTER TABLE `{dest_fq}`\n" + ",\n".join(alters)
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
     def set_active_model(self, model_id: str, ts_ms: int) -> None:
@@ -138,7 +138,8 @@ class BigQuerySink:
             query_parameters=[
                 self._bq.ScalarQueryParameter("model_id", "STRING", model_id),
                 self._bq.ScalarQueryParameter("ts_ms", "INT64", int(ts_ms)),
-            ]
+            ],
+            location=self.location
         )
         sql = f"""
         UPDATE `{self.project}.{self.dataset}.tote_params`
@@ -214,7 +215,7 @@ class BigQuerySink:
         dest_fq = f"{self.project}.{self.dataset}.{dest}"
         # Ensure destination table exists first with temp schema (no rows)
         sql_ctas = f"CREATE TABLE IF NOT EXISTS `{dest_fq}` AS SELECT * FROM `{temp}` WHERE 1=0;"
-        client.query(sql_ctas).result()
+        self.query(sql_ctas).result()
 
         # Fetch schemas to build robust INSERT column list
         dest_tbl = client.get_table(dest_fq)
@@ -237,7 +238,7 @@ class BigQuerySink:
         WHEN MATCHED THEN UPDATE SET {update_set}
         WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})
         """
-        client.query(sql_merge).result()
+        self.query(sql_merge).result()
         # Best-effort cleanup of staging table
         try:
             client.delete_table(temp, not_found_ok=True)
@@ -508,7 +509,7 @@ class BigQuerySink:
         WHEN MATCHED THEN UPDATE SET status = S.status
         """
         try:
-            client.query(sql).result()
+            self.query(sql).result()
         except Exception:
             pass
 
@@ -536,7 +537,7 @@ class BigQuerySink:
         WHEN MATCHED THEN UPDATE SET status = S.status
         """
         try:
-            client.query(sql).result()
+            self.query(sql).result()
         except Exception:
             pass
 
@@ -946,7 +947,7 @@ class BigQuerySink:
           error STRING
         );
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # vw_products_latest_totals: tote_products with the latest snapshot metrics/status overlays
         sql = f"""
@@ -983,7 +984,7 @@ class BigQuerySink:
         LEFT JOIN latest l USING(product_id)
         LEFT JOIN pstat USING(product_id);
         """
-        client.query(sql).result()
+        self.query(sql).result()
         # vw_horse_runs_by_name
         sql = f"""
         CREATE VIEW IF NOT EXISTS `{ds}.vw_horse_runs_by_name` AS
@@ -1011,7 +1012,7 @@ class BigQuerySink:
         LEFT JOIN `{ds}.tote_events` te ON te.event_id = r.event_id
         LEFT JOIN ep ON ep.event_id = r.event_id;
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # Viability calculator table functions (simple + grid)
@@ -1116,7 +1117,7 @@ class BigQuerySink:
           FROM alpha_min
         );
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # Combination-based viability (e.g., SWINGER/QUINELLA with k=2)
         sql = f"""
@@ -1219,7 +1220,7 @@ class BigQuerySink:
           FROM alpha_min
         );
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         sql = f"""
         CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_multileg_viability_simple`(
@@ -1284,7 +1285,7 @@ class BigQuerySink:
           FROM fshare
         );
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # Multi‑leg coverage grid (vary coverage in steps)
         sql = f"""
@@ -1343,7 +1344,7 @@ class BigQuerySink:
           FROM p_rows
         );
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # Generic permutation-based viability (supports WIN/EXACTA/TRIFECTA/SUPERFECTA via k)
         sql = f"""
@@ -1446,7 +1447,7 @@ class BigQuerySink:
           FROM alpha_min
         );
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         sql = f"""
         CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_perm_viability_grid`(
@@ -1507,7 +1508,7 @@ class BigQuerySink:
           FROM p_rows
         );
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         sql = f"""
         CREATE OR REPLACE TABLE FUNCTION `{ds}.tf_superfecta_viability_grid`(
@@ -1572,7 +1573,7 @@ class BigQuerySink:
           FROM calc
         );
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         
 
@@ -1598,7 +1599,7 @@ class BigQuerySink:
         LEFT JOIN `{ds}.tote_product_selections` s ON s.product_id = p.product_id
         GROUP BY p.product_id, p.event_id, bet_type, status, p.currency, p.start_iso, event_name, venue, event_present, missing_event, missing_start_iso;
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # vw_products_coverage_issues: only products with missing data
@@ -1608,7 +1609,7 @@ class BigQuerySink:
         FROM `{ds}.vw_products_coverage`
         WHERE no_selections OR missing_event OR missing_start_iso;
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # vw_today_gb_events: today's GB events with competitor count
@@ -1625,7 +1626,7 @@ class BigQuerySink:
         FROM `{ds}.tote_events` e
         WHERE e.country = 'GB' AND DATE(SUBSTR(e.start_iso,1,10)) = CURRENT_DATE();
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # vw_today_gb_superfecta: today's GB superfecta products with pool totals and competitor count
@@ -1647,7 +1648,7 @@ class BigQuerySink:
         LEFT JOIN `{ds}.tote_events` te USING(event_id)
         WHERE UPPER(p.bet_type) = 'SUPERFECTA' AND te.country = 'GB' AND DATE(SUBSTR(p.start_iso,1,10)) = CURRENT_DATE();
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # Ensure a tote_params table exists and has at least one row for defaults
@@ -1660,7 +1661,7 @@ class BigQuerySink:
           updated_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
         # Add optional tuning columns if missing (idempotent)
         for name, typ in (
             ("model_id", "STRING"),
@@ -1669,7 +1670,7 @@ class BigQuerySink:
             ("target_coverage", "FLOAT64"),
         ):
             try:
-                client.query(f"ALTER TABLE `{ds}.tote_params` ADD COLUMN IF NOT EXISTS `{name}` {typ}").result()
+                self.query(f"ALTER TABLE `{ds}.tote_params` ADD COLUMN IF NOT EXISTS `{name}` {typ}").result()
             except Exception:
                 pass
         # Insert default params if table is empty
@@ -1679,7 +1680,7 @@ class BigQuerySink:
         FROM (SELECT 1) 
         WHERE (SELECT COUNT(1) FROM `{ds}.tote_params`) = 0;
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # Runner strength view (predictions-based): latest row per runner/product from model dataset
         model_dataset = os.getenv("BQ_MODEL_DATASET", f"{self.dataset}_model")
@@ -1704,7 +1705,7 @@ class BigQuerySink:
         )
         WHERE rn = 1;
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # Table function: enumerate & score permutations (Plackett–Luce style)
         sql = f"""
@@ -1746,7 +1747,7 @@ class BigQuerySink:
           JOIN tot t ON t.product_id = tr1.product_id
         );
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # Table function: coverage curve and efficiency
         sql = f"""
@@ -1789,7 +1790,7 @@ class BigQuerySink:
           FROM ordered
         );
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # Table function: breakeven metrics for any coverage point
         sql = f"""
@@ -1827,7 +1828,7 @@ class BigQuerySink:
           FROM cov
         );
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # vw_today_gb_superfecta_latest: latest pool snapshot per product (GB only)
         sql = f"""
@@ -1845,7 +1846,7 @@ class BigQuerySink:
         WHERE e.country = 'GB' AND DATE(SUBSTR(p.start_iso,1,10)) = CURRENT_DATE()
           AND UPPER(p.bet_type)='SUPERFECTA';
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # vw_today_gb_superfecta_be: add breakeven metrics using latest snapshots and tote_params (latest row)
         sql = f"""
@@ -1903,7 +1904,7 @@ class BigQuerySink:
         ) s ON s.product_id = v.product_id
         CROSS JOIN params prm;
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # vw_gb_open_superfecta_next60: GB Superfecta products starting in next 60 minutes
@@ -1929,7 +1930,7 @@ class BigQuerySink:
           AND p.status='OPEN'
           AND TIMESTAMP(p.start_iso) BETWEEN CURRENT_TIMESTAMP() AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 60 MINUTE);
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # vw_gb_open_superfecta_next60_be: with breakeven using latest snapshots and tote_params
         sql = f"""
@@ -1962,7 +1963,7 @@ class BigQuerySink:
         CROSS JOIN params prm
         LEFT JOIN latest l USING(product_id);
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # vw_superfecta_products: convenient filter of products table
         sql = f"""
@@ -1982,7 +1983,7 @@ class BigQuerySink:
         LEFT JOIN `{ds}.tote_events` te USING(event_id)
         WHERE UPPER(p.bet_type) = 'SUPERFECTA';
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # --- QC Views ---
@@ -1995,7 +1996,7 @@ class BigQuerySink:
         WHERE DATE(SUBSTR(p.start_iso,1,10)) = CURRENT_DATE()
           AND s.number IS NULL;
         """
-        client.query(sql).result()
+        self.query(sql).result()
 
         # QC: products missing bet rules (min/max/increment)
         sql = f"""
@@ -2006,7 +2007,7 @@ class BigQuerySink:
         WHERE r.product_id IS NULL
            OR (r.min_line IS NULL AND r.line_increment IS NULL AND r.min_bet IS NULL);
         """
-        client.query(sql).result()
+        self.query(sql).result()
 
         # QC: probable odds coverage by product (share of selections with odds)
         sql = f"""
@@ -2026,7 +2027,7 @@ class BigQuerySink:
         LEFT JOIN sel s USING(product_id)
         LEFT JOIN odded o USING(product_id);
         """
-        client.query(sql).result()
+        self.query(sql).result()
 
         # QC: today's GB Superfecta products with no pool snapshots yet
         sql = f"""
@@ -2038,7 +2039,7 @@ class BigQuerySink:
         ) s USING(product_id)
         WHERE s.product_id IS NULL;
         """
-        client.query(sql).result()
+        self.query(sql).result()
 
         # vw_superfecta_dividends_latest: latest dividend per selection for each product
         sql = f"""
@@ -2051,7 +2052,7 @@ class BigQuerySink:
         FROM `{ds}.tote_product_dividends`
         GROUP BY product_id, selection;
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # vw_tote_probable_odds: robust parse of latest probable odds per selection from raw payloads
@@ -2089,7 +2090,7 @@ class BigQuerySink:
         LEFT JOIN `{ds}.tote_product_selections` s
           ON s.selection_id = l.selection_id AND s.product_id = l.product_id;
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # vw_tote_probable_history: parsed stream of probable odds with timestamps (robust legs parsing)
@@ -2117,13 +2118,13 @@ class BigQuerySink:
         LEFT JOIN `{ds}.tote_product_selections` s ON s.selection_id = e.selection_id AND s.product_id = e.product_id
         WHERE e.selection_id IS NOT NULL AND e.decimal_odds IS NOT NULL;
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # vw_sf_strengths_from_win_horse: derive fallback runner strengths from WIN probable odds
         # Drop the legacy view so we can install a materialized view under the same name.
         try:
-            client.query(f"DROP VIEW IF EXISTS `{ds}.vw_sf_strengths_from_win_horse`").result()
+            self.query(f"DROP VIEW IF EXISTS `{ds}.vw_sf_strengths_from_win_horse`").result()
         except Exception:
             pass
 
@@ -2223,13 +2224,13 @@ class BigQuerySink:
         JOIN sums s USING(product_id)
         WHERE SAFE_DIVIDE(w.weight, NULLIF(s.total_weight, 0)) IS NOT NULL;
         """
-        client.query(sql).result()
+        self.query(sql).result()
 
         sql = f"""
         CREATE OR REPLACE VIEW `{ds}.vw_sf_strengths_from_win_horse` AS
         SELECT * FROM `{ds}.mv_sf_strengths_from_win_horse`;
         """
-        client.query(sql).result()
+        self.query(sql).result()
 
         # vw_superfecta_runner_strength_any: prefer model strengths, fall back to WIN odds-derived weights
         sql = f"""
@@ -2253,7 +2254,7 @@ class BigQuerySink:
         LEFT JOIN pred_products pp USING(product_id)
         WHERE pp.product_id IS NULL;
         """
-        client.query(sql).result()
+        self.query(sql).result()
 
         # Table function: enumerate permutations using any available strengths (model or WIN odds fallback)
         sql = f"""
@@ -2297,7 +2298,7 @@ class BigQuerySink:
           JOIN tot t ON t.product_id = tr1.product_id
         );
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # Table function: legacy alias returning the same permutations as tf_superfecta_perms_any
@@ -2315,7 +2316,7 @@ class BigQuerySink:
           SELECT * FROM `{ds}.tf_superfecta_perms_any`(in_product_id, top_n)
         );
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # Table function: Superfecta backtest using model or fallback strengths
@@ -2431,7 +2432,7 @@ class BigQuerySink:
           LEFT JOIN hits h ON h.product_id = p.product_id AND h.event_id = p.event_id
         );
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # Table function: Expected Value grid over coverage using permutations and guardrail params
@@ -2522,7 +2523,7 @@ class BigQuerySink:
           FROM agg
         );
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # vw_runner_features: join runner features with horse name (useful for UI/ML)
@@ -2548,7 +2549,7 @@ class BigQuerySink:
             FROM `{ds}.features_runner_event` f
             LEFT JOIN `{ds}.hr_horses` h ON h.horse_id = f.horse_id;
             """
-            job = client.query(sql)
+            job = self.query(sql)
             job.result()
 
             sql = f"""
@@ -2579,7 +2580,7 @@ class BigQuerySink:
             LEFT JOIN `{ds}.features_runner_event` f
               ON tr.event_id = f.event_id AND tr.horse_id = f.horse_id;
             """
-            job = client.query(sql)
+            job = self.query(sql)
             job.result()
 
         sql = f"""
@@ -2594,7 +2595,7 @@ class BigQuerySink:
           ORDER BY ts_ms DESC
         ) = 1;
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         sql = f"""
         CREATE OR REPLACE VIEW `{ds}.vw_superfecta_runner_live_features` AS
@@ -2639,7 +2640,7 @@ class BigQuerySink:
         WHERE UPPER(p.bet_type) = 'SUPERFECTA'
           AND (ss.status IS NULL OR ss.status NOT IN ('NON_RUNNER','NR','WITHDRAWN','SCRATCHED','RESERVE','NONRUNNER'));
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # Ensure features table carries optional columns referenced by ML views
         if self._table_exists("features_runner_event"):
@@ -2682,7 +2683,7 @@ class BigQuerySink:
           AND r.finish_pos IS NOT NULL
           AND r.horse_id IS NOT NULL;
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # Latest model probabilities enriched with product context
@@ -2754,14 +2755,14 @@ class BigQuerySink:
         WHERE r.rn = 1
           AND (ss.status IS NULL OR ss.status NOT IN ('NON_RUNNER','NR','WITHDRAWN','SCRATCHED','RESERVE','NONRUNNER'));
         """
-        job = client.query(sql); job.result()
+        job = self.query(sql); job.result()
 
         # Maintain backward-compatible name for downstream consumers
         sql = f"""
         CREATE OR REPLACE VIEW `{ds}.vw_superfecta_training` AS
         SELECT * FROM `{ds}.vw_superfecta_training_base`;
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # vw_superfecta_runner_training_features: labeled runners joined with feature table
@@ -2793,7 +2794,7 @@ class BigQuerySink:
         LEFT JOIN `{ds}.features_runner_event` feat
           ON base.event_id = feat.event_id AND base.horse_id = feat.horse_id;
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
         # vw_superfecta_runner_live_features: live products enriched with runner features
@@ -2829,7 +2830,7 @@ class BigQuerySink:
         LEFT JOIN `{ds}.tote_events` te ON te.event_id = p.event_id
         WHERE UPPER(p.bet_type) = 'SUPERFECTA';
         """
-        job = client.query(sql)
+        job = self.query(sql)
         job.result()
 
     def cleanup_temp_tables(self, prefix: str = "_tmp_", older_than_days: int | None = None) -> int:

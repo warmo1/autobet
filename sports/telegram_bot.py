@@ -40,7 +40,10 @@ async def daily_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # and then convert the result to a DataFrame.
     # Assuming 'suggestions' and 'events' tables exist in BigQuery.
     try:
-        job_config = bigquery.QueryJobConfig(default_dataset=f"{cfg.bq_project}.{cfg.bq_dataset}")
+        job_config = bigquery.QueryJobConfig(
+        default_dataset=f"{cfg.bq_project}.{cfg.bq_dataset}",
+        location=cfg.bq_location
+    )
         suggestion_df = db.query(query, job_config=job_config).to_dataframe()
     except Exception as e:
         print(f"[Telegram Error] Failed to fetch suggestion from BigQuery: {e}")

@@ -121,8 +121,10 @@ def check_database_pool_data(product_id: str) -> Dict[str, Any]:
     try:
         from google.cloud import bigquery
         job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("product_id", "STRING", product_id)
+        query_parameters=[
+                bigquery.ScalarQueryParameter("product_id", "STRING", product_id,
+        location=cfg.bq_location
+    )
             ]
         )
         rows = list(db.query(query, job_config=job_config))
@@ -167,8 +169,10 @@ def check_product_data(product_id: str) -> Dict[str, Any]:
     try:
         from google.cloud import bigquery
         job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("product_id", "STRING", product_id)
+        query_parameters=[
+                bigquery.ScalarQueryParameter("product_id", "STRING", product_id,
+        location=cfg.bq_location
+    )
             ]
         )
         rows = list(db.query(query, job_config=job_config))

@@ -131,7 +131,10 @@ def make_query_config(params: Mapping[str, object] | None) -> bigquery.QueryJobC
             query_parameters.append(bigquery.ScalarQueryParameter(name, "DATE", value))
         else:
             query_parameters.append(bigquery.ScalarQueryParameter(name, "STRING", str(value)))
-    return bigquery.QueryJobConfig(query_parameters=query_parameters)
+    return bigquery.QueryJobConfig(
+        query_parameters=query_parameters,
+        location=cfg.bq_location
+    )
 
 
 def fetch_dataframe(

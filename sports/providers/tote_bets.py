@@ -67,7 +67,10 @@ def _bq_query_rows(sink, sql: str, params: Dict[str, Any] | None = None) -> list
                 qp.append(bigquery.ScalarQueryParameter(k, "FLOAT64", v))
             else:
                 qp.append(bigquery.ScalarQueryParameter(k, "STRING", None if v is None else str(v)))
-    job_cfg = bigquery.QueryJobConfig(query_parameters=qp)
+    job_cfg = bigquery.QueryJobConfig(
+        query_parameters=qp,
+        location=cfg.bq_location
+    )
     rs = sink.query(sql, job_config=job_cfg)
     try:
         df = rs.to_dataframe(create_bqstorage_client=False)
@@ -453,8 +456,11 @@ def place_audit_simple_bet(
         # Prefer product_leg_id by product+leg, independent of selection (more robust)
         pli_df = sink.query(
             "SELECT product_leg_id FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=@pid AND leg_index=1 LIMIT 1",
-            job_config=bigquery.QueryJobConfig(query_parameters=[
-                bigquery.ScalarQueryParameter("pid", "STRING", product_id),
+            job_config=bigquery.QueryJobConfig(
+        query_parameters=[
+                bigquery.ScalarQueryParameter("pid", "STRING", product_id,
+        location=cfg.bq_location
+    ),
             ])
         ).to_dataframe()
         if not pli_df.empty:
@@ -468,8 +474,11 @@ def place_audit_simple_bet(
             from google.cloud import bigquery
             pli_df2 = sink.query(
                 "SELECT product_leg_id FROM `autobet-470818.autobet.tote_product_selections` WHERE product_id=@pid AND selection_id=@sid LIMIT 1",
-                job_config=bigquery.QueryJobConfig(query_parameters=[
-                    bigquery.ScalarQueryParameter("pid", "STRING", product_id),
+                job_config=bigquery.QueryJobConfig(
+        query_parameters=[
+                    bigquery.ScalarQueryParameter("pid", "STRING", product_id,
+        location=cfg.bq_location
+    ),
                     bigquery.ScalarQueryParameter("sid", "STRING", selection_id),
                 ])
             ).to_dataframe()
@@ -1328,8 +1337,11 @@ def refresh_bet_status(sink, *, bet_id: str, post: bool = False) -> Dict[str, An
                 st = None
             if st:
                 from google.cloud import bigquery
-                job_cfg = bigquery.QueryJobConfig(query_parameters=[
-                    bigquery.ScalarQueryParameter("st", "STRING", st),
+                job_cfg = bigquery.QueryJobConfig(
+        query_parameters=[
+                    bigquery.ScalarQueryParameter("st", "STRING", st,
+        location=cfg.bq_location
+    ),
                     bigquery.ScalarQueryParameter("bid", "STRING", bet_id),
                 ])
                 sink.query("UPDATE `autobet-470818.autobet.tote_audit_bets` SET status=@st WHERE bet_id=@bid", job_config=job_cfg)
@@ -1378,8 +1390,11 @@ def sync_bets_from_api(sink, api_data: Dict[str, Any]) -> int:
             status = ((n.get("placement") or {}).get("status"))
             if not bet_tid or not status:
                 continue
-            job_cfg = bigquery.QueryJobConfig(query_parameters=[
-                bigquery.ScalarQueryParameter("tid", "STRING", bet_tid),
+            job_cfg = bigquery.QueryJobConfig(
+        query_parameters=[
+                bigquery.ScalarQueryParameter("tid", "STRING", bet_tid,
+        location=cfg.bq_location
+    ),
                 bigquery.ScalarQueryParameter("st", "STRING", status),
             ])
             sink.query(

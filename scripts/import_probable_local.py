@@ -57,7 +57,9 @@ def _pid_for_event(eid: str) -> str | None:
         client.query(
             sql,
             job_config=bigquery.QueryJobConfig(
-                query_parameters=[bigquery.ScalarQueryParameter("eid", "STRING", eid)]
+        query_parameters=[bigquery.ScalarQueryParameter("eid", "STRING", eid,
+        location=cfg.bq_location
+    )]
             ),
         ).result()
     )

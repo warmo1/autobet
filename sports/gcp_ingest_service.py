@@ -113,7 +113,10 @@ def handle_pubsub() -> tuple[str, int]:
             
             win_prod_df = sink.query(
                 "SELECT product_id FROM `autobet-470818.autobet.tote_products` WHERE event_id = @eid AND bet_type = 'WIN' AND status = 'OPEN' LIMIT 1",
-                job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("eid", "STRING", event_id)])
+                job_config=bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("eid", "STRING", event_id,
+        location=cfg.bq_location
+    )])
             ).to_dataframe()
             if win_prod_df.empty:
                 print(f"No open WIN product found for event {event_id}")
@@ -162,7 +165,10 @@ def handle_pubsub() -> tuple[str, int]:
             
             event_details_df = sink.query(
                 "SELECT start_iso FROM `autobet-470818.autobet.tote_events` WHERE event_id = @eid LIMIT 1",
-                job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("eid", "STRING", event_id)])
+                job_config=bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("eid", "STRING", event_id,
+        location=cfg.bq_location
+    )])
             ).to_dataframe()
             if event_details_df.empty:
                 return (f"Event {event_id} not found in DB", 204)

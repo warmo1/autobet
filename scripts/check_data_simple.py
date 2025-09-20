@@ -6,6 +6,7 @@ Simple data check script to diagnose horse numbers and odds issues.
 import os
 import sys
 from pathlib import Path
+from sports.config import cfg
 
 # Add the project root to Python path
 project_root = Path(__file__).parent.parent
@@ -62,8 +63,10 @@ def check_data_sources():
             """
             
             job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("event_id", "STRING", event_id)
+        query_parameters=[
+                    bigquery.ScalarQueryParameter("event_id", "STRING", event_id,
+        location=cfg.bq_location
+    )
                 ]
             )
             
@@ -94,8 +97,10 @@ def check_data_sources():
             """
             
             job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("event_id", "STRING", event_id)
+        query_parameters=[
+                    bigquery.ScalarQueryParameter("event_id", "STRING", event_id,
+        location=cfg.bq_location
+    )
                 ]
             )
             

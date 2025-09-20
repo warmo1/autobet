@@ -23,6 +23,7 @@ Notes:
 import argparse
 from google.cloud import bigquery
 from pathlib import Path
+from sports.config import cfg
 import sys
 
 # Ensure repo root (containing 'sports') is on sys.path when run as a script
@@ -224,7 +225,10 @@ def main() -> None:
     client.query(DDL_TEMPLATE.format(ds=ds)).result()
 
     # MERGEs
-    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("date", "DATE", args.date)])
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("date", "DATE", args.date,
+        location=cfg.bq_location
+    )])
     for sql in (MERGE_EVENTS, MERGE_PRODUCTS, MERGE_SELECTIONS):
         client.query(sql.format(ds=ds), job_config=job_config).result()
 

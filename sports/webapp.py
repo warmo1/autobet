@@ -748,6 +748,7 @@ def _bq_execute(sql: str, params: Any = None):
     job_config = bigquery.QueryJobConfig(
         default_dataset=f"{cfg.bq_project}.{cfg.bq_dataset}",
         query_parameters=qp,
+        location=cfg.bq_location,
     )
     return db.query(q, job_config=job_config)
 
@@ -860,6 +861,7 @@ def sql_df(*args, **kwargs) -> pd.DataFrame:
         default_dataset=f"{cfg.bq_project}.{cfg.bq_dataset}",
         query_parameters=qp,
         use_query_cache=True,
+        location=cfg.bq_location,
     )
     db = get_db()
     it = db.query(q, job_config=job_config)
