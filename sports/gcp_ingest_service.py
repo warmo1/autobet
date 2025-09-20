@@ -175,11 +175,28 @@ def handle_pubsub() -> tuple[str, int]:
 
         elif task == "cleanup_bq_temps":
             try:
-                older = payload.get("older_than_days") or payload.get("older_days") or 7
-                deleted = sink.cleanup_temp_tables(prefix="_tmp_", older_than_days=int(older))
-                metrics = {"deleted_tmp_tables": int(deleted)}
-                print(f"Temp table cleanup: deleted={deleted} older_than_days={older}")
+                # Handle different parameter names and provide sensible defaults
+                older = payload.get("older_than_days") or payload.get("older_days") or payload.get("older") or 1
+                older = int(older) if older is not None else 1
+                
+                # Count tables before cleanup for better logging
+                client = sink._client_obj()
+                ds_ref = sink._bq.DatasetReference(sink.project, sink.dataset)
+                temp_tables_before = [tbl.table_id for tbl in client.list_tables(ds_ref) if tbl.table_id.startswith("_tmp_")]
+                
+                deleted = sink.cleanup_temp_tables(prefix="_tmp_", older_than_days=older)
+                temp_tables_after = [tbl.table_id for tbl in client.list_tables(ds_ref) if tbl.table_id.startswith("_tmp_")]
+                
+                metrics = {
+                    "deleted_tmp_tables": int(deleted),
+                    "tables_before": len(temp_tables_before),
+                    "tables_after": len(temp_tables_after),
+                    "older_than_days": older
+                }
+                print(f"Temp table cleanup: deleted={deleted} older_than_days={older} (before={len(temp_tables_before)}, after={len(temp_tables_after)})")
             except Exception as e:
+                print(f"Error during temp table cleanup: {e}")
+                metrics = {"cleanup_error": str(e)}
                 raise
 
         else:

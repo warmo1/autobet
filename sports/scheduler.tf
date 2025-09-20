@@ -275,16 +275,30 @@ resource "google_cloud_scheduler_job" "fast_cache_refresh" {
   }
 }
 
-# Weekly cleanup of temporary BigQuery tables (_tmp_*) via Pub/Sub
+# Daily cleanup of temporary BigQuery tables (_tmp_*) via Pub/Sub
 resource "google_cloud_scheduler_job" "bq_tmp_cleanup" {
   name             = "bq-tmp-cleanup"
-  description      = "Deletes leftover _tmp_ tables in BigQuery dataset"
-  schedule         = "0 3 * * 0" # Sundays at 03:00
+  description      = "Deletes leftover _tmp_ tables in BigQuery dataset (daily)"
+  schedule         = "0 2 * * *" # Every day at 02:00
   time_zone        = "Europe/London"
   attempt_deadline = "120s"
 
   pubsub_target {
     topic_name = google_pubsub_topic.ingest_jobs_topic.id
     data       = base64encode("{\"task\": \"cleanup_bq_temps\", \"older_than_days\": 1}")
+  }
+}
+
+# Hourly aggressive cleanup during peak hours to prevent accumulation
+resource "google_cloud_scheduler_job" "bq_tmp_cleanup_aggressive" {
+  name             = "bq-tmp-cleanup-aggressive"
+  description      = "Aggressive cleanup of _tmp_ tables during peak hours"
+  schedule         = "0 7-22 * * *" # Every hour from 7 AM to 10 PM
+  time_zone        = "Europe/London"
+  attempt_deadline = "60s"
+
+  pubsub_target {
+    topic_name = google_pubsub_topic.ingest_jobs_topic.id
+    data       = base64encode("{\"task\": \"cleanup_bq_temps\", \"older_than_days\": 0}")
   }
 }

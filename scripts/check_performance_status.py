@@ -53,9 +53,9 @@ def check_performance_status() -> Dict[str, Any]:
           venue,
           start_iso,
           status,
-          minutes_since_start
+          minutes_until_start
         FROM `autobet-470818.autobet.vw_races_should_be_closed`
-        ORDER BY minutes_since_start DESC
+        ORDER BY minutes_until_start DESC
         LIMIT 10
         """
         closed_df = sink.query(should_be_closed_sql).to_dataframe()
@@ -69,7 +69,7 @@ def check_performance_status() -> Dict[str, Any]:
           venue,
           start_iso,
           status,
-          minutes_since_start
+          minutes_until_start
         FROM `autobet-470818.autobet.vw_races_should_be_open`
         ORDER BY start_iso ASC
         LIMIT 10

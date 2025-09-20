@@ -75,14 +75,16 @@ class BigQuerySink:
             job_config = self._bq.QueryJobConfig(
                 default_dataset=self._default_dataset,
                 use_query_cache=True,
+                location=self.location,
             )
         elif getattr(job_config, "default_dataset", None) in (None, ""):
             # Preserve provided config but add default dataset for convenience
             job_config.default_dataset = self._default_dataset
         if getattr(job_config, "use_query_cache", None) is None:
             job_config.use_query_cache = True
-        # Note: location is handled by the client, not the job_config
-        return client.query(sql, job_config=job_config, location=self.location, **kwargs).result()
+        if getattr(job_config, "location", None) is None:
+            job_config.location = self.location
+        return client.query(sql, job_config=job_config, **kwargs).result()
 
     def query_dataframe(self, sql: str, **kwargs):
         """Run a query and return the result as a pandas DataFrame."""
